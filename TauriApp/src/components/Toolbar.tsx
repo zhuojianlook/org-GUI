@@ -137,6 +137,13 @@ export default function Toolbar() {
       </button>
 
       <div style={{ flex: 1 }} />
+      <button
+        onClick={() => window.dispatchEvent(new CustomEvent("orggui:openSetup"))}
+        title="Set up / re-install Emacs + Doom Emacs prerequisites"
+        style={btn}
+      >
+        ⚙ Setup
+      </button>
       <span style={{ fontSize: 12, color: "var(--c-text-dim)" }}>
         {doc?.title || (file ? file.split("/").pop() : "No file open")}
       </span>

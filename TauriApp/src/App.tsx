@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Toolbar from "./components/Toolbar";
@@ -7,6 +7,7 @@ import DetailPanel from "./components/DetailPanel";
 import EmacsTerminal from "./components/EmacsTerminal";
 import AgendaPanel from "./components/AgendaPanel";
 import TimelineBand from "./components/TimelineBand";
+import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
 import { useOrgStore, lastOpenedFile } from "./store/useOrgStore";
 import { IN_TAURI } from "./api/org";
 
@@ -19,6 +20,8 @@ export default function App() {
   const loadFile = useOrgStore((s) => s.loadFile);
   const addHeading = useOrgStore((s) => s.addHeading);
 
+  const [showSetup, setShowSetup] = useState(false);
+
   useEffect(() => {
     checkEmacs();
     // Browser preview: there's no file dialog, so load the embedded demo.
@@ -29,6 +32,15 @@ export default function App() {
     // Desktop: reopen the file from the last session, if any.
     const last = lastOpenedFile();
     if (last) loadFile(last);
+    // Auto-open the Setup modal on first launch if Emacs or Doom is missing.
+    (async () => {
+      const s = await fetchPrereqStatus();
+      if (s && (!s.emacs_installed || !s.doom_installed)) setShowSetup(true);
+    })();
+    // Toolbar's Setup button asks us to open the modal on demand.
+    const onOpen = () => setShowSetup(true);
+    window.addEventListener("orggui:openSetup", onOpen);
+    return () => window.removeEventListener("orggui:openSetup", onOpen);
   }, [checkEmacs, loadFile]);
 
   const pickFile = async () => {
@@ -129,6 +141,7 @@ export default function App() {
           </div>
         )}
       </div>
+      {showSetup && <PrereqsModal onClose={() => setShowSetup(false)} />}
     </div>
   );
 }

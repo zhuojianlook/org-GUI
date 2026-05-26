@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use base64::Engine;
@@ -38,6 +39,164 @@ struct TermData {
 struct UpdateProgress {
     downloaded: u64,
     total: Option<u64>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct PrereqStatus {
+    platform: String,
+    emacs_installed: bool,
+    emacsclient_path: Option<String>,
+    homebrew_installed: bool,
+    doom_dir: Option<String>,
+    doom_installed: bool,
+    can_auto_install: bool,
+}
+
+fn home_dir() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
+}
+
+/// Look up an executable on $PATH (returns the absolute path if found).
+fn find_in_path(bin: &str) -> Option<String> {
+    let path = std::env::var("PATH").ok()?;
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    for dir in path.split(sep) {
+        if dir.is_empty() { continue; }
+        let p = std::path::Path::new(dir).join(bin);
+        if p.exists() {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Detect Doom Emacs install location (XDG first, then legacy ~/.emacs.d).
+fn detect_doom_dir() -> Option<String> {
+    let h = home_dir();
+    for c in [format!("{h}/.config/emacs"), format!("{h}/.emacs.d")] {
+        if std::path::Path::new(&format!("{c}/bin/doom")).exists() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// Detection state for the Setup modal: which prerequisites are present on
+/// this machine and whether the in-app installer can handle this platform.
+#[tauri::command]
+fn check_prereqs() -> PrereqStatus {
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unknown"
+    }
+    .to_string();
+
+    let emacsclient = find_in_path("emacsclient").or_else(|| {
+        ["/opt/homebrew/bin/emacsclient",
+         "/usr/local/bin/emacsclient",
+         "/usr/bin/emacsclient",
+         "/Applications/Emacs.app/Contents/MacOS/bin/emacsclient"]
+            .into_iter()
+            .find(|c| std::path::Path::new(c).exists())
+            .map(|s| s.to_string())
+    });
+    let emacs_installed = emacsclient.is_some() || find_in_path("emacs").is_some();
+
+    let homebrew_installed = std::path::Path::new("/opt/homebrew/bin/brew").exists()
+        || std::path::Path::new("/usr/local/bin/brew").exists();
+
+    let doom_dir = detect_doom_dir();
+    let doom_installed = doom_dir.is_some();
+
+    let can_auto_install = matches!(platform.as_str(), "macos" | "linux");
+
+    PrereqStatus {
+        platform,
+        emacs_installed,
+        emacsclient_path: emacsclient,
+        homebrew_installed,
+        doom_dir,
+        doom_installed,
+        can_auto_install,
+    }
+}
+
+const INSTALL_SCRIPT_MACOS: &str = include_str!("../scripts/install-prereqs-macos.sh");
+const INSTALL_SCRIPT_LINUX: &str = include_str!("../scripts/install-prereqs-linux.sh");
+
+/// One-click installer: writes the platform script to a temp file, runs it,
+/// and streams each output line to the frontend as an `install://log` event.
+/// Emits `install://done` on success, `install://error` on failure.
+#[tauri::command]
+async fn install_prereqs(app: tauri::AppHandle) -> Result<String, String> {
+    let script = if cfg!(target_os = "macos") {
+        INSTALL_SCRIPT_MACOS
+    } else if cfg!(target_os = "linux") {
+        INSTALL_SCRIPT_LINUX
+    } else {
+        return Err("Automatic install isn't supported on this platform yet. Please install Emacs (and optionally Doom Emacs) manually.".to_string());
+    };
+
+    let tmp = std::env::temp_dir().join("orggui-install-prereqs.sh");
+    std::fs::write(&tmp, script).map_err(|e| format!("Could not write installer script: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&tmp).map_err(|e| e.to_string())?.permissions();
+        perms.set_mode(0o755);
+        let _ = std::fs::set_permissions(&tmp, perms);
+    }
+
+    let app_clone = app.clone();
+    let tmp_for_blk = tmp.clone();
+    let result: Result<String, String> = tauri::async_runtime::spawn_blocking(move || {
+        let mut child = Command::new("/bin/bash")
+            .arg(&tmp_for_blk)
+            // Make sure the script's PATH includes Homebrew even before brew
+            // is in the user's shell rc files.
+            .env("PATH", format!("/opt/homebrew/bin:/usr/local/bin:{}",
+                std::env::var("PATH").unwrap_or_default()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Could not start installer: {e}"))?;
+
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+        let app_out = app_clone.clone();
+        let app_err = app_clone.clone();
+        let t_out = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = app_out.emit("install://log", line);
+            }
+        });
+        let t_err = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let _ = app_err.emit("install://log", format!("⚠ {line}"));
+            }
+        });
+        let status = child.wait().map_err(|e| format!("wait failed: {e}"))?;
+        let _ = t_out.join();
+        let _ = t_err.join();
+
+        if status.success() {
+            let _ = app_clone.emit::<()>("install://done", ());
+            Ok("ok".to_string())
+        } else {
+            let msg = format!("Installer exited with status {status}");
+            let _ = app_clone.emit("install://error", msg.clone());
+            Err(msg)
+        }
+    })
+    .await
+    .map_err(|e| format!("Join error: {e}"))?;
+
+    result
 }
 
 /// Resolve the `emacsclient` executable. macOS GUI apps inherit a minimal
@@ -360,6 +519,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             org_call,
+            check_prereqs,
+            install_prereqs,
             download_and_install_update,
             emacs_term_open,
             emacs_term_write,
