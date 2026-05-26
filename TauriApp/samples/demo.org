@@ -1,0 +1,48 @@
+#+TITLE: org-GUI Demo
+#+CATEGORY: Demo
+
+* PROJ Thesis [2/3]
+:PROPERTIES:
+:ID:       thesis-root
+:END:
+Top-level project spanning the year.
+** DONE Literature review
+SCHEDULED: <2026-01-10 Sat> DEADLINE: <2026-02-01 Sun> CLOSED: [2026-01-28 Wed 14:00]
+:PROPERTIES:
+:ID:       lit-review
+:END:
+Read the key papers.
+** DONE Pilot experiment
+SCHEDULED: <2026-02-15 Sun>
+:PROPERTIES:
+:ID:       pilot
+:END:
+*** DONE Order reagents
+DEADLINE: <2026-02-10 Tue>
+*** DONE Run pilot plates
+SCHEDULED: <2026-02-18 Wed>
+** TODO [#A] Main experiments :wetlab:
+SCHEDULED: <2026-06-01 Mon> DEADLINE: <2026-08-30 Sun>
+:PROPERTIES:
+:ID:       main-exp
+:END:
+*** TODO Batch 1
+SCHEDULED: <2026-06-01 Mon>
+*** TODO Batch 2
+SCHEDULED: <2026-07-01 Wed>
+*** STRT Batch 3
+SCHEDULED: <2026-08-01 Sat>
+* TODO [#B] Paper :writing:
+:PROPERTIES:
+:ID:       paper-root
+:END:
+** TODO Draft introduction
+DEADLINE: <2026-09-15 Tue>
+** TODO Figures
+SCHEDULED: <2026-09-20 Sun>
+** TODO Submit
+DEADLINE: <2026-10-31 Sat>
+* Ideas
+Unscheduled bucket - no timestamps here.
+** Maybe a follow-up grant
+** Collaboration with imaging core

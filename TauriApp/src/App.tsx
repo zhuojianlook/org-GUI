@@ -1,0 +1,196 @@
+import { useEffect } from "react";
+import { ReactFlowProvider } from "@xyflow/react";
+import { open } from "@tauri-apps/plugin-dialog";
+import Toolbar from "./components/Toolbar";
+import TimelineGraph from "./components/TimelineGraph";
+import DetailPanel from "./components/DetailPanel";
+import EmacsTerminal from "./components/EmacsTerminal";
+import AgendaPanel from "./components/AgendaPanel";
+import TimelineBand from "./components/TimelineBand";
+import { useOrgStore, lastOpenedFile } from "./store/useOrgStore";
+import { IN_TAURI } from "./api/org";
+
+export default function App() {
+  const doc = useOrgStore((s) => s.doc);
+  const error = useOrgStore((s) => s.error);
+  const panel = useOrgStore((s) => s.panel);
+  const setPanel = useOrgStore((s) => s.setPanel);
+  const checkEmacs = useOrgStore((s) => s.checkEmacs);
+  const loadFile = useOrgStore((s) => s.loadFile);
+  const addHeading = useOrgStore((s) => s.addHeading);
+
+  useEffect(() => {
+    checkEmacs();
+    // Browser preview: there's no file dialog, so load the embedded demo.
+    if (!IN_TAURI) {
+      loadFile("demo.org");
+      return;
+    }
+    // Desktop: reopen the file from the last session, if any.
+    const last = lastOpenedFile();
+    if (last) loadFile(last);
+  }, [checkEmacs, loadFile]);
+
+  const pickFile = async () => {
+    if (!IN_TAURI) {
+      await loadFile("demo.org");
+      return;
+    }
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Org files", extensions: ["org"] }],
+    });
+    if (typeof selected === "string") await loadFile(selected);
+  };
+
+  return (
+    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <Toolbar />
+      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+        {/* Left column: milestone timeline band on top, graph below */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+          {doc && (
+            <div style={{ flex: "0 0 26%", minHeight: 120, maxHeight: 240, position: "relative", minWidth: 0 }}>
+              <TimelineBand />
+            </div>
+          )}
+          <div style={{ flex: 1, position: "relative", minWidth: 0 }}>
+          {doc ? (
+            <>
+              <ReactFlowProvider>
+                <TimelineGraph />
+              </ReactFlowProvider>
+              {doc.nodes.length === 0 && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 14,
+                    pointerEvents: "none",
+                    color: "var(--c-text-dim)",
+                  }}
+                >
+                  <div style={{ fontSize: 16 }}>
+                    {doc.title ? `"${doc.title}" is empty` : "Empty file"} — add your first heading
+                  </div>
+                  <button
+                    onClick={() => addHeading(0, "New heading")}
+                    style={{
+                      pointerEvents: "auto",
+                      background: "var(--c-accent)",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: 8,
+                      padding: "10px 20px",
+                      fontSize: 14,
+                      cursor: "pointer",
+                    }}
+                  >
+                    + Add heading
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <EmptyState onOpen={pickFile} error={error} />
+          )}
+          </div>
+        </div>
+
+        {/* Right region: the pulled-out panel (Emacs / Agenda), or node details. */}
+        {doc && panel ? (
+          <div
+            style={{
+              width: panel === "emacs" ? 560 : 620,
+              flexShrink: 0,
+              borderLeft: "1px solid var(--c-border)",
+              background: "var(--c-surface)",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+            }}
+          >
+            {panel === "emacs" ? <EmacsTerminal /> : <AgendaPanel />}
+          </div>
+        ) : (
+          <DetailPanel />
+        )}
+
+        {/* Vertical tab rail on the far right to pull panels in/out. */}
+        {doc && (
+          <div style={{ display: "flex", flexDirection: "column", flexShrink: 0, borderLeft: "1px solid var(--c-border)", background: "var(--c-surface)" }}>
+            <TabRailButton label="Agenda" active={panel === "agenda"} onClick={() => setPanel(panel === "agenda" ? null : "agenda")} />
+            <TabRailButton label="Emacs" active={panel === "emacs"} onClick={() => setPanel(panel === "emacs" ? null : "emacs")} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TabRailButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      title={active ? `Close ${label}` : `Open ${label}`}
+      style={{
+        writingMode: "vertical-rl",
+        textOrientation: "mixed",
+        padding: "16px 9px",
+        border: "none",
+        borderBottom: "1px solid var(--c-border)",
+        background: active ? "var(--c-accent)" : "transparent",
+        color: active ? "#fff" : "var(--c-text-dim)",
+        fontSize: 12,
+        fontWeight: 600,
+        letterSpacing: 1.5,
+        cursor: "pointer",
+        flexShrink: 0,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function EmptyState({ onOpen, error }: { onOpen: () => void; error: string | null }) {
+  return (
+    <div
+      style={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 16,
+        color: "var(--c-text-dim)",
+      }}
+    >
+      <div style={{ fontSize: 18 }}>Open an .org file to visualize it on a timeline</div>
+      <button
+        onClick={onOpen}
+        style={{
+          background: "var(--c-accent)",
+          color: "#fff",
+          border: "none",
+          borderRadius: 8,
+          padding: "10px 20px",
+          fontSize: 14,
+          cursor: "pointer",
+        }}
+      >
+        Open .org…
+      </button>
+      {error && (
+        <div style={{ color: "var(--c-red)", maxWidth: 480, textAlign: "center", fontSize: 12 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,204 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'      # stable releases
+      - 'exp-*'   # experimental releases
+  workflow_dispatch:
+
+jobs:
+  build-tauri:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon
+            triple: aarch64-apple-darwin
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend deps
+        working-directory: TauriApp
+        run: npm ci
+
+      # `npx tauri build` runs the configured beforeBuildCommand (npm run
+      # build) to produce the frontend, then bundles + signs the updater
+      # artifacts using the TAURI_SIGNING_* secrets.
+      - name: Build Tauri (with updater signing)
+        working-directory: TauriApp
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build
+
+      # No Apple Developer ID here — Tauri ad-hoc signs the macOS app by
+      # default. Rebuild the DMG so it contains the (ad-hoc signed) app plus
+      # an /Applications drag-install symlink.
+      - name: Ad-hoc sign macOS app and rebuild DMG
+        if: runner.os == 'macOS'
+        run: |
+          set -e
+          APP_PATH=$(find TauriApp/src-tauri/target/release/bundle/macos -maxdepth 1 -name "*.app")
+          codesign --force --deep -s - "$APP_PATH"
+          codesign --verify "$APP_PATH" && echo "Signature valid"
+          DMG_PATH=$(find TauriApp/src-tauri/target/release/bundle/dmg -maxdepth 1 -name "*.dmg")
+          DMG_NAME=$(basename "$DMG_PATH")
+          rm "$DMG_PATH"
+          STAGE=$(mktemp -d)
+          cp -R "$APP_PATH" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "org-GUI" -srcfolder "$STAGE" -ov -format UDZO "TauriApp/src-tauri/target/release/bundle/dmg/$DMG_NAME"
+          rm -rf "$STAGE"
+        shell: bash
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.triple }}
+          path: |
+            TauriApp/src-tauri/target/release/bundle/dmg/*.dmg
+            TauriApp/src-tauri/target/release/bundle/nsis/*.exe
+            TauriApp/src-tauri/target/release/bundle/nsis/*.exe.sig
+            TauriApp/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            TauriApp/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+
+  create-release:
+    needs: build-tauri
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/exp-')
+    # Serialize updater-branch writes so parallel tag pushes don't race and
+    # force-push a stale manifest over a newer one.
+    concurrency:
+      group: updater-branch-write
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: List artifacts
+        run: find artifacts/ -type f | sort
+
+      - name: Generate updater manifest
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == exp-* ]]; then
+            CHANNEL="experimental"; VERSION="${TAG#exp-}"; MANIFEST_NAME="latest-experimental.json"
+          else
+            CHANNEL="stable"; VERSION="${TAG#v}"; MANIFEST_NAME="latest.json"
+          fi
+          echo "Channel: $CHANNEL, Version: $VERSION, Tag: $TAG"
+          REPO="zhuojianlook/org-GUI"
+
+          WIN_SIG=$(find artifacts/ -name "*.exe.sig" | head -1)
+          MAC_SIG=$(find artifacts/ -name "*.app.tar.gz.sig" | head -1)
+          WIN_SIGNATURE=""; MAC_SIGNATURE=""
+          [ -f "$WIN_SIG" ] && WIN_SIGNATURE=$(cat "$WIN_SIG")
+          [ -f "$MAC_SIG" ] && MAC_SIGNATURE=$(cat "$MAC_SIG")
+
+          WIN_EXE=$(find artifacts/ -name "*-setup.exe" | head -1)
+          MAC_TAR=$(find artifacts/ -name "*.app.tar.gz" ! -name "*.sig" | head -1)
+          WIN_NAME=$(basename "$WIN_EXE" 2>/dev/null || echo "")
+          MAC_NAME=$(basename "$MAC_TAR" 2>/dev/null || echo "")
+          # GitHub replaces spaces with dots in release asset names.
+          WIN_NAME_GH=$(echo "$WIN_NAME" | tr ' ' '.')
+          MAC_NAME_GH=$(echo "$MAC_NAME" | tr ' ' '.')
+
+          cat > "artifacts/${MANIFEST_NAME}" << ENDJSON
+          {
+            "version": "${VERSION}",
+            "notes": "Update to ${TAG}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "${WIN_SIGNATURE}",
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/${WIN_NAME_GH}"
+              },
+              "darwin-aarch64": {
+                "signature": "${MAC_SIGNATURE}",
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/${MAC_NAME_GH}"
+              }
+            }
+          }
+          ENDJSON
+          echo "Generated ${MANIFEST_NAME}:"; cat "artifacts/${MANIFEST_NAME}"
+
+      - name: Push manifest to updater branch
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == exp-* ]]; then
+            VERSION="${TAG#exp-}"; MANIFEST="latest-experimental.json"
+          else
+            VERSION="${TAG#v}"; MANIFEST="latest.json"
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin updater:updater-local 2>/dev/null || true
+          if git rev-parse --verify updater-local >/dev/null 2>&1; then
+            git checkout updater-local
+          else
+            git checkout --orphan updater-local
+            git rm -rf . 2>/dev/null || true
+          fi
+          # Downgrade guard: refuse to overwrite a newer manifest (out-of-order pushes).
+          if [ -f "$MANIFEST" ]; then
+            REMOTE_VER=$(python3 -c "import json;print(json.load(open('$MANIFEST')).get('version',''))" 2>/dev/null || echo "")
+            if [ -n "$REMOTE_VER" ]; then
+              NEWER=$(python3 -c "r=tuple(int(x) for x in '$REMOTE_VER'.split('.') if x.isdigit());v=tuple(int(x) for x in '$VERSION'.split('.') if x.isdigit());print('1' if r>v else '0')")
+              if [ "$NEWER" = "1" ]; then echo "Remote $REMOTE_VER newer than $VERSION — skipping."; exit 0; fi
+            fi
+          fi
+          cp "artifacts/${MANIFEST}" "${MANIFEST}"
+          git add "${MANIFEST}"
+          git commit -m "Update manifest for ${TAG}" --allow-empty
+          git push origin updater-local:updater --force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate release notes from git log
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == exp-* ]]; then PATTERN='exp-*'; else PATTERN='v*'; fi
+          PREV_TAG=$(git tag -l "$PATTERN" --sort=-v:refname | grep -vx "$TAG" | head -1)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${TAG}"
+            COMPARE_LINE="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
+          else
+            RANGE="$TAG"; COMPARE_LINE=""
+          fi
+          BULLETS=$(git log --no-merges --pretty=format:'* %s' "$RANGE" \
+            | grep -vE '^\* (Merge|Co-Authored-By)' | grep -vE '^\*\s*$' || true)
+          [ -z "$BULLETS" ] && BULLETS="* Release ${TAG}"
+          {
+            echo "body<<ORG_NOTES_EOF"
+            echo "$BULLETS"
+            [ -n "$COMPARE_LINE" ] && { echo ""; echo "$COMPARE_LINE"; }
+            echo "ORG_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/release-*/**/*.dmg
+            artifacts/release-*/**/*-setup.exe
+            artifacts/release-*/**/*.app.tar.gz
+            artifacts/release-*/**/*.sig
+            artifacts/latest*.json
+          body: ${{ steps.notes.outputs.body }}
+          prerelease: ${{ startsWith(github.ref, 'refs/tags/exp-') }}
