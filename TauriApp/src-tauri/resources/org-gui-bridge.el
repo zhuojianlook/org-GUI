@@ -73,6 +73,7 @@ planning lines and property drawers."
                  (line-beginning-position) (line-end-position))))
          (category (org-get-category))
          (deps-raw (org-entry-get nil "DEPENDS_ON"))
+         (deadline-color (org-entry-get nil "DEADLINE_COLOR"))
          (body (org-gui--entry-body)))
     (list
      (cons 'id id)
@@ -96,6 +97,7 @@ planning lines and property drawers."
      (cons 'category (org-gui--s category))
      (cons 'orgId (org-gui--s org-id))
      (cons 'dependsOn (vconcat (and deps-raw (split-string deps-raw "[ ]+" t))))
+     (cons 'deadlineColor (org-gui--s deadline-color))
      (cons 'body (org-gui--s body)))))
 
 (defun org-gui--collect-nodes ()
@@ -257,6 +259,17 @@ or remove it when DATE is empty."
      (if (string-empty-p prio)
          (org-priority 'remove)
        (org-priority (string-to-char prio))))))
+
+(defun org-gui-set-deadline-color (file begin color)
+  "Set the :DEADLINE_COLOR: property on the heading at BEGIN, or clear it when
+COLOR is empty. The GUI uses this CSS color to tint the deadline badge and the
+matching tick on the milestone timeline."
+  (org-gui--with-heading
+   file begin
+   (lambda ()
+     (if (string-empty-p color)
+         (org-entry-delete nil "DEADLINE_COLOR")
+       (org-entry-put nil "DEADLINE_COLOR" color)))))
 
 (defun org-gui-archive (file begin)
   "Archive the subtree at BEGIN by moving it to FILE_archive (org's default
@@ -620,6 +633,58 @@ Returns the freshly parsed document."
        (org-back-to-heading t)
        (org-cut-subtree)
        (org-gui--refresh-cookies)) ; parent loses a slot
+      (save-buffer)
+      (org-gui--doc-json file))))
+
+(defun org-gui-set-body (file begin body)
+  "Replace the body of the entry at BEGIN with BODY, leaving the heading,
+planning lines, and property drawer intact. Used by the inline table editor
+to round-trip cell edits back to the org file without disturbing children."
+  (let ((begin (org-gui--num begin)))
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (goto-char (min begin (point-max)))
+       (org-back-to-heading t)
+       (let ((next (save-excursion (if (outline-next-heading) (point) (point-max)))))
+         (org-end-of-meta-data t)
+         (let ((start (min (point) next)))
+           (delete-region start next)
+           (goto-char start)
+           (let ((trimmed (string-trim-right (or body ""))))
+             (when (> (length trimmed) 0)
+               (insert trimmed)
+               (unless (bolp) (insert "\n"))))))
+       (org-gui--refresh-cookies))
+      (save-buffer)
+      (org-gui--doc-json file))))
+
+(defun org-gui-add-table-child (file parent-begin)
+  "Add a child heading 'Table' under PARENT-BEGIN containing a small starter
+org-mode table. When PARENT-BEGIN is 0, the heading goes at top level. The
+table syntax is minimally valid; Emacs aligns it on first TAB inside it."
+  (let ((parent-begin (org-gui--num parent-begin))
+        (table "| Col 1 | Col 2 | Col 3 |\n|-------+-------+-------|\n|       |       |       |\n|       |       |       |\n"))
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (if (> parent-begin 0)
+           (let (lvl parent-line)
+             (goto-char (min parent-begin (point-max)))
+             (org-back-to-heading t)
+             (setq lvl (org-current-level))
+             (setq parent-line (buffer-substring-no-properties
+                                (line-beginning-position) (line-end-position)))
+             (org-end-of-subtree t t)
+             (unless (bolp) (insert "\n"))
+             ;; Match org-gui-add-heading: if the parent tracks progress with a
+             ;; cookie, make the new child a TODO so it's actually counted.
+             (insert (make-string (1+ lvl) ?*) " "
+                     (if (org-gui--has-cookie-p parent-line) "TODO " "")
+                     "Table\n" table))
+         (progn
+           (goto-char (point-max))
+           (unless (bolp) (insert "\n"))
+           (insert "* Table\n" table)))
+       (org-gui--refresh-cookies))
       (save-buffer)
       (org-gui--doc-json file))))
 

@@ -28,6 +28,8 @@ export interface OrgNode {
   category: string | null;
   orgId: string | null;
   dependsOn: string[]; // org IDs of prerequisite nodes (this node depends on them)
+  /** Optional CSS color from :DEADLINE_COLOR: property, overriding the default red. */
+  deadlineColor: string | null;
   body: string | null;
 }
 
@@ -331,6 +333,7 @@ function mockMutate(func: string, begin: number, value: string): OrgDoc {
       case "org-gui-set-deadline": n.deadline = value || null; break;
       case "org-gui-set-priority": n.priority = value || null; break;
       case "org-gui-set-tags": n.tags = value.split(/[ :]+/).filter(Boolean); break;
+      case "org-gui-set-deadline-color": n.deadlineColor = value || null; break;
       case "org-gui-set-raw": {
         const p = parseRawHeadline(value, doc.todoKeywords);
         n.level = p.level;
@@ -354,7 +357,7 @@ function emptyNode(begin: number, level: number, parent: string | null, title: s
     scheduled: null, deadline: null, closed: null, timestamp: null,
     rawScheduled: null, rawDeadline: null, rawClosed: null,
     raw: `${"*".repeat(level)} ${title}`,
-    category: "Demo", orgId: null, dependsOn: [], body: null,
+    category: "Demo", orgId: null, dependsOn: [], deadlineColor: null, body: null,
   };
 }
 
@@ -394,6 +397,28 @@ function mockAdd(parentBegin: number, title: string): OrgDoc {
   if (asTodo) node.todo = "TODO";
   doc.nodes.splice(insertIdx, 0, node);
   recompute(doc);
+  return structuredClone(doc);
+}
+
+function mockSetBody(begin: number, body: string): OrgDoc {
+  const doc = ensureMock();
+  const n = doc.nodes.find((x) => x.begin === begin);
+  if (n) {
+    n.body = body || null;
+    recompute(doc);
+  }
+  return structuredClone(doc);
+}
+
+function mockAddTableChild(parentBegin: number): OrgDoc {
+  const doc = mockAdd(parentBegin, "Table");
+  // The just-added child is the last one whose title === "Table"; give it a starter table body.
+  const matches = doc.nodes.filter((n) => n.title === "Table");
+  const created = matches[matches.length - 1];
+  if (created) {
+    created.body = "| Col 1 | Col 2 | Col 3 |\n|-------+-------+-------|\n|       |       |       |\n|       |       |       |";
+    recompute(doc);
+  }
   return structuredClone(doc);
 }
 
@@ -608,6 +633,7 @@ export const setDeadline = mutator("org-gui-set-deadline");
 export const setPriority = mutator("org-gui-set-priority");
 export const setTags = mutator("org-gui-set-tags");
 export const setRaw = mutator("org-gui-set-raw");
+export const setDeadlineColor = mutator("org-gui-set-deadline-color");
 
 /** Start a task: set STRT + schedule today (one round-trip). */
 export const startTask = (file: string, begin: number) =>
@@ -684,6 +710,18 @@ export const toggleCheckbox = (file: string, begin: number, index: number) =>
   IN_TAURI
     ? orgCall<OrgDoc>("org-gui-toggle-checkbox", [file, String(begin), String(index)])
     : Promise.resolve(mockToggleCheckbox(begin, index));
+
+/** Replace just the body of a node (between metadata and next heading). */
+export const setBody = (file: string, begin: number, body: string) =>
+  IN_TAURI
+    ? orgCall<OrgDoc>("org-gui-set-body", [file, String(begin), body])
+    : Promise.resolve(mockSetBody(begin, body));
+
+/** Create a child heading "Table" under PARENT with a 3-col starter table. */
+export const addTableChild = (file: string, parentBegin: number) =>
+  IN_TAURI
+    ? orgCall<OrgDoc>("org-gui-add-table-child", [file, String(parentBegin)])
+    : Promise.resolve(mockAddTableChild(parentBegin));
 
 /** Add a dependency edge: TO depends on FROM (arrow points FROM → TO). */
 export const addDependency = (file: string, fromBegin: number, toBegin: number) =>

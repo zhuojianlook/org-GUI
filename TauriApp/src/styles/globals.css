@@ -74,3 +74,55 @@ body {
 .deadline-flash {
   animation: deadline-flash 1s ease-in-out infinite;
 }
+
+/* Brief pulse to highlight a node that was just focused from the timeline. */
+@keyframes node-flash {
+  0% {
+    box-shadow: 0 0 0 2px #ffd166, 0 0 32px 8px #ffd166cc;
+  }
+  60% {
+    box-shadow: 0 0 0 2px #ffd166, 0 0 18px 4px #ffd16688;
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent, 0 0 0 0 transparent;
+  }
+}
+.node-flash {
+  animation: node-flash 1.4s ease-out 1;
+}
+
+/* Theme-match React Flow's zoom/fit-view controls so they don't pop out as
+   light-mode buttons against the dark canvas. Sized so they line up with the
+   compact minimap (~28px tall buttons in a vertical stack). */
+.react-flow__controls {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.react-flow__controls button {
+  background: var(--c-surface);
+  color: var(--c-text);
+  border: none;
+  border-bottom: 1px solid var(--c-border);
+  width: 28px;
+  height: 28px;
+  fill: var(--c-text);
+}
+.react-flow__controls button:last-child {
+  border-bottom: none;
+}
+.react-flow__controls button:hover {
+  background: var(--c-surface2);
+}
+.react-flow__controls button svg,
+.react-flow__controls button path {
+  fill: var(--c-text);
+}
+
+.react-flow__minimap {
+  /* The actual <svg> inside our themed wrapper — kill its own background so
+     ours (set on the wrapper) shows through. */
+  background: transparent !important;
+}

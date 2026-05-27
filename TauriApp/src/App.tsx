@@ -7,6 +7,7 @@ import DetailPanel from "./components/DetailPanel";
 import EmacsTerminal from "./components/EmacsTerminal";
 import AgendaPanel from "./components/AgendaPanel";
 import TimelineBand from "./components/TimelineBand";
+import ContextMenu from "./components/ContextMenu";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
 import { useOrgStore, lastOpenedFile } from "./store/useOrgStore";
 import { IN_TAURI } from "./api/org";
@@ -142,6 +143,7 @@ export default function App() {
         )}
       </div>
       {showSetup && <PrereqsModal onClose={() => setShowSetup(false)} />}
+      <ContextMenu />
     </div>
   );
 }

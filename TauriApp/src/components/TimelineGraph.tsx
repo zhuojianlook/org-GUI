@@ -38,6 +38,7 @@ type DragState =
 export default function TimelineGraph() {
   const doc = useOrgStore((s) => s.doc);
   const select = useOrgStore((s) => s.select);
+  const flashNode = useOrgStore((s) => s.flashNode);
   const expanded = useOrgStore((s) => s.expanded);
   const rootPositions = useOrgStore((s) => s.rootPositions);
   const setRootPosition = useOrgStore((s) => s.setRootPosition);
@@ -207,6 +208,28 @@ export default function TimelineGraph() {
     };
   }, [depMode, byId, addDependency, canLink, setConnectDrag]);
 
+  // Cross-component focus: the TimelineBand dispatches "orggui:focusNode" when
+  // a date tick is double-clicked. Pan the React Flow viewport to that node and
+  // trigger a brief flash highlight so the eye finds it.
+  useEffect(() => {
+    const onFocus = (e: Event) => {
+      const ce = e as CustomEvent<{ id: string }>;
+      const id = ce.detail?.id;
+      if (!id) return;
+      const node = rf.getNode(id);
+      if (!node) return;
+      const w = (node.width ?? node.measured?.width ?? 220);
+      const h = (node.height ?? node.measured?.height ?? 60);
+      const cx = node.position.x + w / 2;
+      const cy = node.position.y + h / 2;
+      rf.setCenter(cx, cy, { duration: 450, zoom: Math.max(rf.getZoom(), 0.9) });
+      select(id);
+      flashNode(id);
+    };
+    window.addEventListener("orggui:focusNode", onFocus as EventListener);
+    return () => window.removeEventListener("orggui:focusNode", onFocus as EventListener);
+  }, [rf, select, flashNode]);
+
   if (!doc) return null;
 
   const descendantsOf = (id: string): string[] => {
@@ -352,8 +375,16 @@ export default function TimelineGraph() {
           Dependency mode — drag from a prerequisite node onto a dependent to link · click the ✕ on a link to remove
         </div>
       )}
-      <Controls showInteractive={false} />
+      {/* Bottom-right cluster: zoom / fit-view controls just to the left of a
+          compact, theme-matched minimap so the eye doesn't have to cross the
+          canvas to find them. */}
+      <Controls
+        position="bottom-right"
+        showInteractive={false}
+        style={{ right: 158, bottom: 10 }}
+      />
       <MiniMap
+        position="bottom-right"
         pannable
         zoomable
         nodeColor={(n) => {
@@ -361,8 +392,17 @@ export default function TimelineGraph() {
           const view = n.data as OrgNodeView;
           return levelColor(view.org?.level ?? 1);
         }}
-        maskColor="rgba(0,0,0,0.6)"
-        style={{ background: "var(--c-surface)" }}
+        nodeStrokeColor="var(--c-border)"
+        maskColor="rgba(0,0,0,0.55)"
+        style={{
+          width: 140,
+          height: 92,
+          background: "var(--c-surface)",
+          border: "1px solid var(--c-border)",
+          borderRadius: 6,
+          right: 10,
+          bottom: 10,
+        }}
       />
     </ReactFlow>
       {tmpLine &&

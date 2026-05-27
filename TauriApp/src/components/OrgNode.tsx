@@ -3,6 +3,8 @@ import { useOrgStore } from "../store/useOrgStore";
 import { setTodo, incompleteDeps, type OrgNode as OrgNodeT } from "../api/org";
 import type { OrgNodeView } from "../utils/layout";
 import { parseOrgDate, startOfDay } from "../utils/time";
+import { findTableBlocks } from "../utils/orgTable";
+import TableEditor from "./TableEditor";
 
 const LEVEL_COLORS = [
   "#51afef", // 1 blue
@@ -86,7 +88,9 @@ function scheduledSpans(n: OrgNodeT): Span[] {
 
 const MS_DAY = 86_400_000;
 
-/** Relative-day deadline badge: "In Nd" / "Today" / "Nd overdue" (flashing). */
+/** Relative-day deadline badge: "In Nd" / "Today" / "Nd overdue" (flashing).
+ *  A node's :DEADLINE_COLOR: property overrides the default colour for all
+ *  states; "overdue" still flashes regardless. */
 function DeadlineBadge({ n }: { n: OrgNodeT }) {
   if (n.done) return null; // completed: deadline no longer relevant
   const d = parseOrgDate(n.deadline);
@@ -107,6 +111,7 @@ function DeadlineBadge({ n }: { n: OrgNodeT }) {
     color = "#ff6c6b";
     flash = true;
   }
+  if (n.deadlineColor) color = n.deadlineColor;
 
   return (
     <span
@@ -250,10 +255,13 @@ const CHECKBOX_RE = /^(\s*)[-+*]\s+\[([ xX-])\]\s?(.*)$/;
 function Body({ n }: { n: OrgNodeT }) {
   const toggleCheckbox = useOrgStore((s) => s.toggleCheckbox);
   if (!n.body) return null;
+  // Slice the body around any org tables so we can splice in <TableEditor>
+  // blocks. Lines outside tables render as before (checkbox / dimmed text).
+  const tables = findTableBlocks(n.body);
+  const lines = n.body.split("\n");
+  const elements: React.ReactNode[] = [];
   let cb = 0;
-  return (
-    <div style={{ paddingLeft: 12, marginTop: 2, display: "flex", flexDirection: "column" }}>
-      {n.body.split("\n").map((line, i) => {
+  const renderLine = (line: string, i: number): React.ReactNode => {
         const m = line.match(CHECKBOX_RE);
         if (!m) {
           if (line.trim() === "") return <div key={i} style={{ height: 4 }} />;
@@ -302,7 +310,27 @@ function Body({ n }: { n: OrgNodeT }) {
             </span>
           </button>
         );
-      })}
+  };
+
+  // Walk the body line-by-line, inlining a <TableEditor> whenever the cursor
+  // enters a known table block (then skipping past its end-line).
+  let i = 0;
+  let tIdx = 0;
+  while (i < lines.length) {
+    if (tIdx < tables.length && i === tables[tIdx].startLine) {
+      const block = tables[tIdx];
+      elements.push(<TableEditor key={`t${block.startLine}`} node={n} block={block} />);
+      i = block.endLine;
+      tIdx++;
+    } else {
+      elements.push(renderLine(lines[i], i));
+      i++;
+    }
+  }
+
+  return (
+    <div style={{ paddingLeft: 12, marginTop: 2, display: "flex", flexDirection: "column" }}>
+      {elements}
     </div>
   );
 }
@@ -316,12 +344,20 @@ export default function OrgNode({ data }: NodeProps) {
   const selectedId = useOrgStore((s) => s.selectedId);
   const toggleExpand = useOrgStore((s) => s.toggleExpand);
   const editInEmacs = useOrgStore((s) => s.editInEmacs);
+  const openContextMenu = useOrgStore((s) => s.openContextMenu);
   const dropTargetId = useOrgStore((s) => s.dropTargetId);
   const depMode = useOrgStore((s) => s.depMode);
   const isConnectSource = useOrgStore((s) => s.connectFrom === n.id);
   // null = not the hovered target; true/false = hovered & (in)valid drop
   const connectHoverValid = useOrgStore((s) => (s.connectHover === n.id ? s.connectValid : null));
-  const highlighted = useOrgStore((s) => s.highlightIds.includes(n.id));
+  // Depth in the active blocker-highlight chain (undefined when not highlighted,
+  // 1 = direct blocker, 2 = blocker-of-blocker, …). Drives ring intensity.
+  const highlightDepth = useOrgStore((s) => s.highlightDepth.get(n.id));
+  const highlighted = highlightDepth !== undefined;
+  // Falloff: depth 1 -> 1.0, 2 -> 0.65, 3 -> 0.45, 4+ -> 0.30 (clamped).
+  const highlightIntensity =
+    highlightDepth === undefined ? 0 : Math.max(0.3, 1 - 0.25 * (highlightDepth - 1));
+  const flashed = useOrgStore((s) => s.flashId === n.id);
   const doc = useOrgStore((s) => s.doc);
   const todoK = doc?.todoKeywords ?? [];
   const doneK = doc?.doneKeywords ?? [];
@@ -344,21 +380,26 @@ export default function OrgNode({ data }: NodeProps) {
 
   return (
     <div
+      className={flashed ? "node-flash" : undefined}
       onClick={() => select(n.id)}
       onDoubleClick={() => editInEmacs(n)}
-      title="Click to select · double-click to edit this node in Emacs"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        openContextMenu(e.clientX, e.clientY, n.id);
+      }}
+      title="Click to select · double-click to edit in Emacs · right-click for more"
       style={{
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: 12.5,
         lineHeight: 1.5,
         whiteSpace: "pre",
-        background: highlighted ? "rgba(255,209,102,0.14)" : isDropTarget ? "rgba(99,166,106,0.18)" : selected ? `${accent}22` : "var(--c-surface)",
-        border: `1px solid ${connectColor ?? (highlighted ? "#ffd166" : isDropTarget ? "var(--c-green)" : selected ? accent : "var(--c-border)")}`,
+        background: highlighted ? `rgba(255,209,102,${0.14 * highlightIntensity})` : isDropTarget ? "rgba(99,166,106,0.18)" : selected ? `${accent}22` : "var(--c-surface)",
+        border: `1px solid ${connectColor ?? (highlighted ? `rgba(255,209,102,${highlightIntensity})` : isDropTarget ? "var(--c-green)" : selected ? accent : "var(--c-border)")}`,
         borderRadius: 6,
         boxShadow: connectColor
           ? `inset 3px 0 0 ${accent}, 0 0 0 2px ${connectColor}, 0 0 12px ${connectColor}aa`
           : highlighted
-            ? `inset 3px 0 0 ${accent}, 0 0 0 2px #ffd166, 0 0 16px #ffd166cc`
+            ? `inset 3px 0 0 ${accent}, 0 0 0 2px rgba(255,209,102,${highlightIntensity}), 0 0 ${Math.round(16 * highlightIntensity)}px rgba(255,209,102,${0.8 * highlightIntensity})`
             : isDropTarget
               ? `inset 3px 0 0 ${accent}, 0 0 0 2px var(--c-green)`
               : selected

@@ -2,17 +2,25 @@ import { useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useOrgStore } from "../store/useOrgStore";
+import { useOrgStore, type UpdateChannel } from "../store/useOrgStore";
 import { IN_TAURI } from "../api/org";
 
-// Stable-channel updater manifest (matches the endpoint in tauri.conf.json).
-const UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/zhuojianlook/org-GUI/updater/latest.json";
+// Updater manifests, served from the `updater` branch by the release workflow.
+// stable        → v* tags    → latest.json
+// experimental  → exp-* tags → latest-experimental.json
+const MANIFEST_URLS: Record<UpdateChannel, string> = {
+  stable: "https://raw.githubusercontent.com/zhuojianlook/org-GUI/updater/latest.json",
+  experimental:
+    "https://raw.githubusercontent.com/zhuojianlook/org-GUI/updater/latest-experimental.json",
+};
 
 type UpdateState = "idle" | "checking" | "downloading" | "done" | "error";
 
 export default function Toolbar() {
   const { doc, file, loading, error, emacsOk, loadFile, reload, createFile, addHeading, depMode, setDepMode } =
     useOrgStore();
+  const updateChannel = useOrgStore((s) => s.updateChannel);
+  const setUpdateChannel = useOrgStore((s) => s.setUpdateChannel);
   const [updateState, setUpdateState] = useState<UpdateState>("idle");
   const [updatePct, setUpdatePct] = useState(0);
   const [updateMsg, setUpdateMsg] = useState("");
@@ -39,7 +47,7 @@ export default function Toolbar() {
       );
       offFinished = await listen<unknown>("updater://finished", () => setUpdateState("done"));
       const msg = await invoke<string>("download_and_install_update", {
-        manifestUrl: UPDATE_MANIFEST_URL,
+        manifestUrl: MANIFEST_URLS[updateChannel],
       });
       setUpdateState("done");
       setUpdateMsg(msg);
@@ -148,10 +156,25 @@ export default function Toolbar() {
         {doc?.title || (file ? file.split("/").pop() : "No file open")}
       </span>
       {loading && <span style={{ fontSize: 12, color: "var(--c-amber)" }}>Loading…</span>}
+      <select
+        value={updateChannel}
+        onChange={(e) => setUpdateChannel(e.target.value as UpdateChannel)}
+        title="Update channel — Stable ships every v* release; Experimental ships every exp-* release first"
+        style={{
+          ...btn,
+          paddingRight: 18,
+          ...(updateChannel === "experimental"
+            ? { background: "#e0a458", color: "#000", borderColor: "#e0a458", fontWeight: 700 }
+            : {}),
+        }}
+      >
+        <option value="stable">Stable</option>
+        <option value="experimental">Experimental</option>
+      </select>
       <button
         onClick={checkForUpdates}
         disabled={updateState === "checking" || updateState === "downloading"}
-        title={updateMsg || "Check for application updates"}
+        title={updateMsg || `Check for ${updateChannel} updates`}
         style={{
           ...btn,
           ...(updateState === "done"
