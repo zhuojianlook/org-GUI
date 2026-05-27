@@ -260,6 +260,13 @@ interface OrgState {
    * whose intensity falls with depth.
    */
   highlightDepth: Map<string, number>;
+  /**
+   * Prerequisites in that same chain that are already DONE. Rendered with a
+   * green ring instead of gold so the user can see which parts of the
+   * dependency tree are already satisfied at a glance. Walks stop at done
+   * nodes — past dependencies of an already-done node aren't blockers.
+   */
+  highlightDone: Set<string>;
   /** Transient "flash" ring on a single node (used by timeline-double-click focus). */
   flashId: string | null;
   expanded: Set<string>;
@@ -326,6 +333,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   file: null,
   selectedId: null,
   highlightDepth: new Map<string, number>(),
+  highlightDone: new Set<string>(),
   flashId: null,
   expanded: new Set<string>(),
   rootPositions: {},
@@ -418,15 +426,17 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set((s) => ({
       selectedId: id,
       highlightDepth: new Map(),
+      highlightDone: new Set(),
       // The Details drawer has nothing to render with no selection; auto-close
       // it so the user doesn't end up staring at an empty pulled-out panel.
       panel: id === null && s.panel === "details" ? null : s.panel,
     })),
 
   // Clicking a "Blocked" node: emphasise the *transitive* chain of prerequisites
-  // still blocking it. Walks the incomplete-dependency graph breadth-first and
-  // records each ancestor's depth; OrgNode dims its gold ring as depth grows
-  // so the closest blockers stand out and distant ones fade into context.
+  // still blocking it (gold, dimmed by depth), plus the prerequisites already
+  // marked DONE (green) so the user can see at a glance which parts of the
+  // chain are already satisfied. The walk stops at done nodes — past
+  // dependencies of an already-done node aren't blocking anything anymore.
   highlightBlockers: (node) => {
     const { doc, expanded } = get();
     if (!doc) return;
@@ -434,32 +444,41 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     const byOrgId = new Map<string, OrgNode>();
     for (const n of doc.nodes) if (n.orgId) byOrgId.set(n.orgId, n);
 
-    // BFS over .dependsOn, restricted to nodes that are still undone.
-    const depth = new Map<string, number>();
+    const depth = new Map<string, number>(); // gold: still blocking
+    const done = new Set<string>(); // green: already satisfied
     const queue: Array<{ node: OrgNode; d: number }> = [{ node, d: 0 }];
     while (queue.length) {
       const { node: cur, d } = queue.shift()!;
       for (const pid of cur.dependsOn ?? []) {
         const p = byOrgId.get(pid);
-        if (!p || p.done) continue;
+        if (!p) continue;
+        if (p.done) {
+          // Already satisfied: tint green, don't recurse — its own prereqs
+          // are also irrelevant to the still-blocking question.
+          done.add(p.id);
+          continue;
+        }
         if (depth.has(p.id)) continue; // BFS — first visit is shortest
         depth.set(p.id, d + 1);
         queue.push({ node: p, d: d + 1 });
       }
     }
-    if (depth.size === 0) return;
+    if (depth.size === 0 && done.size === 0) return;
 
     // Expand ancestor chains so every highlighted node is actually rendered.
     const exp = new Set(expanded);
-    for (const id of depth.keys()) {
+    const expandAncestors = (id: string) => {
       let cur: OrgNode | undefined = byId.get(id);
       cur = cur?.parent ? byId.get(cur.parent) : undefined;
       while (cur) {
         exp.add(cur.id);
         cur = cur.parent ? byId.get(cur.parent) : undefined;
       }
-    }
-    set({ selectedId: node.id, highlightDepth: depth, expanded: exp });
+    };
+    for (const id of depth.keys()) expandAncestors(id);
+    for (const id of done) expandAncestors(id);
+
+    set({ selectedId: node.id, highlightDepth: depth, highlightDone: done, expanded: exp });
   },
 
   setPanel: (p) => {

@@ -343,7 +343,7 @@ export default function OrgNode({ data }: NodeProps) {
   const select = useOrgStore((s) => s.select);
   const selectedId = useOrgStore((s) => s.selectedId);
   const toggleExpand = useOrgStore((s) => s.toggleExpand);
-  const setPanel = useOrgStore((s) => s.setPanel);
+  const editInEmacs = useOrgStore((s) => s.editInEmacs);
   const openContextMenu = useOrgStore((s) => s.openContextMenu);
   const dropTargetId = useOrgStore((s) => s.dropTargetId);
   const depMode = useOrgStore((s) => s.depMode);
@@ -353,10 +353,17 @@ export default function OrgNode({ data }: NodeProps) {
   // Depth in the active blocker-highlight chain (undefined when not highlighted,
   // 1 = direct blocker, 2 = blocker-of-blocker, …). Drives ring intensity.
   const highlightDepth = useOrgStore((s) => s.highlightDepth.get(n.id));
-  const highlighted = highlightDepth !== undefined;
-  // Falloff: depth 1 -> 1.0, 2 -> 0.65, 3 -> 0.45, 4+ -> 0.30 (clamped).
-  const highlightIntensity =
-    highlightDepth === undefined ? 0 : Math.max(0.3, 1 - 0.25 * (highlightDepth - 1));
+  const highlightDone = useOrgStore((s) => s.highlightDone.has(n.id));
+  const highlighted = highlightDepth !== undefined || highlightDone;
+  // Falloff for active blockers: depth 1 -> 1.0, 2 -> 0.65, 3 -> 0.45, 4+ -> 0.30.
+  // DONE prereqs always show at full intensity (single solid green ring).
+  const highlightIntensity = highlightDone
+    ? 1
+    : highlightDepth === undefined
+      ? 0
+      : Math.max(0.3, 1 - 0.25 * (highlightDepth - 1));
+  // Gold (#ffd166) for still-blocking, green (#98be65) for already-satisfied.
+  const highlightRgb = highlightDone ? "152,190,101" : "255,209,102";
   const flashed = useOrgStore((s) => s.flashId === n.id);
   const doc = useOrgStore((s) => s.doc);
   const todoK = doc?.todoKeywords ?? [];
@@ -382,30 +389,24 @@ export default function OrgNode({ data }: NodeProps) {
     <div
       className={flashed ? "node-flash" : undefined}
       onClick={() => select(n.id)}
-      onDoubleClick={() => {
-        // Selecting the node + opening the Details pullout is the lightweight
-        // gesture; spawning the Emacs terminal is now opt-in (right-click →
-        // Edit in Emacs, or the Emacs tab on the right rail).
-        select(n.id);
-        setPanel("details");
-      }}
+      onDoubleClick={() => editInEmacs(n)}
       onContextMenu={(e) => {
         e.preventDefault();
         openContextMenu(e.clientX, e.clientY, n.id);
       }}
-      title="Click to select · double-click to open Details · right-click for more"
+      title="Click to select · double-click to open Emacs on this node · right-click for more"
       style={{
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: 12.5,
         lineHeight: 1.5,
         whiteSpace: "pre",
-        background: highlighted ? `rgba(255,209,102,${0.14 * highlightIntensity})` : isDropTarget ? "rgba(99,166,106,0.18)" : selected ? `${accent}22` : "var(--c-surface)",
-        border: `1px solid ${connectColor ?? (highlighted ? `rgba(255,209,102,${highlightIntensity})` : isDropTarget ? "var(--c-green)" : selected ? accent : "var(--c-border)")}`,
+        background: highlighted ? `rgba(${highlightRgb},${0.14 * highlightIntensity})` : isDropTarget ? "rgba(99,166,106,0.18)" : selected ? `${accent}22` : "var(--c-surface)",
+        border: `1px solid ${connectColor ?? (highlighted ? `rgba(${highlightRgb},${highlightIntensity})` : isDropTarget ? "var(--c-green)" : selected ? accent : "var(--c-border)")}`,
         borderRadius: 6,
         boxShadow: connectColor
           ? `inset 3px 0 0 ${accent}, 0 0 0 2px ${connectColor}, 0 0 12px ${connectColor}aa`
           : highlighted
-            ? `inset 3px 0 0 ${accent}, 0 0 0 2px rgba(255,209,102,${highlightIntensity}), 0 0 ${Math.round(16 * highlightIntensity)}px rgba(255,209,102,${0.8 * highlightIntensity})`
+            ? `inset 3px 0 0 ${accent}, 0 0 0 2px rgba(${highlightRgb},${highlightIntensity}), 0 0 ${Math.round(16 * highlightIntensity)}px rgba(${highlightRgb},${0.8 * highlightIntensity})`
             : isDropTarget
               ? `inset 3px 0 0 ${accent}, 0 0 0 2px var(--c-green)`
               : selected

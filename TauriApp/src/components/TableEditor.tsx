@@ -88,7 +88,14 @@ export default function TableEditor({ node, block }: Props) {
   };
 
   const commitCell = (ri: number, ci: number, value: string) => {
-    if (rows[ri][ci] === value) return;
+    // Compare against the LAST COMMITTED snapshot, not the local `rows` array.
+    // `rows` is updated synchronously by onChange every keystroke, so by the
+    // time onBlur fires here, rows[ri][ci] already equals `value` — using it
+    // for the early-return short-circuit meant edits were never sent to the
+    // bridge, and the next doc-sync wiped them out of local state. Comparing
+    // against block.rows (the doc-side snapshot) correctly detects real edits.
+    const committed = block.rows[ri]?.[ci] ?? "";
+    if (committed === value) return;
     commit(withCellEdited(rows, ri, ci, value), hasHeader);
   };
 
