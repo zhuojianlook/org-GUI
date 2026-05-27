@@ -404,6 +404,42 @@ Positive DELTA moves down, negative up. Returns the parsed document."
 (defvar org-gui--pending nil
   "Pending (FILE . BEGIN) for the next emacsclient frame to narrow to.")
 
+;;;; ---- Terminal cursor sync (evil block/bar) ----------------------------
+;; In a `-t' emacsclient frame, evil-mode doesn't change the visible cursor
+;; shape the way it does in a GUI frame (the GUI uses frame parameters; the
+;; terminal needs DECSCUSR `CSI Ps SP q' sequences). Hook the state
+;; transitions and write the appropriate escape directly to the terminal so
+;; xterm.js renders the right shape: block in normal/visual, bar in insert,
+;; underline in replace.
+
+(defun org-gui--decscusr (code)
+  "Write a DECSCUSR escape with CODE to the controlling terminal."
+  (ignore-errors (send-string-to-terminal (format "\e[%d q" code))))
+
+(defun org-gui--evil-cursor-update (&rest _args)
+  "Sync terminal cursor shape to the current evil state."
+  (when (boundp 'evil-state)
+    (cond
+     ((eq evil-state 'insert)   (org-gui--decscusr 6))   ; steady bar
+     ((eq evil-state 'replace)  (org-gui--decscusr 4))   ; steady underline
+     (t                         (org-gui--decscusr 2))))) ; steady block
+
+(defvar org-gui--cursor-hooks-installed nil
+  "Non-nil once evil state-change hooks have been wired.")
+
+(defun org-gui--install-cursor-hooks ()
+  "Hook evil state changes so the terminal cursor follows the mode.
+Idempotent: subsequent calls are no-ops."
+  (unless org-gui--cursor-hooks-installed
+    (when (require 'evil nil t)
+      (add-hook 'evil-insert-state-entry-hook  #'org-gui--evil-cursor-update)
+      (add-hook 'evil-insert-state-exit-hook   #'org-gui--evil-cursor-update)
+      (add-hook 'evil-normal-state-entry-hook  #'org-gui--evil-cursor-update)
+      (add-hook 'evil-visual-state-entry-hook  #'org-gui--evil-cursor-update)
+      (add-hook 'evil-replace-state-entry-hook #'org-gui--evil-cursor-update)
+      (add-hook 'evil-emacs-state-entry-hook   #'org-gui--evil-cursor-update)
+      (setq org-gui--cursor-hooks-installed t))))
+
 (defun org-gui--frame-setup ()
   "Run once on the next new server frame: show the pending node/file.
 The frame is opened by `emacsclient -t' with NO file argument, so this hook
@@ -416,6 +452,11 @@ frame fully interactive (evil etc.)."
           (begin (cdr org-gui--pending)))
       (setq org-gui--pending nil)
       (remove-hook 'server-after-make-frame-hook #'org-gui--frame-setup)
+      ;; In a terminal frame the evil cursor shape doesn't follow state on its
+      ;; own. Install the DECSCUSR-emitting hooks the first time we open such
+      ;; a frame, and seed the initial shape from the current state.
+      (org-gui--install-cursor-hooks)
+      (run-at-time 0.1 nil #'org-gui--evil-cursor-update)
       (when file
         (if (> begin 0)
             (ignore-errors (org-gui-edit-node file begin))

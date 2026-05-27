@@ -91,6 +91,29 @@ body {
   animation: node-flash 1.4s ease-out 1;
 }
 
+/* Priority indicator: a small filled dot next to a [#A]/[#B]/[#C] heading
+   that pulses to catch the eye. Higher priority = faster, brighter pulse. */
+@keyframes priority-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+}
+.priority-blink-A {
+  animation: priority-pulse 1s ease-in-out infinite;
+}
+.priority-blink-B {
+  animation: priority-pulse 2s ease-in-out infinite;
+}
+.priority-blink-C {
+  animation: priority-pulse 4s ease-in-out infinite;
+}
+
 /* Theme-match React Flow's zoom/fit-view controls so they don't pop out as
    light-mode buttons against the dark canvas. Sized so they line up with the
    compact minimap (~28px tall buttons in a vertical stack). */

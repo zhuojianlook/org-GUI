@@ -293,7 +293,7 @@ export default function TimelineBand() {
         }}
       >
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--c-text-dim)" }}>
-          Milestones
+          Deadlines &amp; Milestones
         </span>
         <div style={{ display: "flex", gap: 2, pointerEvents: "auto" }}>
           {ZOOMS.map((z) => (
@@ -443,18 +443,24 @@ export default function TimelineBand() {
                 overflow: "hidden",
               }}
             >
+              {/* Bigger, glyph-based icon — ⚑ for deadlines, ⏱ for scheduled
+                  — so the date is recognisable at a glance instead of being a
+                  tiny coloured pixel. The marginLeft centres the icon on the
+                  tick's x coordinate. */}
               <span
                 aria-hidden
                 style={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: 4,
-                  background: d.color,
                   flexShrink: 0,
-                  marginLeft: -3.5,
-                  boxShadow: d.deadline ? `0 0 4px ${d.color}` : "none",
+                  marginLeft: -7,
+                  fontSize: 13,
+                  lineHeight: 1,
+                  color: d.color,
+                  textShadow: d.deadline ? `0 0 6px ${d.color}aa` : "none",
+                  filter: d.deadline ? "drop-shadow(0 0 1px rgba(0,0,0,0.5))" : "none",
                 }}
-              />
+              >
+                {d.deadline ? "⚑" : "⏱"}
+              </span>
               <span
                 style={{
                   fontSize: 9.5,
@@ -548,27 +554,44 @@ export default function TimelineBand() {
                   boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
                 }}
               >
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    pickColor(color, (c) => updateMilestone(m.id, { color: c }));
-                  }}
+                {/* Label-input pattern: clicking the flag triggers the OS-native
+                    color picker via the hidden &lt;input type="color"&gt;. This is
+                    more reliable in WKWebView (macOS Tauri) than a programmatic
+                    .click() on a dynamically-created input. */}
+                <label
                   onPointerDown={(e) => e.stopPropagation()}
                   onDoubleClick={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
                   title="Click to change this milestone's colour"
                   style={{
-                    background: "transparent",
-                    border: "none",
-                    padding: 0,
-                    margin: 0,
-                    color: "inherit",
-                    font: "inherit",
+                    position: "relative",
+                    display: "inline-flex",
+                    alignItems: "center",
                     cursor: "pointer",
                     lineHeight: 1,
                   }}
                 >
                   ⚑
-                </button>
+                  <input
+                    type="color"
+                    value={color}
+                    onChange={(e) => updateMilestone(m.id, { color: e.target.value })}
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      width: "100%",
+                      height: "100%",
+                      opacity: 0,
+                      cursor: "pointer",
+                      border: "none",
+                      padding: 0,
+                      margin: 0,
+                      background: "transparent",
+                    }}
+                  />
+                </label>
                 {isEditing ? (
                   <input
                     autoFocus

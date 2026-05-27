@@ -129,6 +129,29 @@ function saveExpanded(file: string | null, ids: Set<string>) {
   }
 }
 
+// Per-file colour assignments for org tags. Tags with no entry stay untinted.
+// Keyed by tag name (no leading/trailing colons).
+const TAG_COLORS_KEY = (file: string) => `org-gui:tagcolors:${file}`;
+
+function loadTagColors(file: string | null): Record<string, string> {
+  if (!file) return {};
+  try {
+    const raw = localStorage.getItem(TAG_COLORS_KEY(file));
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveTagColors(file: string | null, c: Record<string, string>) {
+  if (!file) return;
+  try {
+    localStorage.setItem(TAG_COLORS_KEY(file), JSON.stringify(c));
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // Per-file set of collapsed table keys (`${nodeId}:${tableStartLine}`).
 // A collapsed table renders as a one-line "▸ Table (N × M)" summary instead of
 // the full inline editor — useful when a node has a big table that's not the
@@ -277,6 +300,8 @@ interface OrgState {
   milestones: Milestone[];
   timelineView: TimelineView; // milestone-band zoom + pan
   tableCollapsed: Set<string>; // keys `${nodeId}:${startLine}` → folded tables
+  tagColors: Record<string, string>; // tag name → CSS colour (per file)
+  tagFilter: string | null; // when set, only nodes carrying this tag stay sharp
   updateChannel: UpdateChannel;
   contextMenu: ContextMenuState | null;
   dropTargetId: string | null;
@@ -312,6 +337,8 @@ interface OrgState {
   updateMilestone: (id: string, patch: Partial<Pick<Milestone, "iso" | "label" | "color">>) => void;
   removeMilestone: (id: string) => void;
   toggleTableCollapsed: (nodeId: string, startLine: number) => void;
+  setTagColor: (tag: string, color: string | null) => void;
+  setTagFilter: (tag: string | null) => void;
   setTimelineView: (v: Partial<TimelineView>) => void;
   setUpdateChannel: (c: UpdateChannel) => void;
   openContextMenu: (x: number, y: number, nodeId: string) => void;
@@ -343,6 +370,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   milestones: [],
   timelineView: { zoom: "fit", centerMs: Date.now() },
   tableCollapsed: new Set<string>(),
+  tagColors: {},
+  tagFilter: null,
   updateChannel: loadUpdateChannel(),
   contextMenu: null,
   dropTargetId: null,
@@ -376,6 +405,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       milestones: loadMilestones(file),
       timelineView: loadTimelineView(file),
       tableCollapsed: loadTableCollapsed(file),
+      tagColors: loadTagColors(file),
+      tagFilter: null,
       editBegin: 0,
     });
     try {
@@ -559,6 +590,17 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       return { tableCollapsed: next };
     }),
 
+  setTagColor: (tag, color) =>
+    set((s) => {
+      const next = { ...s.tagColors };
+      if (color) next[tag] = color;
+      else delete next[tag];
+      saveTagColors(s.file, next);
+      return { tagColors: next };
+    }),
+
+  setTagFilter: (tag) => set({ tagFilter: tag }),
+
   setTimelineView: (v) =>
     set((s) => {
       const next = { ...s.timelineView, ...v };
@@ -741,6 +783,18 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const expanded = new Set(get().expanded);
       if (child?.parent) expanded.add(child.parent);
       set({ doc: newDoc, selectedId: sel, expanded, saving: false });
+      // Pan the React Flow viewport to the new node and flash it. Top-level
+      // headings get appended after the last root and would otherwise drop
+      // off-screen — the user had to hunt for them; this surfaces them.
+      if (sel) {
+        // Defer one tick so the layout has been rebuilt with the new node
+        // before TimelineGraph's focus listener queries rf.getNode(sel).
+        requestAnimationFrame(() => {
+          window.dispatchEvent(
+            new CustomEvent("orggui:focusNode", { detail: { id: sel } }),
+          );
+        });
+      }
     } catch (e) {
       set({ error: String(e), saving: false });
     }

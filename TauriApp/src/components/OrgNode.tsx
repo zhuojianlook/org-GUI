@@ -4,6 +4,7 @@ import { setTodo, incompleteDeps, type OrgNode as OrgNodeT } from "../api/org";
 import type { OrgNodeView } from "../utils/layout";
 import { parseOrgDate, startOfDay } from "../utils/time";
 import { findTableBlocks } from "../utils/orgTable";
+import { blendColorsRgba, nodeTagColors } from "../utils/tagColor";
 import TableEditor from "./TableEditor";
 
 const LEVEL_COLORS = [
@@ -24,6 +25,16 @@ const C_TODO = "#ff6c6b";
 const C_DONE = "#98be65";
 const C_PRIORITY = "#da8548";
 const C_TAG = "#83898d";
+
+// Per-priority blinker colours. Anything beyond C drops back to amber + no blink.
+function priorityBlinkInfo(priority: string | null): { color: string; cls: string } | null {
+  if (!priority) return null;
+  const p = priority.toUpperCase();
+  if (p === "A") return { color: "#ff6c6b", cls: "priority-blink-A" };
+  if (p === "B") return { color: "#e0a458", cls: "priority-blink-B" };
+  if (p === "C") return { color: "#98be65", cls: "priority-blink-C" };
+  return { color: "#da8548", cls: "" };
+}
 const C_COOKIE = "#5fb3a1";
 const C_STAMP = "#5fb3a1";
 const C_SCHEDULED = "#51afef";
@@ -365,6 +376,15 @@ export default function OrgNode({ data }: NodeProps) {
   // Gold (#ffd166) for still-blocking, green (#98be65) for already-satisfied.
   const highlightRgb = highlightDone ? "152,190,101" : "255,209,102";
   const flashed = useOrgStore((s) => s.flashId === n.id);
+  // Tag colors + filter: a tagged node gets a fused-tag background tint that
+  // links it visually with other nodes sharing the colour; when the user
+  // narrows to one tag via the filter, non-matching nodes are dimmed and
+  // softly blurred so the tagged set pops.
+  const tagColors = useOrgStore((s) => s.tagColors);
+  const tagFilter = useOrgStore((s) => s.tagFilter);
+  const tagColorList = nodeTagColors(n.tagsAll, tagColors);
+  const tagTint = blendColorsRgba(tagColorList, 0.22);
+  const tagFiltered = tagFilter != null && !(n.tagsAll ?? []).includes(tagFilter);
   const doc = useOrgStore((s) => s.doc);
   const todoK = doc?.todoKeywords ?? [];
   const doneK = doc?.doneKeywords ?? [];
@@ -400,7 +420,15 @@ export default function OrgNode({ data }: NodeProps) {
         fontSize: 12.5,
         lineHeight: 1.5,
         whiteSpace: "pre",
-        background: highlighted ? `rgba(${highlightRgb},${0.14 * highlightIntensity})` : isDropTarget ? "rgba(99,166,106,0.18)" : selected ? `${accent}22` : "var(--c-surface)",
+        background: highlighted
+          ? `rgba(${highlightRgb},${0.14 * highlightIntensity})`
+          : isDropTarget
+            ? "rgba(99,166,106,0.18)"
+            : selected
+              ? `${accent}22`
+              : tagTint
+                ? tagTint
+                : "var(--c-surface)",
         border: `1px solid ${connectColor ?? (highlighted ? `rgba(${highlightRgb},${highlightIntensity})` : isDropTarget ? "var(--c-green)" : selected ? accent : "var(--c-border)")}`,
         borderRadius: 6,
         boxShadow: connectColor
@@ -414,8 +442,11 @@ export default function OrgNode({ data }: NodeProps) {
                 : `inset 3px 0 0 ${accent}, 0 1px 3px rgba(0,0,0,0.4)`,
         padding: "4px 10px 4px 8px",
         maxWidth: 460,
-        opacity: n.done ? 0.45 : 1,
-        filter: n.done ? "grayscale(0.7)" : "none",
+        // Tag-filter dim takes priority over done-dim so the filter narrative
+        // is visually clear: matching nodes pop, others fade. Done nodes also
+        // get a slight grey-out independently.
+        opacity: tagFiltered ? 0.18 : n.done ? 0.45 : 1,
+        filter: tagFiltered ? "blur(1.5px) grayscale(0.6)" : n.done ? "grayscale(0.7)" : "none",
         cursor: depMode ? "crosshair" : "pointer",
       }}
     >
@@ -424,6 +455,27 @@ export default function OrgNode({ data }: NodeProps) {
         position={Position.Left}
         style={{ opacity: 0, width: 1, height: 1, minWidth: 0, minHeight: 0, border: "none", background: "transparent", top: 14 }}
       />
+
+      {(() => {
+        const pb = priorityBlinkInfo(n.priority);
+        if (!pb || n.done) return null;
+        return (
+          <span
+            className={pb.cls}
+            title={`Priority [#${n.priority}]`}
+            style={{
+              position: "absolute",
+              top: 7,
+              left: -3,
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: pb.color,
+              boxShadow: `0 0 6px ${pb.color}aa`,
+            }}
+          />
+        );
+      })()}
 
       <div style={{ display: "flex", alignItems: "baseline", overflow: "hidden" }}>
         <span

@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useOrgStore, type UpdateChannel } from "../store/useOrgStore";
 import { IN_TAURI } from "../api/org";
+import TagsPopover from "./TagsPopover";
 
 // Updater manifests, served from the `updater` branch by the release workflow.
 // stable        → v* tags    → latest.json
@@ -21,9 +22,12 @@ export default function Toolbar() {
     useOrgStore();
   const updateChannel = useOrgStore((s) => s.updateChannel);
   const setUpdateChannel = useOrgStore((s) => s.setUpdateChannel);
+  const tagFilter = useOrgStore((s) => s.tagFilter);
   const [updateState, setUpdateState] = useState<UpdateState>("idle");
   const [updatePct, setUpdatePct] = useState(0);
   const [updateMsg, setUpdateMsg] = useState("");
+  const [tagsOpen, setTagsOpen] = useState(false);
+  const tagsBtnRef = useRef<HTMLButtonElement>(null);
 
   const checkForUpdates = async () => {
     if (!IN_TAURI) {
@@ -143,6 +147,20 @@ export default function Toolbar() {
       >
         ⇢ Deps
       </button>
+
+      {/* Tags popover: assign per-tag colours and filter the canvas to one tag. */}
+      <button
+        ref={tagsBtnRef}
+        onClick={() => setTagsOpen((v) => !v)}
+        style={{ ...btn, ...(tagFilter ? { background: "var(--c-accent)", color: "#fff", borderColor: "var(--c-accent)", fontWeight: 700 } : {}) }}
+        disabled={!doc}
+        title={tagFilter ? `Filtering :${tagFilter}: — click to manage tags` : "Manage tag colours and filters"}
+      >
+        🏷 {tagFilter ? `:${tagFilter}:` : "Tags"}
+      </button>
+      {tagsOpen && (
+        <TagsPopover onClose={() => setTagsOpen(false)} anchorRect={tagsBtnRef.current?.getBoundingClientRect() ?? null} />
+      )}
 
       <div style={{ flex: 1 }} />
       <button
