@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "notes": "Update to exp-0.2.0",
+  "pub_date": "2026-05-27T08:40:31Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrSzV1Qm54T3BURmM1disvWml0czU5eFNCR2pvSlI3MFhDMFNEQkgrZGNqV2QvUTZWLzVJeXcvTUw0MEFQb05rU3lDNWJxSXhrVUx3RXJCNUxOUW1YbndzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5ODcxMjE4CWZpbGU6b3JnLUdVSV8wLjIuMF94NjQtc2V0dXAuZXhlCkxYb1kzTVpvU1J3ZnpVMGFBQWlwbi81TXpPYVNwOVM0dWNsSEY0enlBRHVFSjdUcS9ldi9VNXBoeVBpcFVPREdnNk45dUh1WEtGQjdGcytPUjdHbEFBPT0K",
+      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/exp-0.2.0/org-GUI_0.2.0_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrSzJ2Y3B3bStqbGNOQmNuWU9rODFvbTRxbHU5V29vekJUT2YwUGo3U3FWSFRJVHcraENFdGg5dGVQbTJkQ1pwdGVTeWYxanZudXVTYWhpL2N2R1ZIREF3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5ODcwOTc1CWZpbGU6b3JnLUdVSS5hcHAudGFyLmd6ClduTERUa1R0bzBOejdMa2RsbEYyMXpMamZ2YkxwMlNpVXhkQmMwRnNFbFR5N0JiS1pmUEdURzhOdGtTWHpCUGhML09mdER1K2xwRFMzR2JBMzBnUkFnPT0K",
+      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/exp-0.2.0/org-GUI.app.tar.gz"
+    }
+  }
+}
