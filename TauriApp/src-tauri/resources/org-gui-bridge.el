@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.1.0")
+(defconst org-gui-bridge-version "0.2.6")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -310,6 +310,28 @@ archive location), then return the parsed (remaining) document."
      (let ((lst (split-string tags "[ :]+" t)))
        (org-set-tags lst)))))
 
+(defun org-gui-add-tag-many (file begins tag)
+  "Add TAG to every heading whose buffer position is in BEGINS.
+BEGINS is a comma-separated list of integers. Existing tags are preserved;
+the tag is deduped per node. One bridge round-trip handles N nodes so a
+multi-select 'apply tag' action doesn't blow up the wire for big selections."
+  (let ((begin-list (mapcar #'string-to-number (split-string begins "[ ,]+" t)))
+        (tag (string-trim tag)))
+    (when (string-empty-p tag)
+      (error "Tag must not be empty"))
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (dolist (b begin-list)
+         (ignore-errors
+           (goto-char (min b (point-max)))
+           (org-back-to-heading t)
+           (let ((existing (org-get-tags nil t)))
+             (unless (member tag existing)
+               (org-set-tags (append existing (list tag)))))))
+       (org-gui--refresh-cookies))
+      (save-buffer)
+      (org-gui--doc-json file))))
+
 (defun org-gui-set-raw (file begin line)
   "Replace the entire heading LINE of the entry at BEGIN with new raw org text.
 Lets the user type `TODO [#A] Title :tag:' directly; org re-parses it on save.
@@ -427,6 +449,16 @@ Positive DELTA moves down, negative up. Returns the parsed document."
 (defvar org-gui--cursor-hooks-installed nil
   "Non-nil once evil state-change hooks have been wired.")
 
+(defun org-gui--evil-cursor-tick ()
+  "Re-apply the DECSCUSR escape after each command in a terminal frame.
+Emacs's display engine and some packages re-emit cursor escapes on redraw,
+which clobbered our state-driven shape (cursor reverted to block whenever
+the user moved a line in insert mode, for example). Repeating it post-
+command keeps the shape sticky for the cost of one short escape per
+keystroke, which is invisible."
+  (when (and (boundp 'evil-state) (not (display-graphic-p)))
+    (org-gui--evil-cursor-update)))
+
 (defun org-gui--install-cursor-hooks ()
   "Hook evil state changes so the terminal cursor follows the mode.
 Idempotent: subsequent calls are no-ops."
@@ -438,6 +470,9 @@ Idempotent: subsequent calls are no-ops."
       (add-hook 'evil-visual-state-entry-hook  #'org-gui--evil-cursor-update)
       (add-hook 'evil-replace-state-entry-hook #'org-gui--evil-cursor-update)
       (add-hook 'evil-emacs-state-entry-hook   #'org-gui--evil-cursor-update)
+      ;; Re-apply on every command so the shape sticks across redraws that
+      ;; would otherwise reset it back to the terminal default.
+      (add-hook 'post-command-hook             #'org-gui--evil-cursor-tick)
       (setq org-gui--cursor-hooks-installed t))))
 
 (defun org-gui--frame-setup ()

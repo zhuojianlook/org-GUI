@@ -5,6 +5,7 @@ import {
   OrgNode,
   addHeading as apiAddHeading,
   addTableChild as apiAddTableChild,
+  addTagMany as apiAddTagMany,
   createOrg as apiCreateOrg,
   deleteNode as apiDeleteNode,
   setBody as apiSetBody,
@@ -302,6 +303,10 @@ interface OrgState {
   tableCollapsed: Set<string>; // keys `${nodeId}:${startLine}` → folded tables
   tagColors: Record<string, string>; // tag name → CSS colour (per file)
   tagFilter: string | null; // when set, only nodes carrying this tag stay sharp
+  /** Multi-selection set for bulk operations (e.g. tag-many). Holds node ids.
+   *  Separate from selectedId so the Details panel and ordinary single-select
+   *  workflow don't interfere with bulk gestures. */
+  multiSelected: Set<string>;
   updateChannel: UpdateChannel;
   contextMenu: ContextMenuState | null;
   dropTargetId: string | null;
@@ -339,6 +344,9 @@ interface OrgState {
   toggleTableCollapsed: (nodeId: string, startLine: number) => void;
   setTagColor: (tag: string, color: string | null) => void;
   setTagFilter: (tag: string | null) => void;
+  toggleMultiSelected: (id: string) => void;
+  clearMultiSelected: () => void;
+  applyTagToSelection: (tag: string) => Promise<void>;
   setTimelineView: (v: Partial<TimelineView>) => void;
   setUpdateChannel: (c: UpdateChannel) => void;
   openContextMenu: (x: number, y: number, nodeId: string) => void;
@@ -372,6 +380,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   tableCollapsed: new Set<string>(),
   tagColors: {},
   tagFilter: null,
+  multiSelected: new Set<string>(),
   updateChannel: loadUpdateChannel(),
   contextMenu: null,
   dropTargetId: null,
@@ -407,6 +416,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       tableCollapsed: loadTableCollapsed(file),
       tagColors: loadTagColors(file),
       tagFilter: null,
+      multiSelected: new Set<string>(),
       editBegin: 0,
     });
     try {
@@ -600,6 +610,31 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     }),
 
   setTagFilter: (tag) => set({ tagFilter: tag }),
+
+  toggleMultiSelected: (id) =>
+    set((s) => {
+      const next = new Set(s.multiSelected);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return { multiSelected: next };
+    }),
+
+  clearMultiSelected: () => set({ multiSelected: new Set() }),
+
+  applyTagToSelection: async (tag) => {
+    const { file, doc, multiSelected } = get();
+    const t = tag.trim();
+    if (!file || !doc || !t || multiSelected.size === 0) return;
+    const begins = doc.nodes.filter((n) => multiSelected.has(n.id)).map((n) => n.begin);
+    if (begins.length === 0) return;
+    set({ saving: true, error: null });
+    try {
+      const newDoc = await apiAddTagMany(file, begins, t);
+      set({ doc: newDoc, saving: false });
+    } catch (e) {
+      set({ error: String(e), saving: false });
+    }
+  },
 
   setTimelineView: (v) =>
     set((s) => {

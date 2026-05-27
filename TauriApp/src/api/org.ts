@@ -410,6 +410,18 @@ function mockSetBody(begin: number, body: string): OrgDoc {
   return structuredClone(doc);
 }
 
+function mockAddTagMany(begins: number[], tag: string): OrgDoc {
+  const doc = ensureMock();
+  const t = tag.trim();
+  if (!t) return structuredClone(doc);
+  for (const b of begins) {
+    const n = doc.nodes.find((x) => x.begin === b);
+    if (n && !n.tags.includes(t)) n.tags = [...n.tags, t];
+  }
+  recompute(doc);
+  return structuredClone(doc);
+}
+
 function mockAddTableChild(parentBegin: number): OrgDoc {
   const doc = mockAdd(parentBegin, "Table");
   // The just-added child is the last one whose title === "Table"; give it a starter table body.
@@ -722,6 +734,12 @@ export const addTableChild = (file: string, parentBegin: number) =>
   IN_TAURI
     ? orgCall<OrgDoc>("org-gui-add-table-child", [file, String(parentBegin)])
     : Promise.resolve(mockAddTableChild(parentBegin));
+
+/** Add TAG to every heading whose buffer position is in BEGINS. One round-trip. */
+export const addTagMany = (file: string, begins: number[], tag: string) =>
+  IN_TAURI
+    ? orgCall<OrgDoc>("org-gui-add-tag-many", [file, begins.join(","), tag])
+    : Promise.resolve(mockAddTagMany(begins, tag));
 
 /** Add a dependency edge: TO depends on FROM (arrow points FROM → TO). */
 export const addDependency = (file: string, fromBegin: number, toBegin: number) =>

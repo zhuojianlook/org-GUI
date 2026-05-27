@@ -26,15 +26,6 @@ const C_DONE = "#98be65";
 const C_PRIORITY = "#da8548";
 const C_TAG = "#83898d";
 
-// Per-priority blinker colours. Anything beyond C drops back to amber + no blink.
-function priorityBlinkInfo(priority: string | null): { color: string; cls: string } | null {
-  if (!priority) return null;
-  const p = priority.toUpperCase();
-  if (p === "A") return { color: "#ff6c6b", cls: "priority-blink-A" };
-  if (p === "B") return { color: "#e0a458", cls: "priority-blink-B" };
-  if (p === "C") return { color: "#98be65", cls: "priority-blink-C" };
-  return { color: "#da8548", cls: "" };
-}
 const C_COOKIE = "#5fb3a1";
 const C_STAMP = "#5fb3a1";
 const C_SCHEDULED = "#51afef";
@@ -44,6 +35,8 @@ interface Span {
   t: string;
   c?: string;
   b?: boolean;
+  /** Optional CSS class — used to pulse the [#A]/[#B]/[#C] priority chip. */
+  cls?: string;
 }
 
 function fontifyHeadline(raw: string, levelCol: string, todoKeywords: string[], doneKeywords: string[]): Span[] {
@@ -67,10 +60,20 @@ function fontifyHeadline(raw: string, levelCol: string, todoKeywords: string[], 
     if (tw[2]) spans.push({ t: tw[2] });
     rest = rest.slice(tw[0].length);
   }
-  const pm = rest.match(/^(\[#[A-Za-z0-9]\])(\s+)?/);
+  const pm = rest.match(/^(\[#([A-Za-z0-9])\])(\s+)?/);
   if (pm) {
-    spans.push({ t: pm[1], c: C_PRIORITY, b: true });
-    if (pm[2]) spans.push({ t: pm[2] });
+    // Pulse the priority chip on a cadence scaled to its letter (A fastest).
+    const letter = pm[2].toUpperCase();
+    const pulseCls =
+      letter === "A"
+        ? "priority-blink-A"
+        : letter === "B"
+          ? "priority-blink-B"
+          : letter === "C"
+            ? "priority-blink-C"
+            : "";
+    spans.push({ t: pm[1], c: C_PRIORITY, b: true, cls: pulseCls });
+    if (pm[3]) spans.push({ t: pm[3] });
     rest = rest.slice(pm[0].length);
   }
   const cookieRe = /(\[\d+%\]|\[\d+\/\d+\])/g;
@@ -145,7 +148,11 @@ function DeadlineBadge({ n }: { n: OrgNodeT }) {
 
 function renderSpans(spans: Span[]) {
   return spans.map((s, i) => (
-    <span key={i} style={{ color: s.c, fontWeight: s.b ? 700 : 400 }}>
+    <span
+      key={i}
+      className={s.cls}
+      style={{ color: s.c, fontWeight: s.b ? 700 : 400 }}
+    >
       {s.t}
     </span>
   ));
@@ -353,6 +360,9 @@ export default function OrgNode({ data }: NodeProps) {
 
   const select = useOrgStore((s) => s.select);
   const selectedId = useOrgStore((s) => s.selectedId);
+  const isMultiSelected = useOrgStore((s) => s.multiSelected.has(n.id));
+  const toggleMultiSelected = useOrgStore((s) => s.toggleMultiSelected);
+  const clearMultiSelected = useOrgStore((s) => s.clearMultiSelected);
   const toggleExpand = useOrgStore((s) => s.toggleExpand);
   const editInEmacs = useOrgStore((s) => s.editInEmacs);
   const openContextMenu = useOrgStore((s) => s.openContextMenu);
@@ -408,7 +418,17 @@ export default function OrgNode({ data }: NodeProps) {
   return (
     <div
       className={flashed ? "node-flash" : undefined}
-      onClick={() => select(n.id)}
+      onClick={(e) => {
+        // Cmd/Ctrl-click toggles this node in the multi-selection set used
+        // by the "Apply tag to N selected" bulk action. Plain click clears
+        // multi-select and single-selects so the usual flow is undisturbed.
+        if (e.metaKey || e.ctrlKey) {
+          toggleMultiSelected(n.id);
+          return;
+        }
+        clearMultiSelected();
+        select(n.id);
+      }}
       onDoubleClick={() => editInEmacs(n)}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -429,12 +449,15 @@ export default function OrgNode({ data }: NodeProps) {
               : tagTint
                 ? tagTint
                 : "var(--c-surface)",
-        border: `1px solid ${connectColor ?? (highlighted ? `rgba(${highlightRgb},${highlightIntensity})` : isDropTarget ? "var(--c-green)" : selected ? accent : "var(--c-border)")}`,
+        border: `1px solid ${connectColor ?? (isMultiSelected ? "var(--c-amber)" : highlighted ? `rgba(${highlightRgb},${highlightIntensity})` : isDropTarget ? "var(--c-green)" : selected ? accent : "var(--c-border)")}`,
+        borderStyle: isMultiSelected ? "dashed" : "solid",
         borderRadius: 6,
         boxShadow: connectColor
           ? `inset 3px 0 0 ${accent}, 0 0 0 2px ${connectColor}, 0 0 12px ${connectColor}aa`
-          : highlighted
-            ? `inset 3px 0 0 ${accent}, 0 0 0 2px rgba(${highlightRgb},${highlightIntensity}), 0 0 ${Math.round(16 * highlightIntensity)}px rgba(${highlightRgb},${0.8 * highlightIntensity})`
+          : isMultiSelected
+            ? `inset 3px 0 0 ${accent}, 0 0 0 2px var(--c-amber), 0 0 10px rgba(224,164,88,0.55)`
+            : highlighted
+              ? `inset 3px 0 0 ${accent}, 0 0 0 2px rgba(${highlightRgb},${highlightIntensity}), 0 0 ${Math.round(16 * highlightIntensity)}px rgba(${highlightRgb},${0.8 * highlightIntensity})`
             : isDropTarget
               ? `inset 3px 0 0 ${accent}, 0 0 0 2px var(--c-green)`
               : selected
@@ -455,27 +478,6 @@ export default function OrgNode({ data }: NodeProps) {
         position={Position.Left}
         style={{ opacity: 0, width: 1, height: 1, minWidth: 0, minHeight: 0, border: "none", background: "transparent", top: 14 }}
       />
-
-      {(() => {
-        const pb = priorityBlinkInfo(n.priority);
-        if (!pb || n.done) return null;
-        return (
-          <span
-            className={pb.cls}
-            title={`Priority [#${n.priority}]`}
-            style={{
-              position: "absolute",
-              top: 7,
-              left: -3,
-              width: 7,
-              height: 7,
-              borderRadius: "50%",
-              background: pb.color,
-              boxShadow: `0 0 6px ${pb.color}aa`,
-            }}
-          />
-        );
-      })()}
 
       <div style={{ display: "flex", alignItems: "baseline", overflow: "hidden" }}>
         <span

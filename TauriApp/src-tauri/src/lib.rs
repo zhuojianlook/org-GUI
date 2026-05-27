@@ -289,10 +289,16 @@ async fn org_call(
     let tmp = std::env::temp_dir().join(format!("orggui-{}-{}.json", std::process::id(), n));
 
     let arg_lits: Vec<String> = args.iter().map(|a| elisp_string(a)).collect();
-    // Always load the bundled bridge so the shipped version is authoritative
-    // (a previous app version may have left an older bridge in this server).
+    // Load the bundled bridge ONLY when the running daemon doesn't already
+    // have the version we ship — checks `org-gui-bridge-version` so an app
+    // upgrade still forces a reload, but routine calls don't spam the
+    // message buffer with "Loading bridge.el…done" on every invocation.
     let elisp = format!(
-        "(progn (load-file {}) (org-gui-call {} #'{} {}))",
+        "(progn (unless (and (featurep 'org-gui-bridge) \
+            (equal (bound-and-true-p org-gui-bridge-version) {})) \
+          (load-file {})) \
+        (org-gui-call {} #'{} {}))",
+        elisp_string(env!("CARGO_PKG_VERSION")),
         elisp_string(&bridge.to_string_lossy()),
         elisp_string(&tmp.to_string_lossy()),
         func,
@@ -418,7 +424,11 @@ async fn emacs_term_open(
     // file arg, our hook's buffer choice is the one that sticks.
     let bridge = bridge_path(&app)?;
     let arm = format!(
-        "(progn (load-file {}) (org-gui-arm-edit {} {}))",
+        "(progn (unless (and (featurep 'org-gui-bridge) \
+            (equal (bound-and-true-p org-gui-bridge-version) {})) \
+          (load-file {})) \
+        (org-gui-arm-edit {} {}))",
+        elisp_string(env!("CARGO_PKG_VERSION")),
         elisp_string(&bridge.to_string_lossy()),
         elisp_string(&file),
         begin,

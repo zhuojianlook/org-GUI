@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useOrgStore } from "../store/useOrgStore";
 import { setDeadlineColor } from "../api/org";
 
@@ -64,17 +64,25 @@ export default function ContextMenu() {
     return doc.nodes.find((n) => n.id === menu.nodeId) ?? null;
   }, [menu, doc]);
 
-  // Any click anywhere (or Escape) closes the menu.
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close on any outside click or Escape. We listen on the *capture* phase of
+  // pointerdown so React Flow / our own wrapRef capture handlers can't swallow
+  // the event before we see it (which was what made canvas clicks not close
+  // the menu). The target check skips clicks inside the menu itself.
   useEffect(() => {
     if (!menu) return;
-    const onDown = () => close();
+    const onDown = (e: PointerEvent) => {
+      if (menuRef.current && menuRef.current.contains(e.target as Node)) return;
+      close();
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
     };
-    window.addEventListener("mousedown", onDown);
+    window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("pointerdown", onDown, true);
       window.removeEventListener("keydown", onKey);
     };
   }, [menu, close]);
@@ -150,6 +158,7 @@ export default function ContextMenu() {
 
   return (
     <div
+      ref={menuRef}
       onMouseDown={(e) => e.stopPropagation()}
       style={{
         position: "fixed",

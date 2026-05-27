@@ -18,6 +18,8 @@ import { buildLayout, INDENT_X, type OrgNodeView } from "../utils/layout";
 import OrgNode, { levelColor } from "./OrgNode";
 import TreeEdge from "./TreeEdge";
 import DependencyEdge from "./DependencyEdge";
+import SelectionBar from "./SelectionBar";
+import TagHulls from "./TagHulls";
 
 const nodeTypes = { org: OrgNode };
 const edgeTypes = { tree: TreeEdge, dependency: DependencyEdge };
@@ -41,6 +43,7 @@ export default function TimelineGraph() {
   const flashNode = useOrgStore((s) => s.flashNode);
   const expanded = useOrgStore((s) => s.expanded);
   const tableCollapsed = useOrgStore((s) => s.tableCollapsed);
+  const tagFilter = useOrgStore((s) => s.tagFilter);
   const rootPositions = useOrgStore((s) => s.rootPositions);
   const setRootPosition = useOrgStore((s) => s.setRootPosition);
   const setDropTarget = useOrgStore((s) => s.setDropTarget);
@@ -80,12 +83,25 @@ export default function TimelineGraph() {
     if (!doc || !layout) return [];
     const visible = new Set(layout.nodes.map((n) => n.id));
     const byOrgId = new Map<string, string>();
-    for (const n of doc.nodes) if (n.orgId) byOrgId.set(n.orgId, n.id);
+    const nodeById = new Map<string, typeof doc.nodes[number]>();
+    for (const n of doc.nodes) {
+      if (n.orgId) byOrgId.set(n.orgId, n.id);
+      nodeById.set(n.id, n);
+    }
     const out: Edge[] = [];
     for (const n of doc.nodes) {
       for (const pid of n.dependsOn ?? []) {
         const src = byOrgId.get(pid);
         if (!src || !visible.has(src) || !visible.has(n.id)) continue;
+        // When the tag filter is on, an edge is "relevant" only when BOTH
+        // endpoints carry the active tag. Irrelevant edges fade in sync with
+        // the irrelevant nodes so the tagged subgraph stands out clearly.
+        const srcNode = nodeById.get(src);
+        const tgtNode = n;
+        const filtered =
+          tagFilter != null &&
+          (!(srcNode?.tagsAll ?? []).includes(tagFilter) ||
+            !(tgtNode.tagsAll ?? []).includes(tagFilter));
         out.push({
           id: `dep-${src}-${n.id}`,
           source: src,
@@ -94,12 +110,17 @@ export default function TimelineGraph() {
           data: { from: src, to: n.id },
           zIndex: 2000, // render dependency links ABOVE nodes (node zIndex is 10)
           markerEnd: { type: MarkerType.ArrowClosed, color: "#e0a458", width: 16, height: 16 },
-          style: { stroke: "#e0a458", strokeWidth: 1.8, strokeDasharray: "5 4" },
+          style: {
+            stroke: "#e0a458",
+            strokeWidth: 1.8,
+            strokeDasharray: "5 4",
+            opacity: filtered ? 0.18 : 1,
+          },
         });
       }
     }
     return out;
-  }, [doc, layout]);
+  }, [doc, layout, tagFilter]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -357,6 +378,7 @@ export default function TimelineGraph() {
       defaultEdgeOptions={{ type: "tree" }}
     >
       <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#2f2f31" />
+      <TagHulls />
       {depMode && (
         <div
           style={{
@@ -405,6 +427,7 @@ export default function TimelineGraph() {
           bottom: 10,
         }}
       />
+      <SelectionBar />
     </ReactFlow>
       {tmpLine &&
         (() => {
