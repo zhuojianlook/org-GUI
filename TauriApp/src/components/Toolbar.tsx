@@ -125,6 +125,22 @@ export default function Toolbar() {
       }}
     >
       <span style={{ fontWeight: 700, color: "var(--c-accent)" }}>org-GUI</span>
+      <span
+        title={`Build ${__APP_VERSION__} · ${updateChannel} channel`}
+        style={{
+          fontSize: 10,
+          fontWeight: 600,
+          color: "var(--c-text-dim)",
+          background: "var(--c-surface2)",
+          border: "1px solid var(--c-border)",
+          borderRadius: 4,
+          padding: "1px 6px",
+          letterSpacing: 0.3,
+          marginLeft: -4,
+        }}
+      >
+        v{__APP_VERSION__}
+      </span>
       <button onClick={newFile} style={btn}>
         New .org…
       </button>
