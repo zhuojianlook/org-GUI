@@ -104,6 +104,29 @@ export default function ContextMenu() {
     };
   }, [menu, close]);
 
+  // The tag-picker view's data lists are declared as hooks here so they're
+  // called on EVERY render — even when the menu is closed — to keep React's
+  // hooks order stable. Without this, opening the menu mid-session would
+  // suddenly invoke new useMemo calls and React would freeze the tree with
+  // the "rendered fewer hooks than expected" error (which is what produced
+  // the grey-screen lock-up on right-click).
+  const knownTags = useMemo(() => {
+    const s = new Set<string>();
+    if (doc) {
+      for (const n of doc.nodes) {
+        for (const t of n.tags ?? []) s.add(t);
+        for (const t of n.tagsAll ?? []) s.add(t);
+      }
+    }
+    for (const k of Object.keys(tagColors)) s.add(k);
+    return [...s].sort();
+  }, [doc, tagColors]);
+  const filteredTags = useMemo(() => {
+    const q = tagDraft.trim().toLowerCase();
+    if (!q) return knownTags;
+    return knownTags.filter((t) => t.toLowerCase().includes(q));
+  }, [knownTags, tagDraft]);
+
   if (!menu || !node) return null;
 
   const isExpanded = expanded.has(node.id);
@@ -172,26 +195,6 @@ export default function ContextMenu() {
       danger: true,
     },
   ];
-
-  // Tag picker view: union of every known tag (doc tags + colour-map keys
-  // for orphan tags defined in the popover). Sorted, search-filterable via
-  // the same draft input that the user types into.
-  const knownTags = useMemo(() => {
-    const s = new Set<string>();
-    if (doc) {
-      for (const n of doc.nodes) {
-        for (const t of n.tags ?? []) s.add(t);
-        for (const t of n.tagsAll ?? []) s.add(t);
-      }
-    }
-    for (const k of Object.keys(tagColors)) s.add(k);
-    return [...s].sort();
-  }, [doc, tagColors]);
-  const filteredTags = useMemo(() => {
-    const q = tagDraft.trim().toLowerCase();
-    if (!q) return knownTags;
-    return knownTags.filter((t) => t.toLowerCase().includes(q));
-  }, [knownTags, tagDraft]);
 
   const applyTag = async (tag: string) => {
     const t = tag.trim().replace(/^:|:$/g, "");
