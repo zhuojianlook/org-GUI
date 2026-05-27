@@ -81,37 +81,33 @@ export default function TagAura() {
         height="1"
       >
         <defs>
-          {/* Luminous glow: two blur scales merged with the sharp source on top.
-              The wider blur is the soft halo, the narrower blur is the core
-              glow, and the original strokes sit crisp at the centre. */}
+          {/* Blur-only filter: no source-graphic merge, so the sharp strokes
+              never render — only the diffused glow survives. The MST geometry
+              is still doing the work; you just see the luminance trail it
+              traces, not the line itself. */}
           <filter id="org-neuron-glow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="g1" />
-            <feGaussianBlur in="SourceGraphic" stdDeviation="9" result="g2" />
-            <feMerge>
-              <feMergeNode in="g2" />
-              <feMergeNode in="g1" />
-              <feMergeNode in="g1" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
+            <feGaussianBlur in="SourceGraphic" stdDeviation="14" />
           </filter>
         </defs>
         {groups.map(({ tag, color, centers, edges }) => (
-          <g key={tag} filter="url(#org-neuron-glow)">
-            {/* Filaments — thin curved strokes along the MST. */}
+          <g key={tag} filter="url(#org-neuron-glow)" opacity={0.6}>
+            {/* Trail along the MST edges — wide enough to read as a glow
+                even after the 14-px Gaussian blur smears it. */}
             {edges.map(([a, b], i) => (
               <path
                 key={i}
                 d={curvedPath(a, b)}
                 stroke={color}
-                strokeWidth={1.6}
+                strokeWidth={7}
                 strokeLinecap="round"
                 fill="none"
-                opacity={0.85}
               />
             ))}
-            {/* Somata — a small glowing dot at every tagged node's centre. */}
+            {/* Soft luminous dot at each tagged node — gives every node its
+                own light source that blends into the connecting trails so
+                nearby tagged nodes feel like they're sharing a glow. */}
             {centers.map(([x, y], i) => (
-              <circle key={`s${i}`} cx={x} cy={y} r={4} fill={color} opacity={0.95} />
+              <circle key={`s${i}`} cx={x} cy={y} r={14} fill={color} />
             ))}
           </g>
         ))}

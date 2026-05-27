@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.12")
+(defconst org-gui-bridge-version "0.2.13")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
