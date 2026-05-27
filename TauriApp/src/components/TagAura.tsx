@@ -118,23 +118,24 @@ export default function TagAura() {
                 />
               ))}
             </g>
-            {/* MST filaments, ALWAYS visible. Stroke width shrinks with
-                distance (inverse decay) so far edges read as ghostly
-                whispers and close edges as confident links. */}
+            {/* MST filaments rendered as TAPERED dendrite polygons — wide at
+                each endpoint (near the node), pinched in the middle. SVG
+                strokes can't vary width along a path, so we sample the bezier
+                and emit a closed shape with perpendicular offsets. Distance
+                still scales the overall thickness so far edges stay thin. */}
             <g filter="url(#org-aura-line)" opacity={0.9}>
               {edges.map(([a, b], i) => {
                 const [ax, ay] = centerOf(a);
                 const [bx, by] = centerOf(b);
                 const d = Math.hypot(ax - bx, ay - by);
-                const sw = strokeWidthForDistance(d);
+                const scale = widthScaleForDistance(d);
+                const wide = 12 * scale; // width at endpoints
+                const narrow = Math.max(0.6, 1.4 * scale); // width at midpoint
                 return (
                   <path
                     key={i}
-                    d={curvedPath(ax, ay, bx, by)}
-                    stroke={color}
-                    strokeWidth={sw}
-                    strokeLinecap="round"
-                    fill="none"
+                    d={taperedBezierPolygon(ax, ay, bx, by, wide, narrow)}
+                    fill={color}
                   />
                 );
               })}
@@ -150,25 +151,72 @@ function centerOf(h: { x: number; y: number; w: number; h: number }): [number, n
   return [h.x + h.w / 2, h.y + h.h / 2];
 }
 
-/** Inverse-quadratic decay: very close pairs ~6 px, distant pairs trail off
- *  to a hair-thin ~0.4 px line. Always positive so the edge is never
- *  invisible — matches the user's "always present, just thinner". */
-function strokeWidthForDistance(d: number): number {
-  return Math.max(0.4, 7 / (1 + d / 110));
+/** Inverse decay: scale factor for the overall dendrite thickness. Near pairs
+ *  scale ≈ 1 (full thickness), far pairs scale ≈ 0.15 (hair-thin). Keeps the
+ *  "always present, just thinner" rule. */
+function widthScaleForDistance(d: number): number {
+  return Math.max(0.15, 1 / (1 + d / 200));
 }
 
-/** Quadratic bezier between (ax,ay) and (bx,by) with a perpendicular offset
- *  for organic curvature. */
-function curvedPath(ax: number, ay: number, bx: number, by: number): string {
+/**
+ * Generate a closed SVG path that traces a tapered "dendrite" polygon along
+ * a quadratic bezier from A to B. Samples the bezier at N points; at each
+ * sample we offset perpendicular to the tangent by ±widthAt(t)/2 where the
+ * width is `wide` at the endpoints and `narrow` at the midpoint, following
+ * a smooth `1 - sin(πt)` taper. The two offset paths form one closed shape.
+ *
+ * The shape's perpendicular control point is the same one we used to give
+ * the old curved stroke its organic curvature.
+ */
+function taperedBezierPolygon(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  wide: number,
+  narrow: number,
+  samples = 24,
+): string {
   const dx = bx - ax;
   const dy = by - ay;
   const len = Math.max(1, Math.hypot(dx, dy));
   const offset = Math.min(len * 0.15, 60);
-  const px = -dy / len;
-  const py = dx / len;
-  const mx = (ax + bx) / 2 + px * offset;
-  const my = (ay + by) / 2 + py * offset;
-  return `M ${ax},${ay} Q ${mx},${my} ${bx},${by}`;
+  // Perpendicular unit vector for the control-point offset.
+  const ux = -dy / len;
+  const uy = dx / len;
+  const cx = (ax + bx) / 2 + ux * offset;
+  const cy = (ay + by) / 2 + uy * offset;
+
+  const upper: [number, number][] = [];
+  const lower: [number, number][] = [];
+  for (let i = 0; i <= samples; i++) {
+    const t = i / samples;
+    const ti = 1 - t;
+    // Point on quadratic bezier P(t) = (1-t)²A + 2t(1-t)C + t²B
+    const px = ti * ti * ax + 2 * t * ti * cx + t * t * bx;
+    const py = ti * ti * ay + 2 * t * ti * cy + t * t * by;
+    // Tangent P'(t) = 2(1-t)(C-A) + 2t(B-C)
+    const tx = 2 * ti * (cx - ax) + 2 * t * (bx - cx);
+    const ty = 2 * ti * (cy - ay) + 2 * t * (by - cy);
+    const tl = Math.max(0.0001, Math.hypot(tx, ty));
+    // Perpendicular to the tangent (rotated 90°), unit length.
+    const nxi = -ty / tl;
+    const nyi = tx / tl;
+    // Smooth dendrite taper: width(0) = wide, width(0.5) = narrow,
+    // width(1) = wide. `1 - sin(πt)` is wide → narrow → wide with C¹
+    // continuity (no kinks at the endpoints).
+    const u = 1 - Math.sin(Math.PI * t);
+    const w = (narrow + (wide - narrow) * u) / 2;
+    upper.push([px + nxi * w, py + nyi * w]);
+    lower.push([px - nxi * w, py - nyi * w]);
+  }
+
+  // Walk upper forward, then lower in reverse, close the polygon.
+  const parts: string[] = [`M ${upper[0][0]},${upper[0][1]}`];
+  for (let i = 1; i < upper.length; i++) parts.push(`L ${upper[i][0]},${upper[i][1]}`);
+  for (let i = lower.length - 1; i >= 0; i--) parts.push(`L ${lower[i][0]},${lower[i][1]}`);
+  parts.push("Z");
+  return parts.join(" ");
 }
 
 /** Prim's MST over the halo centres. Returns pairs of halos forming the
