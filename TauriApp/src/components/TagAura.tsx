@@ -3,23 +3,23 @@ import { ViewportPortal, useStore } from "@xyflow/react";
 import { useOrgStore } from "../store/useOrgStore";
 
 /**
- * Ephemeral "neuron" overlay that links tagged nodes with glowing colored
- * filaments. For each coloured tag we:
- *   1. Collect the centre point of every tagged-and-visible node.
- *   2. Build a minimum spanning tree (Prim's, O(n²) — tagged-node counts are
- *      tiny) over those centres so we draw N-1 strokes instead of all pairs,
- *      avoiding visual clutter.
- *   3. Render each MST edge as a perpendicular-offset quadratic bezier so the
- *      filaments curve organically instead of running straight lines through
- *      the canvas.
- *   4. Drop a small "soma" dot at each tagged node centre.
- *   5. Pump the whole tag group through a multi-stage Gaussian-blur+feMerge
- *      filter — true additive glow, not the alpha-threshold blobs that the
- *      previous goo filter produced.
+ * Per-node radiant aura. Each tagged node emits its own soft luminous halo
+ * in its tag colour — a small bright core surrounded by a wide Gaussian
+ * blur, just like a star's corona. Two design constraints make the result
+ * read as "shared light" instead of "fuzzy line" or "polygon hull":
  *
- * Respects the same global toggle and filter-override semantics as before:
- * OFF + no filter → render nothing; OFF + filter set → only the filtered
- * tag's filaments draw; ON → every coloured tag glows.
+ *  1. No MST, no paths, no connecting lines drawn. Glow is per-node only.
+ *     If two tagged nodes sit close, their wide halos overlap in space and
+ *     blend — that overlap IS the "sharing". If they're far apart, two
+ *     isolated stars.
+ *  2. mix-blend-mode: screen on the SVG layer so the colors blend
+ *     ADDITIVELY against the dark canvas (overlapping halos brighten
+ *     instead of just stacking with opacity). Same node carrying multiple
+ *     coloured tags gets multiple stacked halos that blend the same way.
+ *
+ * Respects the global ✦ Aura toggle and the filter-override: OFF + no
+ * filter → render nothing; OFF + filter set → only the filtered tag's
+ * halos draw; ON → every coloured tag glows.
  */
 export default function TagAura() {
   const tagColors = useOrgStore((s) => s.tagColors);
@@ -28,14 +28,14 @@ export default function TagAura() {
   const doc = useOrgStore((s) => s.doc);
   const flowNodes = useStore((s) => s.nodes);
 
-  const groups = useMemo(() => {
-    if (!doc) return [] as { tag: string; color: string; centers: [number, number][]; edges: [[number, number], [number, number]][] }[];
+  const halos = useMemo(() => {
+    if (!doc) return [] as { key: string; color: string; cx: number; cy: number }[];
     if (!tagAuraEnabled && tagFilter == null) return [];
 
     const nodeById = new Map<string, typeof doc.nodes[number]>();
     for (const n of doc.nodes) nodeById.set(n.id, n);
 
-    const buckets = new Map<string, [number, number][]>();
+    const out: { key: string; color: string; cx: number; cy: number }[] = [];
     for (const fn of flowNodes) {
       const org = nodeById.get(fn.id);
       if (!org) continue;
@@ -47,25 +47,13 @@ export default function TagAura() {
       const cy = fn.position.y + h / 2;
       for (const t of tags) {
         if (tagFilter != null && t !== tagFilter) continue;
-        const arr = buckets.get(t) ?? [];
-        arr.push([cx, cy]);
-        buckets.set(t, arr);
+        out.push({ key: `${fn.id}:${t}`, color: tagColors[t], cx, cy });
       }
-    }
-
-    const out = [];
-    for (const [tag, centers] of buckets) {
-      out.push({
-        tag,
-        color: tagColors[tag],
-        centers,
-        edges: minimumSpanningTreeEdges(centers),
-      });
     }
     return out;
   }, [doc, flowNodes, tagColors, tagFilter, tagAuraEnabled]);
 
-  if (groups.length === 0) return null;
+  if (halos.length === 0) return null;
 
   return (
     <ViewportPortal>
@@ -76,107 +64,30 @@ export default function TagAura() {
           top: 0,
           overflow: "visible",
           pointerEvents: "none",
+          // Additive light: overlapping halos brighten the dark canvas
+          // instead of just stacking with alpha. The "shared glow" the user
+          // wanted falls out of this for free when nodes are close enough
+          // for their wide blurs to overlap.
+          mixBlendMode: "screen",
         }}
         width="1"
         height="1"
       >
         <defs>
-          {/* Blur-only filter: no source-graphic merge, so the sharp strokes
-              never render — only the diffused glow survives. The MST geometry
-              is still doing the work; you just see the luminance trail it
-              traces, not the line itself. */}
-          <filter id="org-neuron-glow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="14" />
+          {/* Pure Gaussian blur — no alpha threshold (that's what flattened
+              the colours into grey blobs in v0.2.11). The wide blur is the
+              corona; the small filled circle below is the bright core that
+              survives the blur as a hotspot. */}
+          <filter id="org-aura-blur" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="28" />
           </filter>
         </defs>
-        {groups.map(({ tag, color, centers, edges }) => (
-          <g key={tag} filter="url(#org-neuron-glow)" opacity={0.6}>
-            {/* Trail along the MST edges — wide enough to read as a glow
-                even after the 14-px Gaussian blur smears it. */}
-            {edges.map(([a, b], i) => (
-              <path
-                key={i}
-                d={curvedPath(a, b)}
-                stroke={color}
-                strokeWidth={7}
-                strokeLinecap="round"
-                fill="none"
-              />
-            ))}
-            {/* Soft luminous dot at each tagged node — gives every node its
-                own light source that blends into the connecting trails so
-                nearby tagged nodes feel like they're sharing a glow. */}
-            {centers.map(([x, y], i) => (
-              <circle key={`s${i}`} cx={x} cy={y} r={14} fill={color} />
-            ))}
-          </g>
-        ))}
+        <g filter="url(#org-aura-blur)">
+          {halos.map(({ key, color, cx, cy }) => (
+            <circle key={key} cx={cx} cy={cy} r={22} fill={color} opacity={0.85} />
+          ))}
+        </g>
       </svg>
     </ViewportPortal>
   );
-}
-
-/** Quadratic bezier between A and B with a small perpendicular offset so the
- *  filament reads as a curve, not a straight line. Offset is proportional to
- *  the segment length, capped so very long links don't fly off the canvas. */
-function curvedPath(a: [number, number], b: [number, number]): string {
-  const [ax, ay] = a;
-  const [bx, by] = b;
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len = Math.max(1, Math.hypot(dx, dy));
-  const offset = Math.min(len * 0.18, 60);
-  // Rotate (dx,dy)/len by 90° to get the perpendicular unit vector.
-  const px = -dy / len;
-  const py = dx / len;
-  const mx = (ax + bx) / 2 + px * offset;
-  const my = (ay + by) / 2 + py * offset;
-  return `M ${ax},${ay} Q ${mx},${my} ${bx},${by}`;
-}
-
-/** Prim's MST over a list of points. Returns the N-1 edges connecting them as
- *  pairs of original point coordinates. O(n²) — fine for the tens of nodes
- *  any single tag will ever realistically span. */
-function minimumSpanningTreeEdges(
-  points: [number, number][],
-): [[number, number], [number, number]][] {
-  const n = points.length;
-  if (n < 2) return [];
-  const inTree = new Array(n).fill(false);
-  const fromIdx = new Array(n).fill(-1);
-  const cost = new Array(n).fill(Infinity);
-  inTree[0] = true;
-  cost[0] = 0;
-  for (let j = 1; j < n; j++) {
-    cost[j] = dist(points[0], points[j]);
-    fromIdx[j] = 0;
-  }
-  const edges: [[number, number], [number, number]][] = [];
-  for (let step = 1; step < n; step++) {
-    let best = -1;
-    let bestCost = Infinity;
-    for (let j = 0; j < n; j++) {
-      if (!inTree[j] && cost[j] < bestCost) {
-        bestCost = cost[j];
-        best = j;
-      }
-    }
-    if (best === -1) break;
-    inTree[best] = true;
-    edges.push([points[fromIdx[best]], points[best]]);
-    for (let j = 0; j < n; j++) {
-      if (!inTree[j]) {
-        const c = dist(points[best], points[j]);
-        if (c < cost[j]) {
-          cost[j] = c;
-          fromIdx[j] = best;
-        }
-      }
-    }
-  }
-  return edges;
-}
-
-function dist(a: [number, number], b: [number, number]): number {
-  return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
