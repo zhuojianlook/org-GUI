@@ -40,6 +40,7 @@ export default function TimelineGraph() {
   const select = useOrgStore((s) => s.select);
   const flashNode = useOrgStore((s) => s.flashNode);
   const expanded = useOrgStore((s) => s.expanded);
+  const tableCollapsed = useOrgStore((s) => s.tableCollapsed);
   const rootPositions = useOrgStore((s) => s.rootPositions);
   const setRootPosition = useOrgStore((s) => s.setRootPosition);
   const setDropTarget = useOrgStore((s) => s.setDropTarget);
@@ -51,8 +52,8 @@ export default function TimelineGraph() {
   const rf = useReactFlow();
 
   const layout = useMemo(
-    () => (doc ? buildLayout(doc, expanded, rootPositions) : null),
-    [doc, expanded, rootPositions],
+    () => (doc ? buildLayout(doc, expanded, rootPositions, tableCollapsed) : null),
+    [doc, expanded, rootPositions, tableCollapsed],
   );
 
   const byId = useMemo(() => new Map((doc?.nodes ?? []).map((n) => [n.id, n] as const)), [doc]);

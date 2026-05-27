@@ -39,11 +39,20 @@ function hasOwnDate(n: OrgNode): boolean {
   );
 }
 
+// A collapsed table renders as a single "▸ Table (rows × cols)" pill instead
+// of the full editor; reserve just enough vertical space for that pill so
+// folding a table actually shrinks the node.
+const TABLE_COLLAPSED_H = 22;
+
 /** Estimated rendered height of the entry body shown inside a node. Treats
  *  org tables specially because the inline TableEditor renders much taller
  *  than 16 px per line — if we left them on the per-line estimate the node
  *  box would underflow and adjacent nodes would overlap. */
-function bodyHeight(body: string | null): number {
+function bodyHeight(
+  body: string | null,
+  nodeId: string,
+  tableCollapsed: Set<string>,
+): number {
   if (!body) return 0;
   let h = 2; // marginTop of the body block
   const tables = findTableBlocks(body);
@@ -57,15 +66,20 @@ function bodyHeight(body: string | null): number {
     h += line.trim() === "" ? BLANK_LINE_H : BODY_LINE_H;
   });
   for (const t of tables) {
-    h += TABLE_MARGIN + t.rows.length * TABLE_ROW_H + TABLE_COL_REMOVE_ROW_H + TABLE_TOOLBAR_H;
+    const key = `${nodeId}:${t.startLine}`;
+    if (tableCollapsed.has(key)) {
+      h += TABLE_MARGIN + TABLE_COLLAPSED_H;
+    } else {
+      h += TABLE_MARGIN + t.rows.length * TABLE_ROW_H + TABLE_COL_REMOVE_ROW_H + TABLE_TOOLBAR_H;
+    }
   }
   return h;
 }
 
 /** Estimated rendered height of a node (heading + planning line + body). */
-function nodeHeight(n: OrgNode): number {
+function nodeHeight(n: OrgNode, tableCollapsed: Set<string>): number {
   const plan = n.rawScheduled || n.rawDeadline ? PLAN_H : 0;
-  return BASE_H + plan + bodyHeight(n.body);
+  return BASE_H + plan + bodyHeight(n.body, n.id, tableCollapsed);
 }
 
 /**
@@ -78,6 +92,7 @@ export function buildLayout(
   doc: OrgDoc,
   expanded: Set<string>,
   rootPositions: Record<number, { x: number; y: number }>,
+  tableCollapsed: Set<string>,
 ): LayoutResult {
   const nodes = doc.nodes;
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
@@ -118,14 +133,14 @@ export function buildLayout(
   const rootTotalH = new Map<string, number>();
   for (const n of visible) {
     const r = rootOf(n.id);
-    rootTotalH.set(r, (rootTotalH.get(r) || 0) + nodeHeight(n) + NODE_GAP);
+    rootTotalH.set(r, (rootTotalH.get(r) || 0) + nodeHeight(n, tableCollapsed) + NODE_GAP);
   }
   const defaultAnchorY = new Map<string, number>();
   let runDefaultY = 0;
   for (const n of nodes) {
     if (!n.parent) {
       defaultAnchorY.set(n.id, runDefaultY);
-      runDefaultY += (rootTotalH.get(n.id) || nodeHeight(n)) + ROOT_GAP;
+      runDefaultY += (rootTotalH.get(n.id) || nodeHeight(n, tableCollapsed)) + ROOT_GAP;
     }
   }
 
@@ -157,7 +172,7 @@ export function buildLayout(
       } as OrgNodeView,
       zIndex: 10,
     });
-    runY += nodeHeight(n) + NODE_GAP;
+    runY += nodeHeight(n, tableCollapsed) + NODE_GAP;
 
     if (n.parent && visibleIds.has(n.parent)) {
       edges.push({

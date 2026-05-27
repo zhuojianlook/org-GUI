@@ -172,9 +172,25 @@ export default function Toolbar() {
         <option value="experimental">Experimental</option>
       </select>
       <button
-        onClick={checkForUpdates}
+        onClick={
+          updateState === "done"
+            ? () => {
+                // The download already completed — clicking "Restart to apply ↻"
+                // must actually relaunch the app, not run checkForUpdates again
+                // (which would just re-detect the installed update and loop).
+                invoke("restart_app").catch((e) => {
+                  setUpdateState("error");
+                  setUpdateMsg(String(e));
+                });
+              }
+            : checkForUpdates
+        }
         disabled={updateState === "checking" || updateState === "downloading"}
-        title={updateMsg || `Check for ${updateChannel} updates`}
+        title={
+          updateState === "done"
+            ? "Relaunch the app to apply the downloaded update"
+            : updateMsg || `Check for ${updateChannel} updates`
+        }
         style={{
           ...btn,
           ...(updateState === "done"

@@ -26,6 +26,10 @@ interface Props {
  */
 export default function TableEditor({ node, block }: Props) {
   const setBody = useOrgStore((s) => s.setBody);
+  const tableCollapsed = useOrgStore((s) => s.tableCollapsed);
+  const toggleTableCollapsed = useOrgStore((s) => s.toggleTableCollapsed);
+  const collapseKey = `${node.id}:${block.startLine}`;
+  const isCollapsed = tableCollapsed.has(collapseKey);
 
   const [rows, setRows] = useState<string[][]>(block.rows);
   const [hasHeader, setHasHeader] = useState(block.hasHeader);
@@ -37,6 +41,43 @@ export default function TableEditor({ node, block }: Props) {
       setHasHeader(block.hasHeader);
     }
   }, [block]);
+
+  const colCountTotal = Math.max(...block.rows.map((r) => r.length), 1);
+  if (isCollapsed) {
+    return (
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          toggleTableCollapsed(node.id, block.startLine);
+        }}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        title="Expand this table"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          alignSelf: "flex-start",
+          marginTop: 4,
+          marginBottom: 2,
+          padding: "2px 8px",
+          background: "var(--c-surface2)",
+          color: "var(--c-text-dim)",
+          border: "1px dashed var(--c-border)",
+          borderRadius: 4,
+          fontFamily: "inherit",
+          fontSize: 11,
+          cursor: "pointer",
+        }}
+      >
+        <span>▸</span>
+        <span>
+          Table ({block.rows.length} {block.rows.length === 1 ? "row" : "rows"} × {colCountTotal}{" "}
+          {colCountTotal === 1 ? "col" : "cols"})
+        </span>
+      </button>
+    );
+  }
 
   const commit = (nextRows: string[][], nextHasHeader = hasHeader) => {
     setRows(nextRows);
@@ -168,7 +209,7 @@ export default function TableEditor({ node, block }: Props) {
         </tbody>
       </table>
 
-      <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+      <div style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "center" }}>
         <button onClick={() => commit(withRowInserted(rows, rows.length))} style={addBtn} title="Append row">
           + row
         </button>
@@ -181,6 +222,14 @@ export default function TableEditor({ node, block }: Props) {
           title="Toggle a separator after the first row (header style)"
         >
           {hasHeader ? "✓ header" : "header"}
+        </button>
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={() => toggleTableCollapsed(node.id, block.startLine)}
+          style={{ ...addBtn, color: "var(--c-text-dim)" }}
+          title="Collapse this table to a one-line summary"
+        >
+          ▾ hide
         </button>
       </div>
     </div>

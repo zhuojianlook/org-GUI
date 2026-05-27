@@ -381,6 +381,14 @@ async fn download_and_install_update(
     Ok("Installed. Please restart the app to apply.".to_string())
 }
 
+/// Relaunch the running app — bound to the "Restart to apply ↻" button after
+/// a successful in-app update. Without this the frontend's button never
+/// actually triggers a relaunch and the user is stuck on the old binary.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// Open a terminal Emacs frame (emacsclient -t) on FILE inside a PTY. Streams
 /// the terminal output to the frontend via `emacs-term-data` events and returns
 /// a session id used by the write/resize/close commands.
@@ -522,6 +530,7 @@ pub fn run() {
             check_prereqs,
             install_prereqs,
             download_and_install_update,
+            restart_app,
             emacs_term_open,
             emacs_term_write,
             emacs_term_resize,

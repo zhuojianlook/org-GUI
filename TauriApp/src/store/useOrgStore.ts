@@ -126,6 +126,31 @@ function saveExpanded(file: string | null, ids: Set<string>) {
   }
 }
 
+// Per-file set of collapsed table keys (`${nodeId}:${tableStartLine}`).
+// A collapsed table renders as a one-line "▸ Table (N × M)" summary instead of
+// the full inline editor — useful when a node has a big table that's not the
+// focus right now and would otherwise eat a lot of vertical space.
+const TABLE_KEY = (file: string) => `org-gui:tablecol:${file}`;
+
+function loadTableCollapsed(file: string | null): Set<string> {
+  if (!file) return new Set();
+  try {
+    const raw = localStorage.getItem(TABLE_KEY(file));
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveTableCollapsed(file: string | null, s: Set<string>) {
+  if (!file) return;
+  try {
+    localStorage.setItem(TABLE_KEY(file), JSON.stringify([...s]));
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // Milestone-timeline zoom + horizontal pan, persisted per file.
 export type ZoomLevel = "fit" | "1w" | "2w" | "1m" | "3m" | "6m" | "1y";
 export interface TimelineView {
@@ -241,6 +266,7 @@ interface OrgState {
   rootPositions: Record<number, { x: number; y: number }>;
   milestones: Milestone[];
   timelineView: TimelineView; // milestone-band zoom + pan
+  tableCollapsed: Set<string>; // keys `${nodeId}:${startLine}` → folded tables
   updateChannel: UpdateChannel;
   contextMenu: ContextMenuState | null;
   dropTargetId: string | null;
@@ -275,6 +301,7 @@ interface OrgState {
   addMilestone: (iso: string, label?: string) => string;
   updateMilestone: (id: string, patch: Partial<Pick<Milestone, "iso" | "label">>) => void;
   removeMilestone: (id: string) => void;
+  toggleTableCollapsed: (nodeId: string, startLine: number) => void;
   setTimelineView: (v: Partial<TimelineView>) => void;
   setUpdateChannel: (c: UpdateChannel) => void;
   openContextMenu: (x: number, y: number, nodeId: string) => void;
@@ -304,6 +331,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   rootPositions: {},
   milestones: [],
   timelineView: { zoom: "fit", centerMs: Date.now() },
+  tableCollapsed: new Set<string>(),
   updateChannel: loadUpdateChannel(),
   contextMenu: null,
   dropTargetId: null,
@@ -336,6 +364,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       rootPositions: loadPositions(file),
       milestones: loadMilestones(file),
       timelineView: loadTimelineView(file),
+      tableCollapsed: loadTableCollapsed(file),
       editBegin: 0,
     });
     try {
@@ -497,6 +526,16 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       if (cur === id) set({ flashId: null });
     }, 1600);
   },
+
+  toggleTableCollapsed: (nodeId, startLine) =>
+    set((s) => {
+      const key = `${nodeId}:${startLine}`;
+      const next = new Set(s.tableCollapsed);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      saveTableCollapsed(s.file, next);
+      return { tableCollapsed: next };
+    }),
 
   setTimelineView: (v) =>
     set((s) => {
