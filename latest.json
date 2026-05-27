@@ -1,0 +1,15 @@
+{
+  "version": "0.1.0",
+  "notes": "Update to v0.1.0",
+  "pub_date": "2026-05-27T06:49:38Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrSzRyc2prSUZmam9SVFdUV3RTdXN3Uk9Wd3FqM2xPZ2Y1T0lLa0N1NW43allOS1NleDRTbzl2UU0wZTRaMk50OGZmSzBjU3MwSlp2TDBjV0JjMUZvTVFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5ODY0NTY1CWZpbGU6b3JnLUdVSV8wLjEuMF94NjQtc2V0dXAuZXhlCnU2WmViWThrVVVxL25OOFBUNGpwYzIxOWtoQzcwR3RuelFneTdaUU9ESXgrUkdCSmVnSHd6OFJ1WEQvanhKdVRjQ0JXV1NQOFBYMXk0WFBNSytSWUFBPT0K",
+      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/v0.1.0/org-GUI_0.1.0_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrSytrcUhnS1JKNFFTblVIaDY5ZjdyRFhwRkw3dmlybEpjMHZ1eXlSM2x5L0VFN05YaFQ4SHlEN2FtVWJvSmF1WGE1MWNGeTVINmpJbGJvMEU5WDBaNndzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5ODY0NDI5CWZpbGU6b3JnLUdVSS5hcHAudGFyLmd6ClBOZXJiS3Q5TERpMU84bjFmaU10b0N1Q2krSmlBVk5lbkVEOExFeU04TmFJejl2RFNRSzY4WmxEbVBBdHZMTTVteWRQclpFL2JQYmFqdEtGV1ZGbkJ3PT0K",
+      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/v0.1.0/org-GUI.app.tar.gz"
+    }
+  }
+}
