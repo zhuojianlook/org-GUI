@@ -394,11 +394,6 @@ export default function OrgNode({ data }: NodeProps) {
   const tagFilter = useOrgStore((s) => s.tagFilter);
   const tagColorList = nodeTagColors(n.tagsAll, tagColors);
   const tagTint = blendColorsRgba(tagColorList, 0.22);
-  // Soft outer halo in the tag colour so groups of tagged nodes appear to
-  // "share light" with their neighbours. Replaces the old hard convex-hull
-  // overlay which dominated the canvas. When several tagged nodes sit near
-  // each other their halos overlap and that's the visual grouping cue.
-  const tagGlow = blendColorsRgba(tagColorList, 0.55);
   const tagFiltered = tagFilter != null && !(n.tagsAll ?? []).includes(tagFilter);
   const doc = useOrgStore((s) => s.doc);
   const todoK = doc?.todoKeywords ?? [];
@@ -467,9 +462,7 @@ export default function OrgNode({ data }: NodeProps) {
               ? `inset 3px 0 0 ${accent}, 0 0 0 2px var(--c-green)`
               : selected
                 ? `inset 3px 0 0 ${accent}, 0 0 0 2px ${accent}66`
-                : tagGlow
-                  ? `inset 3px 0 0 ${accent}, 0 0 18px ${tagGlow}, 0 1px 3px rgba(0,0,0,0.4)`
-                  : `inset 3px 0 0 ${accent}, 0 1px 3px rgba(0,0,0,0.4)`,
+                : `inset 3px 0 0 ${accent}, 0 1px 3px rgba(0,0,0,0.4)`,
         padding: "4px 10px 4px 8px",
         maxWidth: 460,
         // Tag-filter dim takes priority over done-dim so the filter narrative

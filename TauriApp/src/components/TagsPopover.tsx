@@ -14,6 +14,11 @@ interface Props {
   onClose: () => void;
   /** Anchor coords (top-right of toolbar button) so the popover lines up. */
   anchorRect: DOMRect | null;
+  /** Optional DOM node of the toggle button so capture-phase outside-click
+   *  detection can ignore clicks on it (the button's own onClick already
+   *  toggles the popover; without this exclusion the close fires first and
+   *  the toggle then re-opens it). */
+  anchorEl?: HTMLElement | null;
 }
 
 /**
@@ -26,31 +31,41 @@ interface Props {
  * Anchored just below the toolbar's 🏷 Tags button. Closes on outside click
  * or Escape.
  */
-export default function TagsPopover({ onClose, anchorRect }: Props) {
+export default function TagsPopover({ onClose, anchorRect, anchorEl }: Props) {
   const doc = useOrgStore((s) => s.doc);
   const tagColors = useOrgStore((s) => s.tagColors);
   const tagFilter = useOrgStore((s) => s.tagFilter);
+  const tagAuraEnabled = useOrgStore((s) => s.tagAuraEnabled);
   const setTagColor = useOrgStore((s) => s.setTagColor);
   const setTagFilter = useOrgStore((s) => s.setTagFilter);
+  const setTagAuraEnabled = useOrgStore((s) => s.setTagAuraEnabled);
 
   const ref = useRef<HTMLDivElement>(null);
 
-  // Outside-click / Escape close. Use mousedown so the close fires before any
-  // click handler under the cursor — avoids re-toggling the toolbar button.
+  // Outside-click / Escape close. Use capture-phase pointerdown so the event
+  // can't be swallowed by React Flow's own capture-phase handler before it
+  // reaches us — that was what made canvas clicks fail to close the popover.
+  // The target check skips clicks inside the popover itself.
   useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (ref.current && ref.current.contains(t)) return;
+      // Skip closes that originate on the toolbar toggle button — its own
+      // onClick will close the popover; without this guard the close fires
+      // here first and the button's onClick then reopens it.
+      if (anchorEl && anchorEl.contains(t)) return;
+      onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    window.addEventListener("mousedown", onDown);
+    window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("keydown", onKey);
     return () => {
-      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("pointerdown", onDown, true);
       window.removeEventListener("keydown", onKey);
     };
-  }, [onClose]);
+  }, [onClose, anchorEl]);
 
   // De-dupe every tag visible to the popover: tags carried by any node PLUS
   // orphan tags the user has defined in the colour map but not yet assigned.
@@ -118,27 +133,49 @@ export default function TagsPopover({ onClose, anchorRect }: Props) {
         gap: 6,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "2px 4px 4px 4px", borderBottom: "1px solid var(--c-border)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "2px 4px 4px 4px", borderBottom: "1px solid var(--c-border)", gap: 6 }}>
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--c-text-dim)" }}>
           Tags
         </span>
-        <button
-          onClick={() => setTagFilter(null)}
-          disabled={tagFilter === null}
-          title="Show every task again (clear the tag filter)"
-          style={{
-            background: "transparent",
-            border: "1px solid var(--c-border)",
-            color: tagFilter === null ? "var(--c-text-dim)" : "var(--c-text)",
-            borderRadius: 4,
-            padding: "2px 8px",
-            fontSize: 11,
-            cursor: tagFilter === null ? "default" : "pointer",
-            opacity: tagFilter === null ? 0.45 : 1,
-          }}
-        >
-          All
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <button
+            onClick={() => setTagAuraEnabled(!tagAuraEnabled)}
+            title={
+              tagAuraEnabled
+                ? "Disable the glowing aura behind tagged nodes (the filter view still shows it for the active tag)"
+                : "Re-enable the glowing aura behind tagged nodes"
+            }
+            style={{
+              background: tagAuraEnabled ? "var(--c-accent)" : "transparent",
+              color: tagAuraEnabled ? "#fff" : "var(--c-text-dim)",
+              border: "1px solid var(--c-border)",
+              borderRadius: 4,
+              padding: "2px 8px",
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            ✦ Aura
+          </button>
+          <button
+            onClick={() => setTagFilter(null)}
+            disabled={tagFilter === null}
+            title="Show every task again (clear the tag filter)"
+            style={{
+              background: "transparent",
+              border: "1px solid var(--c-border)",
+              color: tagFilter === null ? "var(--c-text-dim)" : "var(--c-text)",
+              borderRadius: 4,
+              padding: "2px 8px",
+              fontSize: 11,
+              cursor: tagFilter === null ? "default" : "pointer",
+              opacity: tagFilter === null ? 0.45 : 1,
+            }}
+          >
+            All
+          </button>
+        </div>
       </div>
 
       {/* Always-visible input so the user can define a tag (with default

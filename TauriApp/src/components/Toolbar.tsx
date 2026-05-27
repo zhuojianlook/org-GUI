@@ -175,7 +175,11 @@ export default function Toolbar() {
         🏷 {tagFilter ? `:${tagFilter}:` : "Tags"}
       </button>
       {tagsOpen && (
-        <TagsPopover onClose={() => setTagsOpen(false)} anchorRect={tagsBtnRef.current?.getBoundingClientRect() ?? null} />
+        <TagsPopover
+          onClose={() => setTagsOpen(false)}
+          anchorRect={tagsBtnRef.current?.getBoundingClientRect() ?? null}
+          anchorEl={tagsBtnRef.current}
+        />
       )}
 
       <div style={{ flex: 1 }} />

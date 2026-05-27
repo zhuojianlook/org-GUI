@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useOrgStore } from "../store/useOrgStore";
 import { setDeadlineColor } from "../api/org";
 
@@ -10,6 +10,9 @@ interface MenuItem {
   divider?: boolean; // when true, render a separator BEFORE this item
   /** Optional preview swatch shown beside the label. */
   swatch?: string;
+  /** When true, clicking this item does NOT close the menu (used by the
+   *  "Add tag…" item which switches the menu into a sub-view). */
+  keepOpen?: boolean;
 }
 
 const DEADLINE_PRESETS: { label: string; color: string }[] = [
@@ -58,6 +61,20 @@ export default function ContextMenu() {
   const expanded = useOrgStore((s) => s.expanded);
   const select = useOrgStore((s) => s.select);
   const edit = useOrgStore((s) => s.edit);
+  const applyTagToNode = useOrgStore((s) => s.applyTagToNode);
+  const tagColors = useOrgStore((s) => s.tagColors);
+
+  // The menu toggles between "main" actions and the "tag picker" sub-view so
+  // single-node tagging is discoverable without the Cmd-click bulk gesture.
+  const [mode, setMode] = useState<"main" | "tag">("main");
+  const [tagDraft, setTagDraft] = useState("");
+  useEffect(() => {
+    // Reset to main view + draft any time the menu reopens on a different node.
+    if (menu) {
+      setMode("main");
+      setTagDraft("");
+    }
+  }, [menu?.nodeId, menu]);
 
   const node = useMemo(() => {
     if (!menu || !doc) return null;
@@ -113,6 +130,12 @@ export default function ContextMenu() {
       label: "◎ Focus / select",
       onClick: () => select(node.id),
     },
+    {
+      label: "🏷 Add tag…",
+      onClick: () => setMode("tag"),
+      keepOpen: true,
+      divider: true,
+    },
     // Deadline-color presets: only meaningful when the node actually has a
     // deadline. Each preset is a one-click swap; "Custom…" opens the native
     // color picker. "Clear" wipes the property back to defaults.
@@ -150,9 +173,36 @@ export default function ContextMenu() {
     },
   ];
 
+  // Tag picker view: union of every known tag (doc tags + colour-map keys
+  // for orphan tags defined in the popover). Sorted, search-filterable via
+  // the same draft input that the user types into.
+  const knownTags = useMemo(() => {
+    const s = new Set<string>();
+    if (doc) {
+      for (const n of doc.nodes) {
+        for (const t of n.tags ?? []) s.add(t);
+        for (const t of n.tagsAll ?? []) s.add(t);
+      }
+    }
+    for (const k of Object.keys(tagColors)) s.add(k);
+    return [...s].sort();
+  }, [doc, tagColors]);
+  const filteredTags = useMemo(() => {
+    const q = tagDraft.trim().toLowerCase();
+    if (!q) return knownTags;
+    return knownTags.filter((t) => t.toLowerCase().includes(q));
+  }, [knownTags, tagDraft]);
+
+  const applyTag = async (tag: string) => {
+    const t = tag.trim().replace(/^:|:$/g, "");
+    if (!t) return;
+    await applyTagToNode(node, t);
+    close();
+  };
+
   // Keep the menu fully on-screen even when triggered near the right/bottom edges.
   const WIDTH = 220;
-  const HEIGHT = items.length * 30 + 12;
+  const HEIGHT = mode === "tag" ? 260 : items.length * 30 + 12;
   const left = Math.min(menu.x, window.innerWidth - WIDTH - 8);
   const top = Math.min(menu.y, window.innerHeight - HEIGHT - 8);
 
@@ -173,7 +223,122 @@ export default function ContextMenu() {
         boxShadow: "0 8px 28px rgba(0,0,0,0.55)",
       }}
     >
-      {items.map((it, i) => (
+      {mode === "tag" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: 4, width: WIDTH }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setMode("main");
+                setTagDraft("");
+              }}
+              title="Back"
+              style={{
+                background: "transparent",
+                border: "1px solid var(--c-border)",
+                borderRadius: 4,
+                padding: "2px 6px",
+                fontSize: 11,
+                color: "var(--c-text-dim)",
+                cursor: "pointer",
+              }}
+            >
+              ‹
+            </button>
+            <span style={{ fontSize: 10.5, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--c-text-dim)", fontWeight: 700 }}>
+              Add tag to this node
+            </span>
+          </div>
+          <input
+            autoFocus
+            value={tagDraft}
+            onChange={(e) => setTagDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                applyTag(tagDraft);
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setMode("main");
+                setTagDraft("");
+              }
+            }}
+            placeholder="filter / type new tag"
+            style={{
+              background: "var(--c-bg)",
+              color: "var(--c-text)",
+              border: "1px solid var(--c-border)",
+              borderRadius: 4,
+              padding: "4px 6px",
+              fontSize: 12,
+              fontFamily: "ui-monospace, monospace",
+              outline: "none",
+            }}
+          />
+          <div style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1 }}>
+            {filteredTags.length === 0 ? (
+              <div style={{ padding: "8px 6px", fontSize: 11, color: "var(--c-text-dim)" }}>
+                {tagDraft.trim()
+                  ? `Press Enter to create :${tagDraft.trim().replace(/^:|:$/g, "")}: and apply`
+                  : "No tags yet — type one and press Enter."}
+              </div>
+            ) : (
+              filteredTags.map((t) => {
+                const already = (node.tagsAll ?? []).includes(t);
+                return (
+                  <button
+                    key={t}
+                    disabled={already}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      applyTag(t);
+                    }}
+                    title={already ? `This node already has :${t}:` : `Apply :${t}: to this node`}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      textAlign: "left",
+                      background: "transparent",
+                      border: "none",
+                      padding: "4px 6px",
+                      borderRadius: 4,
+                      fontSize: 12,
+                      fontFamily: "ui-monospace, monospace",
+                      color: already ? "var(--c-text-dim)" : "var(--c-text)",
+                      cursor: already ? "not-allowed" : "pointer",
+                      opacity: already ? 0.5 : 1,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (!already) e.currentTarget.style.background = "var(--c-surface2)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "transparent";
+                    }}
+                  >
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 2,
+                        background: tagColors[t] ?? "var(--c-border)",
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      :{t}:
+                    </span>
+                    {already && <span style={{ fontSize: 10 }}>✓</span>}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+      {mode === "main" && items.map((it, i) => (
         <div key={i}>
           {it.divider && i > 0 && (
             <div style={{ height: 1, background: "var(--c-border)", margin: "4px 0", opacity: 0.5 }} />
@@ -183,7 +348,7 @@ export default function ContextMenu() {
             onClick={(e) => {
               e.stopPropagation();
               it.onClick();
-              close();
+              if (!it.keepOpen) close();
             }}
             style={{
               display: "flex",

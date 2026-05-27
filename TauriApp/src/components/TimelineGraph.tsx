@@ -19,6 +19,7 @@ import OrgNode, { levelColor } from "./OrgNode";
 import TreeEdge from "./TreeEdge";
 import DependencyEdge from "./DependencyEdge";
 import SelectionBar from "./SelectionBar";
+import TagAura from "./TagAura";
 
 const nodeTypes = { org: OrgNode };
 const edgeTypes = { tree: TreeEdge, dependency: DependencyEdge };
@@ -377,6 +378,7 @@ export default function TimelineGraph() {
       defaultEdgeOptions={{ type: "tree" }}
     >
       <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#2f2f31" />
+      <TagAura />
       {depMode && (
         <div
           style={{

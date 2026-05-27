@@ -213,6 +213,28 @@ function saveTimelineView(file: string | null, v: TimelineView) {
   }
 }
 
+// Whether to draw the organic metaball aura behind tagged nodes. Persisted
+// globally so the user's preference survives reloads. Even when this is OFF,
+// the filter view still draws the aura for the *filtered* tag — otherwise
+// the filter loses its visual punch.
+const TAG_AURA_KEY = "org-gui:tagAuraEnabled";
+
+export function loadTagAuraEnabled(): boolean {
+  try {
+    return localStorage.getItem(TAG_AURA_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function saveTagAuraEnabled(v: boolean) {
+  try {
+    localStorage.setItem(TAG_AURA_KEY, v ? "true" : "false");
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // Update channel — which manifest URL the "Check for updates" button reads from.
 // Persisted globally (not per-file) so users opt in once.
 export type UpdateChannel = "stable" | "experimental";
@@ -303,6 +325,7 @@ interface OrgState {
   tableCollapsed: Set<string>; // keys `${nodeId}:${startLine}` → folded tables
   tagColors: Record<string, string>; // tag name → CSS colour (per file)
   tagFilter: string | null; // when set, only nodes carrying this tag stay sharp
+  tagAuraEnabled: boolean; // global toggle for the metaball halo overlay
   /** Multi-selection set for bulk operations (e.g. tag-many). Holds node ids.
    *  Separate from selectedId so the Details panel and ordinary single-select
    *  workflow don't interfere with bulk gestures. */
@@ -344,9 +367,11 @@ interface OrgState {
   toggleTableCollapsed: (nodeId: string, startLine: number) => void;
   setTagColor: (tag: string, color: string | null) => void;
   setTagFilter: (tag: string | null) => void;
+  setTagAuraEnabled: (v: boolean) => void;
   toggleMultiSelected: (id: string) => void;
   clearMultiSelected: () => void;
   applyTagToSelection: (tag: string) => Promise<void>;
+  applyTagToNode: (node: OrgNode, tag: string) => Promise<void>;
   setTimelineView: (v: Partial<TimelineView>) => void;
   setUpdateChannel: (c: UpdateChannel) => void;
   openContextMenu: (x: number, y: number, nodeId: string) => void;
@@ -380,6 +405,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   tableCollapsed: new Set<string>(),
   tagColors: {},
   tagFilter: null,
+  tagAuraEnabled: loadTagAuraEnabled(),
   multiSelected: new Set<string>(),
   updateChannel: loadUpdateChannel(),
   contextMenu: null,
@@ -611,6 +637,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
 
   setTagFilter: (tag) => set({ tagFilter: tag }),
 
+  setTagAuraEnabled: (v) => {
+    saveTagAuraEnabled(v);
+    set({ tagAuraEnabled: v });
+  },
+
   toggleMultiSelected: (id) =>
     set((s) => {
       const next = new Set(s.multiSelected);
@@ -630,6 +661,19 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiAddTagMany(file, begins, t);
+      set({ doc: newDoc, saving: false });
+    } catch (e) {
+      set({ error: String(e), saving: false });
+    }
+  },
+
+  applyTagToNode: async (node, tag) => {
+    const { file, doc } = get();
+    const t = tag.trim();
+    if (!file || !doc || !t) return;
+    set({ saving: true, error: null });
+    try {
+      const newDoc = await apiAddTagMany(file, [node.begin], t);
       set({ doc: newDoc, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
