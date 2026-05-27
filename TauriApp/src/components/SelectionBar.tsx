@@ -9,6 +9,7 @@ import { useOrgStore } from "../store/useOrgStore";
  */
 export default function SelectionBar() {
   const doc = useOrgStore((s) => s.doc);
+  const tagColors = useOrgStore((s) => s.tagColors);
   const multiSelected = useOrgStore((s) => s.multiSelected);
   const clearMultiSelected = useOrgStore((s) => s.clearMultiSelected);
   const applyTagToSelection = useOrgStore((s) => s.applyTagToSelection);
@@ -17,16 +18,20 @@ export default function SelectionBar() {
   const [picking, setPicking] = useState(false);
   const [draft, setDraft] = useState("");
 
-  // De-duped list of every existing tag, sorted, for quick re-use.
+  // De-duped list of every tag the user might want to apply: real tags from
+  // any node PLUS orphan tags defined in the colour map (i.e. user typed them
+  // in the Tags popover but never attached them yet).
   const allTags = useMemo(() => {
-    if (!doc) return [];
     const s = new Set<string>();
-    for (const n of doc.nodes) {
-      for (const t of n.tags ?? []) s.add(t);
-      for (const t of n.tagsAll ?? []) s.add(t);
+    if (doc) {
+      for (const n of doc.nodes) {
+        for (const t of n.tags ?? []) s.add(t);
+        for (const t of n.tagsAll ?? []) s.add(t);
+      }
     }
+    for (const k of Object.keys(tagColors)) s.add(k);
     return [...s].sort();
-  }, [doc]);
+  }, [doc, tagColors]);
 
   if (multiSelected.size === 0) return null;
 

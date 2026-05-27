@@ -1,5 +1,14 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useOrgStore } from "../store/useOrgStore";
+
+const DEFAULT_TAG_COLOURS = [
+  "#5a7fa8", // accent blue
+  "#e0a458", // amber
+  "#63a66a", // green
+  "#c678dd", // violet
+  "#5fb3a1", // teal
+  "#ff6c6b", // red
+];
 
 interface Props {
   onClose: () => void;
@@ -43,16 +52,44 @@ export default function TagsPopover({ onClose, anchorRect }: Props) {
     };
   }, [onClose]);
 
-  // De-dupe every tag that appears across all nodes (local + inherited).
+  // De-dupe every tag visible to the popover: tags carried by any node PLUS
+  // orphan tags the user has defined in the colour map but not yet assigned.
+  // That lets "+ new tag" land a fresh definition that survives until it's
+  // bulk-applied via the SelectionBar.
   const allTags = useMemo(() => {
-    if (!doc) return [];
     const s = new Set<string>();
-    for (const n of doc.nodes) {
-      for (const t of n.tags ?? []) s.add(t);
-      for (const t of n.tagsAll ?? []) s.add(t);
+    if (doc) {
+      for (const n of doc.nodes) {
+        for (const t of n.tags ?? []) s.add(t);
+        for (const t of n.tagsAll ?? []) s.add(t);
+      }
     }
+    for (const k of Object.keys(tagColors)) s.add(k);
     return [...s].sort();
+  }, [doc, tagColors]);
+
+  // Count nodes carrying each tag, so the user can tell an orphan apart from
+  // a tag that's already attached to something.
+  const tagCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (doc) {
+      for (const n of doc.nodes) {
+        for (const t of n.tagsAll ?? []) counts[t] = (counts[t] ?? 0) + 1;
+      }
+    }
+    return counts;
   }, [doc]);
+
+  const [newTagDraft, setNewTagDraft] = useState("");
+  const createNewTag = () => {
+    const raw = newTagDraft.trim().replace(/^:|:$/g, "");
+    if (!raw) return;
+    // Use a default colour cycling through the palette so the tag shows up
+    // in the popover even before the user picks a custom one.
+    const idx = Object.keys(tagColors).length % DEFAULT_TAG_COLOURS.length;
+    setTagColor(raw, DEFAULT_TAG_COLOURS[idx]);
+    setNewTagDraft("");
+  };
 
   const WIDTH = 260;
   const HEIGHT_MAX = 360;
@@ -104,9 +141,50 @@ export default function TagsPopover({ onClose, anchorRect }: Props) {
         </button>
       </div>
 
+      {/* Always-visible input so the user can define a tag (with default
+          colour) before any node carries it. Multi-select + Apply tag on the
+          canvas SelectionBar then attaches it to specific nodes. */}
+      <div style={{ display: "flex", gap: 6, padding: "2px 4px" }}>
+        <input
+          value={newTagDraft}
+          onChange={(e) => setNewTagDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") createNewTag();
+          }}
+          placeholder="new tag name"
+          style={{
+            flex: 1,
+            background: "var(--c-bg)",
+            color: "var(--c-text)",
+            border: "1px solid var(--c-border)",
+            borderRadius: 4,
+            padding: "3px 6px",
+            fontSize: 12,
+            fontFamily: "ui-monospace, monospace",
+            outline: "none",
+          }}
+        />
+        <button
+          onClick={createNewTag}
+          disabled={!newTagDraft.trim()}
+          style={{
+            background: newTagDraft.trim() ? "var(--c-accent)" : "var(--c-surface2)",
+            color: newTagDraft.trim() ? "#fff" : "var(--c-text-dim)",
+            border: "1px solid var(--c-border)",
+            borderRadius: 4,
+            padding: "3px 10px",
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: newTagDraft.trim() ? "pointer" : "not-allowed",
+          }}
+        >
+          + Add
+        </button>
+      </div>
+
       {allTags.length === 0 ? (
         <div style={{ padding: 14, fontSize: 12, color: "var(--c-text-dim)", textAlign: "center" }}>
-          No tags yet. Add tags to a heading (e.g. <code>:work:</code>) and they'll appear here.
+          No tags yet. Type a name above and hit Add, or tag a heading directly with <code>:work:</code>.
         </div>
       ) : (
         <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
@@ -190,9 +268,26 @@ export default function TagsPopover({ onClose, anchorRect }: Props) {
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
                   }}
-                  title={`:${tag}:`}
+                  title={`:${tag}: · ${tagCounts[tag] ?? 0} node${tagCounts[tag] === 1 ? "" : "s"}`}
                 >
                   :{tag}:
+                </span>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: "var(--c-text-dim)",
+                    flexShrink: 0,
+                    minWidth: 18,
+                    textAlign: "right",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                  title={
+                    (tagCounts[tag] ?? 0) === 0
+                      ? "Orphan tag — defined but no node carries it. Use Cmd-click + Apply tag on the canvas to assign it."
+                      : `${tagCounts[tag]} node${tagCounts[tag] === 1 ? "" : "s"} carry this tag`
+                  }
+                >
+                  {tagCounts[tag] ?? 0}
                 </span>
                 <button
                   onClick={() => setTagFilter(isFiltered ? null : tag)}
