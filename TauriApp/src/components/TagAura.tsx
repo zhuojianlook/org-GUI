@@ -3,23 +3,25 @@ import { ViewportPortal, useStore } from "@xyflow/react";
 import { useOrgStore } from "../store/useOrgStore";
 
 /**
- * Per-node radiant aura. Each tagged node emits its own soft luminous halo
- * in its tag colour — a small bright core surrounded by a wide Gaussian
- * blur, just like a star's corona. Two design constraints make the result
- * read as "shared light" instead of "fuzzy line" or "polygon hull":
+ * Tag aura — per-tag visual grouping in the canvas, designed to match the
+ * user's mental model after several iterations:
  *
- *  1. No MST, no paths, no connecting lines drawn. Glow is per-node only.
- *     If two tagged nodes sit close, their wide halos overlap in space and
- *     blend — that overlap IS the "sharing". If they're far apart, two
- *     isolated stars.
- *  2. mix-blend-mode: screen on the SVG layer so the colors blend
- *     ADDITIVELY against the dark canvas (overlapping halos brighten
- *     instead of just stacking with opacity). Same node carrying multiple
- *     coloured tags gets multiple stacked halos that blend the same way.
+ *  1. Each tagged node gets a soft RECTANGULAR fuzz in its tag colour
+ *     (sized to the node, not a giant disc). Heavy Gaussian blur turns it
+ *     into a luminous halo that follows the node's silhouette, with a
+ *     bright core and a fade-to-transparent edge.
+ *  2. MST edges between every tagged-node pair are ALWAYS drawn — but the
+ *     stroke width decays inverse-quadratically with distance so close
+ *     pairs read as bold filaments and far pairs as barely-there wisps.
+ *     The user wanted "always present, just thinner".
+ *  3. The whole SVG layer renders with mix-blend-mode: screen so
+ *     overlapping halos and crossing lines BRIGHTEN the canvas additively
+ *     instead of just stacking with opacity. More tagged nodes near each
+ *     other ⇒ more glow.
  *
- * Respects the global ✦ Aura toggle and the filter-override: OFF + no
- * filter → render nothing; OFF + filter set → only the filtered tag's
- * halos draw; ON → every coloured tag glows.
+ * Respects the global ✦ Aura toggle and filter override: OFF + no filter →
+ * nothing rendered; OFF + filter set → only the filtered tag draws; ON →
+ * every coloured tag glows.
  */
 export default function TagAura() {
   const tagColors = useOrgStore((s) => s.tagColors);
@@ -28,14 +30,17 @@ export default function TagAura() {
   const doc = useOrgStore((s) => s.doc);
   const flowNodes = useStore((s) => s.nodes);
 
-  const halos = useMemo(() => {
-    if (!doc) return [] as { key: string; color: string; cx: number; cy: number }[];
+  type Halo = { x: number; y: number; w: number; h: number };
+  type Group = { tag: string; color: string; halos: Halo[]; edges: [Halo, Halo][] };
+
+  const groups = useMemo(() => {
+    if (!doc) return [] as Group[];
     if (!tagAuraEnabled && tagFilter == null) return [];
 
     const nodeById = new Map<string, typeof doc.nodes[number]>();
     for (const n of doc.nodes) nodeById.set(n.id, n);
 
-    const out: { key: string; color: string; cx: number; cy: number }[] = [];
+    const buckets = new Map<string, Halo[]>();
     for (const fn of flowNodes) {
       const org = nodeById.get(fn.id);
       if (!org) continue;
@@ -43,17 +48,28 @@ export default function TagAura() {
       if (tags.length === 0) continue;
       const w = fn.width ?? fn.measured?.width ?? 220;
       const h = fn.height ?? fn.measured?.height ?? 60;
-      const cx = fn.position.x + w / 2;
-      const cy = fn.position.y + h / 2;
+      const halo: Halo = { x: fn.position.x, y: fn.position.y, w, h };
       for (const t of tags) {
         if (tagFilter != null && t !== tagFilter) continue;
-        out.push({ key: `${fn.id}:${t}`, color: tagColors[t], cx, cy });
+        const arr = buckets.get(t) ?? [];
+        arr.push(halo);
+        buckets.set(t, arr);
       }
+    }
+
+    const out: Group[] = [];
+    for (const [tag, halos] of buckets) {
+      out.push({
+        tag,
+        color: tagColors[tag],
+        halos,
+        edges: mstEdges(halos),
+      });
     }
     return out;
   }, [doc, flowNodes, tagColors, tagFilter, tagAuraEnabled]);
 
-  if (halos.length === 0) return null;
+  if (groups.length === 0) return null;
 
   return (
     <ViewportPortal>
@@ -64,30 +80,138 @@ export default function TagAura() {
           top: 0,
           overflow: "visible",
           pointerEvents: "none",
-          // Additive light: overlapping halos brighten the dark canvas
-          // instead of just stacking with alpha. The "shared glow" the user
-          // wanted falls out of this for free when nodes are close enough
-          // for their wide blurs to overlap.
           mixBlendMode: "screen",
         }}
         width="1"
         height="1"
       >
         <defs>
-          {/* Pure Gaussian blur — no alpha threshold (that's what flattened
-              the colours into grey blobs in v0.2.11). The wide blur is the
-              corona; the small filled circle below is the bright core that
-              survives the blur as a hotspot. */}
-          <filter id="org-aura-blur" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="28" />
+          {/* Heavy blur for the per-node fuzz — gives each rounded rect a
+              soft, asymmetric glow that follows the node silhouette instead
+              of a perfect circle. */}
+          <filter id="org-aura-fuzz" x="-100%" y="-100%" width="300%" height="300%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="18" />
+          </filter>
+          {/* Subtler blur for the filaments so they have a slight glow
+              without smearing into invisibility. */}
+          <filter id="org-aura-line" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" />
           </filter>
         </defs>
-        <g filter="url(#org-aura-blur)">
-          {halos.map(({ key, color, cx, cy }) => (
-            <circle key={key} cx={cx} cy={cy} r={22} fill={color} opacity={0.85} />
-          ))}
-        </g>
+
+        {groups.map(({ tag, color, halos, edges }) => (
+          <g key={tag}>
+            {/* Per-node rectangular fuzz. The rect is drawn solid; the
+                heavy blur turns it into a fade-to-transparent halo with a
+                bright core where the node sits. */}
+            <g filter="url(#org-aura-fuzz)" opacity={0.75}>
+              {halos.map((h, i) => (
+                <rect
+                  key={i}
+                  x={h.x}
+                  y={h.y}
+                  width={h.w}
+                  height={h.h}
+                  rx={10}
+                  ry={10}
+                  fill={color}
+                />
+              ))}
+            </g>
+            {/* MST filaments, ALWAYS visible. Stroke width shrinks with
+                distance (inverse decay) so far edges read as ghostly
+                whispers and close edges as confident links. */}
+            <g filter="url(#org-aura-line)" opacity={0.9}>
+              {edges.map(([a, b], i) => {
+                const [ax, ay] = centerOf(a);
+                const [bx, by] = centerOf(b);
+                const d = Math.hypot(ax - bx, ay - by);
+                const sw = strokeWidthForDistance(d);
+                return (
+                  <path
+                    key={i}
+                    d={curvedPath(ax, ay, bx, by)}
+                    stroke={color}
+                    strokeWidth={sw}
+                    strokeLinecap="round"
+                    fill="none"
+                  />
+                );
+              })}
+            </g>
+          </g>
+        ))}
       </svg>
     </ViewportPortal>
   );
+}
+
+function centerOf(h: { x: number; y: number; w: number; h: number }): [number, number] {
+  return [h.x + h.w / 2, h.y + h.h / 2];
+}
+
+/** Inverse-quadratic decay: very close pairs ~6 px, distant pairs trail off
+ *  to a hair-thin ~0.4 px line. Always positive so the edge is never
+ *  invisible — matches the user's "always present, just thinner". */
+function strokeWidthForDistance(d: number): number {
+  return Math.max(0.4, 7 / (1 + d / 110));
+}
+
+/** Quadratic bezier between (ax,ay) and (bx,by) with a perpendicular offset
+ *  for organic curvature. */
+function curvedPath(ax: number, ay: number, bx: number, by: number): string {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.max(1, Math.hypot(dx, dy));
+  const offset = Math.min(len * 0.15, 60);
+  const px = -dy / len;
+  const py = dx / len;
+  const mx = (ax + bx) / 2 + px * offset;
+  const my = (ay + by) / 2 + py * offset;
+  return `M ${ax},${ay} Q ${mx},${my} ${bx},${by}`;
+}
+
+/** Prim's MST over the halo centres. Returns pairs of halos forming the
+ *  N-1 minimum spanning edges, so we draw exactly enough lines to connect
+ *  every tagged node into one tree without visual clutter. */
+function mstEdges(halos: { x: number; y: number; w: number; h: number }[]): [
+  { x: number; y: number; w: number; h: number },
+  { x: number; y: number; w: number; h: number },
+][] {
+  const n = halos.length;
+  if (n < 2) return [];
+  const centers = halos.map(centerOf);
+  const inTree = new Array(n).fill(false);
+  const fromIdx = new Array(n).fill(-1);
+  const cost = new Array(n).fill(Infinity);
+  inTree[0] = true;
+  cost[0] = 0;
+  for (let j = 1; j < n; j++) {
+    cost[j] = Math.hypot(centers[0][0] - centers[j][0], centers[0][1] - centers[j][1]);
+    fromIdx[j] = 0;
+  }
+  const edges: [typeof halos[number], typeof halos[number]][] = [];
+  for (let step = 1; step < n; step++) {
+    let best = -1;
+    let bestCost = Infinity;
+    for (let j = 0; j < n; j++) {
+      if (!inTree[j] && cost[j] < bestCost) {
+        bestCost = cost[j];
+        best = j;
+      }
+    }
+    if (best === -1) break;
+    inTree[best] = true;
+    edges.push([halos[fromIdx[best]], halos[best]]);
+    for (let j = 0; j < n; j++) {
+      if (!inTree[j]) {
+        const c = Math.hypot(centers[best][0] - centers[j][0], centers[best][1] - centers[j][1]);
+        if (c < cost[j]) {
+          cost[j] = c;
+          fromIdx[j] = best;
+        }
+      }
+    }
+  }
+  return edges;
 }
