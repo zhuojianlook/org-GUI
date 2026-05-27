@@ -10,8 +10,30 @@ import { parseOrgDate, startOfDay } from "../utils/time";
 // ✕ to remove). Drag the band itself to pan through time at any non-Fit zoom.
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const MILESTONE_COLOR = "#c678dd"; // violet
+const MILESTONE_COLOR = "#c678dd"; // violet — default when a milestone has no explicit color
 const MS_DAY = 86_400_000;
+
+// Native OS color picker via a transient hidden <input type="color">. Used by
+// the milestone ⚑ click handler so users can recolor a pin without us shipping
+// our own picker UI. The element is removed after a change or after 60 s.
+function pickColor(initial: string, onPick: (color: string) => void) {
+  const inp = document.createElement("input");
+  inp.type = "color";
+  inp.value = initial;
+  inp.style.position = "fixed";
+  inp.style.opacity = "0";
+  inp.style.pointerEvents = "none";
+  document.body.appendChild(inp);
+  const cleanup = () => {
+    inp.remove();
+  };
+  inp.addEventListener("change", () => {
+    onPick(inp.value);
+    cleanup();
+  });
+  setTimeout(cleanup, 60_000);
+  inp.click();
+}
 
 function isoOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -186,8 +208,21 @@ export default function TimelineBand() {
   const onPinDown = (e: React.PointerEvent, id: string) => {
     e.stopPropagation();
     if (editing) return;
-    dragId.current = id;
-    const move = (ev: PointerEvent) => updateMilestone(id, { iso: isoOf(dateAtClientX(ev.clientX)) });
+    // Movement threshold — without it, micro-jitter between the two clicks of a
+    // double-click was rewriting the milestone's iso on every pointermove, which
+    // (a) made the milestone drift visibly per click and (b) sometimes prevented
+    // the dblclick event from firing for rename. Drag only kicks in past 3 px.
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+    const move = (ev: PointerEvent) => {
+      if (!dragging) {
+        if (Math.abs(ev.clientX - startX) < 3 && Math.abs(ev.clientY - startY) < 3) return;
+        dragging = true;
+        dragId.current = id;
+      }
+      updateMilestone(id, { iso: isoOf(dateAtClientX(ev.clientX)) });
+    };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
@@ -445,82 +480,135 @@ export default function TimelineBand() {
         </>
       )}
 
-      {/* Milestone pins */}
-      {milestones.map((m) => {
-        const d = parseOrgDate(m.iso);
-        if (!d) return null;
-        const left = pct(startOfDay(d).getTime());
-        if (left < -5 || left > 105) return null;
-        const isEditing = editing === m.id;
-        return (
-          <div key={m.id} data-pin style={{ position: "absolute", left: `${left}%`, top: 44, bottom: 18, width: 0 }}>
-            <div style={{ position: "absolute", top: 18, bottom: 0, left: 0, width: 2, marginLeft: -1, background: MILESTONE_COLOR, opacity: 0.8 }} />
-            <div
-              onPointerDown={(e) => onPinDown(e, m.id)}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                beginEdit(m.id, m.label);
-              }}
-              title={`${m.label} · ${m.iso} (drag to move, double-click to rename)`}
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                transform: "translateX(-50%)",
-                display: "flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "1px 5px",
-                background: MILESTONE_COLOR,
-                color: "#1c1c1e",
-                borderRadius: 4,
-                fontSize: 10.5,
-                fontWeight: 700,
-                whiteSpace: "nowrap",
-                cursor: dragId.current === m.id ? "grabbing" : "grab",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
-              }}
-            >
-              <span>⚑</span>
-              {isEditing ? (
-                <input
-                  autoFocus
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onBlur={() => commitEdit(m.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") commitEdit(m.id);
-                    if (e.key === "Escape") {
-                      if (!m.label) removeMilestone(m.id);
-                      setEditing(null);
-                    }
-                  }}
-                  placeholder="name…"
-                  style={{ width: 90, border: "none", outline: "none", background: "rgba(0,0,0,0.15)", color: "#1c1c1e", borderRadius: 2, font: "inherit", padding: "0 2px" }}
-                />
-              ) : (
-                <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>{m.label || "(unnamed)"}</span>
-              )}
-              <button
-                onClick={(e) => {
+      {/* Milestone pins — greedy lane assignment so close-by dates stagger
+          vertically instead of overlapping their labels. Click ⚑ to recolour,
+          drag the pin to move, double-click to rename, ✕ to remove. */}
+      {(() => {
+        const railWidth = railRef.current?.getBoundingClientRect().width ?? 800;
+        const PIN_BASE_TOP = 44;
+        const PIN_LANE_H = 26;
+        const MAX_PIN_LANES = 3;
+        const LABEL_PX = 160;
+
+        type Placed = { m: typeof milestones[number]; d: Date; leftPct: number; lane: number };
+        const candidates = milestones
+          .map((m) => {
+            const d = parseOrgDate(m.iso);
+            if (!d) return null;
+            const leftPct = pct(startOfDay(d).getTime());
+            return { m, d, leftPct };
+          })
+          .filter((x): x is { m: typeof milestones[number]; d: Date; leftPct: number } =>
+            x !== null && x.leftPct > -5 && x.leftPct < 105,
+          )
+          .sort((a, b) => a.leftPct - b.leftPct);
+
+        const laneEnds: number[] = [];
+        const placed: Placed[] = candidates.map((c) => {
+          const xPx = (c.leftPct / 100) * railWidth;
+          let lane = 0;
+          while (lane < laneEnds.length && xPx < laneEnds[lane] + 8) lane++;
+          if (lane >= MAX_PIN_LANES) lane = MAX_PIN_LANES - 1;
+          laneEnds[lane] = xPx + LABEL_PX;
+          return { ...c, lane };
+        });
+
+        return placed.map(({ m, d, leftPct, lane }) => {
+          const isEditing = editing === m.id;
+          const color = m.color || MILESTONE_COLOR;
+          const topPx = PIN_BASE_TOP + lane * PIN_LANE_H;
+          return (
+            <div key={m.id} data-pin style={{ position: "absolute", left: `${leftPct}%`, top: topPx, bottom: 18, width: 0 }}>
+              {/* stem reaches from below the date label down to the month axis
+                  regardless of which lane the flag occupies */}
+              <div style={{ position: "absolute", top: 32, bottom: 0, left: 0, width: 2, marginLeft: -1, background: color, opacity: 0.8 }} />
+              <div
+                onPointerDown={(e) => onPinDown(e, m.id)}
+                onDoubleClick={(e) => {
                   e.stopPropagation();
-                  removeMilestone(m.id);
+                  beginEdit(m.id, m.label);
                 }}
-                onPointerDown={(e) => e.stopPropagation()}
-                onDoubleClick={(e) => e.stopPropagation()}
-                title="Remove milestone"
-                style={{ border: "none", background: "transparent", color: "#1c1c1e", cursor: "pointer", fontSize: 10, padding: 0, lineHeight: 1, opacity: 0.7 }}
+                title={`${m.label || "(unnamed)"} · ${m.iso} — drag to move, double-click to rename, click ⚑ to recolour`}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  transform: "translateX(-50%)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
+                  padding: "1px 5px",
+                  background: color,
+                  color: "#1c1c1e",
+                  borderRadius: 4,
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  whiteSpace: "nowrap",
+                  cursor: dragId.current === m.id ? "grabbing" : "grab",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+                }}
               >
-                ✕
-              </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    pickColor(color, (c) => updateMilestone(m.id, { color: c }));
+                  }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  title="Click to change this milestone's colour"
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    margin: 0,
+                    color: "inherit",
+                    font: "inherit",
+                    cursor: "pointer",
+                    lineHeight: 1,
+                  }}
+                >
+                  ⚑
+                </button>
+                {isEditing ? (
+                  <input
+                    autoFocus
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onBlur={() => commitEdit(m.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitEdit(m.id);
+                      if (e.key === "Escape") {
+                        if (!m.label) removeMilestone(m.id);
+                        setEditing(null);
+                      }
+                    }}
+                    placeholder="name…"
+                    style={{ width: 90, border: "none", outline: "none", background: "rgba(0,0,0,0.15)", color: "#1c1c1e", borderRadius: 2, font: "inherit", padding: "0 2px" }}
+                  />
+                ) : (
+                  <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>{m.label || "(unnamed)"}</span>
+                )}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeMilestone(m.id);
+                  }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  title="Remove milestone"
+                  style={{ border: "none", background: "transparent", color: "#1c1c1e", cursor: "pointer", fontSize: 10, padding: 0, lineHeight: 1, opacity: 0.7 }}
+                >
+                  ✕
+                </button>
+              </div>
+              <div style={{ position: "absolute", top: 18, left: 0, transform: "translateX(-50%)", fontSize: 8.5, color: color, whiteSpace: "nowrap" }}>
+                {d.getDate()} {MONTHS[d.getMonth()]}
+              </div>
             </div>
-            <div style={{ position: "absolute", top: 18, left: 0, transform: "translateX(-50%)", fontSize: 8.5, color: MILESTONE_COLOR, whiteSpace: "nowrap" }}>
-              {d.getDate()} {MONTHS[d.getMonth()]}
-            </div>
-          </div>
-        );
-      })}
+          );
+        });
+      })()}
 
       {milestones.length === 0 && (
         <div

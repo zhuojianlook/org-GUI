@@ -79,6 +79,9 @@ export interface Milestone {
   id: string;
   iso: string; // "YYYY-MM-DD"
   label: string;
+  /** Optional CSS color for the pin background. Falls back to the default
+   *  violet when undefined (preserves the look of existing milestones). */
+  color?: string;
 }
 const MILE_KEY = (file: string) => `org-gui:milestones:${file}`;
 
@@ -306,7 +309,7 @@ interface OrgState {
   toggleExpand: (id: string) => void;
   setRootPosition: (index: number, x: number, y: number) => void;
   addMilestone: (iso: string, label?: string) => string;
-  updateMilestone: (id: string, patch: Partial<Pick<Milestone, "iso" | "label">>) => void;
+  updateMilestone: (id: string, patch: Partial<Pick<Milestone, "iso" | "label" | "color">>) => void;
   removeMilestone: (id: string) => void;
   toggleTableCollapsed: (nodeId: string, startLine: number) => void;
   setTimelineView: (v: Partial<TimelineView>) => void;
