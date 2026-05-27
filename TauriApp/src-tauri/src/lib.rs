@@ -308,42 +308,121 @@ async fn org_call(
     let bin = emacsclient_bin();
     let tmp_for_blk = tmp.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let output = std::process::Command::new(&bin)
-            // Dedicated socket + -a "" : connect to (or auto-start) an
-            // app-private daemon so we don't collide with the user's Doom.
-            .arg(format!("--socket-name={SOCKET_NAME}"))
-            .arg("-a")
-            .arg("")
-            .arg("--eval")
-            .arg(&elisp)
-            .output();
-        match output {
-            Ok(out) => {
-                if !out.status.success() {
-                    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    let msg = if !stderr.is_empty() { stderr } else { stdout };
+        // Two attempts: if the first fails with the "stale socket" signature
+        // (socket file present but no process listening, and `-a ""` can't
+        // bind a new daemon to the same path), we unlink the orphaned file
+        // and try again. Self-heals the daemon-died-but-socket-lingers case
+        // that otherwise required the user to rm the socket by hand.
+        for attempt in 0..2 {
+            let output = std::process::Command::new(&bin)
+                .arg(format!("--socket-name={SOCKET_NAME}"))
+                .arg("-a")
+                .arg("")
+                .arg("--eval")
+                .arg(&elisp)
+                .output();
+            let out = match output {
+                Ok(o) => o,
+                Err(e) => {
                     return Err(format!(
-                        "Emacs call failed (is the Emacs server running?): {msg}"
+                        "Failed to launch '{bin}': {e}. Is Emacs installed and the server started?"
                     ));
                 }
-                match std::fs::read_to_string(&tmp_for_blk) {
+            };
+            if out.status.success() {
+                return match std::fs::read_to_string(&tmp_for_blk) {
                     Ok(s) => {
                         let _ = std::fs::remove_file(&tmp_for_blk);
                         Ok(s)
                     }
                     Err(e) => Err(format!("Could not read bridge result: {e}")),
-                }
+                };
             }
-            Err(e) => Err(format!(
-                "Failed to launch '{bin}': {e}. Is Emacs installed and the server started?"
-            )),
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let combined = format!("{stderr}{stdout}");
+            // Detect the stale-socket pattern only on the first attempt; if
+            // unlinking + retrying still fails we surface the original error.
+            if attempt == 0
+                && combined.contains("Connection refused")
+                && combined.contains("can't connect to")
+            {
+                if let Some(idx) = combined.find("can't connect to ") {
+                    let after = &combined[idx + "can't connect to ".len()..];
+                    let path: String = after
+                        .chars()
+                        .take_while(|c| *c != ':' && *c != ' ' && *c != '\n')
+                        .collect();
+                    if !path.is_empty() {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+                continue;
+            }
+            let msg = {
+                let s = stderr.trim().to_string();
+                if !s.is_empty() {
+                    s
+                } else {
+                    stdout.trim().to_string()
+                }
+            };
+            return Err(format!(
+                "Emacs call failed (is the Emacs server running?): {msg}"
+            ));
         }
+        Err("Emacs call failed: unreachable".to_string())
     })
     .await
     .map_err(|e| format!("Join error: {e}"))?;
 
     result
+}
+
+/// Manually clear a stuck Emacs daemon. Walks every plausible socket location
+/// for the named `org-gui` server (any `emacs*` subdir of $XDG_RUNTIME_DIR,
+/// $TMPDIR, and /tmp) and removes lingering files, then `pkill`s any process
+/// whose command line mentions `--socket-name=org-gui`. The next bridge call
+/// auto-spawns a fresh daemon. Surfaced as the toolbar "Restart daemon"
+/// action so users don't have to drop to a shell when the server gets wedged.
+#[tauri::command]
+fn restart_emacs_daemon() -> Result<String, String> {
+    let parents: Vec<std::path::PathBuf> = [
+        std::env::var("XDG_RUNTIME_DIR").ok(),
+        std::env::var("TMPDIR").ok(),
+        Some("/tmp".to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(std::path::PathBuf::from)
+    .collect();
+
+    let mut removed = 0usize;
+    for parent in &parents {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name == "emacs" || name.starts_with("emacs") {
+                        let sock = entry.path().join(SOCKET_NAME);
+                        if sock.exists() && std::fs::remove_file(&sock).is_ok() {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Best-effort: TERM any lingering org-gui daemon process so the socket
+    // file we just removed can't be re-created by a dying-but-still-alive
+    // server before our retry connects.
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg(format!("emacs.*{SOCKET_NAME}"))
+        .output();
+    Ok(format!(
+        "Cleared {removed} stale socket{} and signalled any lingering daemon. The next action will spawn a fresh server.",
+        if removed == 1 { "" } else { "s" }
+    ))
 }
 
 #[tauri::command]
@@ -541,6 +620,7 @@ pub fn run() {
             install_prereqs,
             download_and_install_update,
             restart_app,
+            restart_emacs_daemon,
             emacs_term_open,
             emacs_term_write,
             emacs_term_resize,

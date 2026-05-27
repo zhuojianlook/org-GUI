@@ -170,6 +170,22 @@ export default function Toolbar() {
       >
         ⚙ Setup
       </button>
+      <button
+        onClick={async () => {
+          if (!IN_TAURI) return;
+          try {
+            const msg = await invoke<string>("restart_emacs_daemon");
+            window.alert(msg);
+          } catch (e) {
+            window.alert(`Could not restart daemon: ${String(e)}`);
+          }
+        }}
+        title="Kill the org-GUI Emacs daemon and clear its stale socket — use this if you see 'Connection refused' or 'Could not start the Emacs daemon' errors."
+        style={btn}
+        disabled={!IN_TAURI}
+      >
+        ↻ Daemon
+      </button>
       <span style={{ fontSize: 12, color: "var(--c-text-dim)" }}>
         {doc?.title || (file ? file.split("/").pop() : "No file open")}
       </span>
