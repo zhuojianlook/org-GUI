@@ -25,8 +25,10 @@ import {
 } from "../api/org";
 
 // The graph is always the main canvas; this is the right-side pull-out panel
-// (null = collapsed, graph full-width).
-export type PanelTab = "emacs" | "agenda" | null;
+// (null = collapsed, graph full-width). "details" is the same DetailPanel
+// inspector that used to be always-visible; making it a tab lets the user
+// reclaim the canvas width when not editing field-level metadata.
+export type PanelTab = "emacs" | "agenda" | "details" | null;
 
 // Persist the last-opened file so the desktop app can reopen it on startup.
 const LAST_FILE_KEY = "org-gui:lastFile";
@@ -383,7 +385,14 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     }
   },
 
-  select: (id) => set({ selectedId: id, highlightDepth: new Map() }),
+  select: (id) =>
+    set((s) => ({
+      selectedId: id,
+      highlightDepth: new Map(),
+      // The Details drawer has nothing to render with no selection; auto-close
+      // it so the user doesn't end up staring at an empty pulled-out panel.
+      panel: id === null && s.panel === "details" ? null : s.panel,
+    })),
 
   // Clicking a "Blocked" node: emphasise the *transitive* chain of prerequisites
   // still blocking it. Walks the incomplete-dependency graph breadth-first and

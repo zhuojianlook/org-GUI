@@ -1,5 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import { OrgDoc, OrgNode } from "../api/org";
+import { findTableBlocks } from "./orgTable";
 import { parseOrgDate } from "./time";
 
 export const INDENT_X = 30; // horizontal indent per heading level
@@ -9,6 +10,12 @@ const BASE_H = 30; // a one-line node's height
 const PLAN_H = 18; // extra height when a node shows a scheduled/deadline line
 const BODY_LINE_H = 16; // height per non-blank body line shown on a node
 const BLANK_LINE_H = 4; // height for a blank body line
+// TableEditor visual budget per data row (input + border + padding) and the
+// fixed-cost rows below the table (column-remove row + add/header toolbar).
+const TABLE_ROW_H = 24;
+const TABLE_COL_REMOVE_ROW_H = 22;
+const TABLE_TOOLBAR_H = 32;
+const TABLE_MARGIN = 6;
 
 export interface OrgNodeView extends Record<string, unknown> {
   org: OrgNode;
@@ -32,11 +39,26 @@ function hasOwnDate(n: OrgNode): boolean {
   );
 }
 
-/** Estimated rendered height of the entry body shown inside a node. */
+/** Estimated rendered height of the entry body shown inside a node. Treats
+ *  org tables specially because the inline TableEditor renders much taller
+ *  than 16 px per line — if we left them on the per-line estimate the node
+ *  box would underflow and adjacent nodes would overlap. */
 function bodyHeight(body: string | null): number {
   if (!body) return 0;
   let h = 2; // marginTop of the body block
-  for (const line of body.split("\n")) h += line.trim() === "" ? BLANK_LINE_H : BODY_LINE_H;
+  const tables = findTableBlocks(body);
+  const lines = body.split("\n");
+  // Mark every line covered by a table so the per-line accumulator skips them;
+  // we account for tables in bulk afterwards.
+  const inTable = new Array(lines.length).fill(false);
+  for (const t of tables) for (let i = t.startLine; i < t.endLine; i++) inTable[i] = true;
+  lines.forEach((line, i) => {
+    if (inTable[i]) return;
+    h += line.trim() === "" ? BLANK_LINE_H : BODY_LINE_H;
+  });
+  for (const t of tables) {
+    h += TABLE_MARGIN + t.rows.length * TABLE_ROW_H + TABLE_COL_REMOVE_ROW_H + TABLE_TOOLBAR_H;
+  }
   return h;
 }
 

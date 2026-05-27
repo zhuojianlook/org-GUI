@@ -17,6 +17,7 @@ export default function App() {
   const error = useOrgStore((s) => s.error);
   const panel = useOrgStore((s) => s.panel);
   const setPanel = useOrgStore((s) => s.setPanel);
+  const selectedId = useOrgStore((s) => s.selectedId);
   const checkEmacs = useOrgStore((s) => s.checkEmacs);
   const loadFile = useOrgStore((s) => s.loadFile);
   const addHeading = useOrgStore((s) => s.addHeading);
@@ -115,11 +116,13 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right region: the pulled-out panel (Emacs / Agenda), or node details. */}
-        {doc && panel ? (
+        {/* Right region: whichever pull-out drawer the user has open (or
+            nothing — graph fills the width). Each drawer owns its width so the
+            tab rail stays a fixed strip on the far right regardless. */}
+        {doc && panel === "emacs" && (
           <div
             style={{
-              width: panel === "emacs" ? 560 : 620,
+              width: 560,
               flexShrink: 0,
               borderLeft: "1px solid var(--c-border)",
               background: "var(--c-surface)",
@@ -128,15 +131,37 @@ export default function App() {
               minHeight: 0,
             }}
           >
-            {panel === "emacs" ? <EmacsTerminal /> : <AgendaPanel />}
+            <EmacsTerminal />
           </div>
-        ) : (
-          <DetailPanel />
         )}
+        {doc && panel === "agenda" && (
+          <div
+            style={{
+              width: 620,
+              flexShrink: 0,
+              borderLeft: "1px solid var(--c-border)",
+              background: "var(--c-surface)",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+            }}
+          >
+            <AgendaPanel />
+          </div>
+        )}
+        {doc && panel === "details" && <DetailPanel />}
 
-        {/* Vertical tab rail on the far right to pull panels in/out. */}
+        {/* Vertical tab rail on the far right to pull panels in/out. Details
+            is disabled until a node is selected — it has nothing to show
+            otherwise. */}
         {doc && (
           <div style={{ display: "flex", flexDirection: "column", flexShrink: 0, borderLeft: "1px solid var(--c-border)", background: "var(--c-surface)" }}>
+            <TabRailButton
+              label="Details"
+              active={panel === "details"}
+              disabled={!selectedId}
+              onClick={() => setPanel(panel === "details" ? null : "details")}
+            />
             <TabRailButton label="Agenda" active={panel === "agenda"} onClick={() => setPanel(panel === "agenda" ? null : "agenda")} />
             <TabRailButton label="Emacs" active={panel === "emacs"} onClick={() => setPanel(panel === "emacs" ? null : "emacs")} />
           </div>
@@ -148,11 +173,28 @@ export default function App() {
   );
 }
 
-function TabRailButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+function TabRailButton({
+  label,
+  active,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       onClick={onClick}
-      title={active ? `Close ${label}` : `Open ${label}`}
+      disabled={disabled}
+      title={
+        disabled
+          ? `${label} — select a node first`
+          : active
+            ? `Close ${label}`
+            : `Open ${label}`
+      }
       style={{
         writingMode: "vertical-rl",
         textOrientation: "mixed",
@@ -160,11 +202,12 @@ function TabRailButton({ label, active, onClick }: { label: string; active: bool
         border: "none",
         borderBottom: "1px solid var(--c-border)",
         background: active ? "var(--c-accent)" : "transparent",
-        color: active ? "#fff" : "var(--c-text-dim)",
+        color: active ? "#fff" : disabled ? "var(--c-border)" : "var(--c-text-dim)",
         fontSize: 12,
         fontWeight: 600,
         letterSpacing: 1.5,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.55 : 1,
         flexShrink: 0,
       }}
     >

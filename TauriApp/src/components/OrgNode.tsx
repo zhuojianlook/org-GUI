@@ -343,7 +343,7 @@ export default function OrgNode({ data }: NodeProps) {
   const select = useOrgStore((s) => s.select);
   const selectedId = useOrgStore((s) => s.selectedId);
   const toggleExpand = useOrgStore((s) => s.toggleExpand);
-  const editInEmacs = useOrgStore((s) => s.editInEmacs);
+  const setPanel = useOrgStore((s) => s.setPanel);
   const openContextMenu = useOrgStore((s) => s.openContextMenu);
   const dropTargetId = useOrgStore((s) => s.dropTargetId);
   const depMode = useOrgStore((s) => s.depMode);
@@ -382,12 +382,18 @@ export default function OrgNode({ data }: NodeProps) {
     <div
       className={flashed ? "node-flash" : undefined}
       onClick={() => select(n.id)}
-      onDoubleClick={() => editInEmacs(n)}
+      onDoubleClick={() => {
+        // Selecting the node + opening the Details pullout is the lightweight
+        // gesture; spawning the Emacs terminal is now opt-in (right-click →
+        // Edit in Emacs, or the Emacs tab on the right rail).
+        select(n.id);
+        setPanel("details");
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         openContextMenu(e.clientX, e.clientY, n.id);
       }}
-      title="Click to select · double-click to edit in Emacs · right-click for more"
+      title="Click to select · double-click to open Details · right-click for more"
       style={{
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: 12.5,

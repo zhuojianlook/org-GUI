@@ -5,7 +5,12 @@
 // appears after exactly one data row, that first row is treated as a header.
 
 const TABLE_LINE = /^\s*\|/;
-const TABLE_SEP_LINE = /^\s*\|[-+|\s]+\|\s*$/;
+// A separator row uses dashes (with `+` joints between columns), like
+// `|---+---|`. The earlier regex `/^\s*\|[-+|\s]+\|\s*$/` mis-classified empty
+// data rows such as `|       |       |` (which contain only `|` and whitespace)
+// as separators, silently dropping them on every round-trip. Require at least
+// one `-` so empty rows survive parse→serialize→reparse.
+const TABLE_SEP_LINE = /^\s*\|[-+|\s]*-[-+|\s]*\|\s*$/;
 
 export interface TableBlock {
   /** 0-based line index where the table starts within the body. */
