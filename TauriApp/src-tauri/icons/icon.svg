@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- org-GUI app icon: timeline graph of three task nodes connected by dependency curves -->
+
+  <!-- Charcoal rounded-square background, matches the app's c-bg variable -->
+  <rect width="1024" height="1024" rx="225" ry="225" fill="#1c1c1e"/>
+
+  <!-- Timeline axis (slate, matches c-border variable) -->
+  <line x1="120" y1="820" x2="904" y2="820"
+        stroke="#48484a" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Date ticks under each node's center -->
+  <g stroke="#48484a" stroke-width="10" stroke-linecap="round">
+    <line x1="220" y1="800" x2="220" y2="840"/>
+    <line x1="512" y1="800" x2="512" y2="840"/>
+    <line x1="804" y1="800" x2="804" y2="840"/>
+  </g>
+
+  <!-- Dependency curves (drawn behind nodes so they tuck under) -->
+  <g stroke="#8e8e93" stroke-width="16" fill="none" stroke-linecap="round">
+    <path d="M 340 600 C 440 600, 380 360, 472 360"/>
+    <path d="M 652 360 C 744 360, 684 600, 784 600"/>
+  </g>
+
+  <!-- Three task nodes, palette = app's accent/amber/green -->
+  <rect x="80"  y="490" width="280" height="220" rx="32" fill="#5a7fa8"/>
+  <rect x="372" y="250" width="280" height="220" rx="32" fill="#e0a458"/>
+  <rect x="664" y="490" width="280" height="220" rx="32" fill="#63a66a"/>
+
+  <!-- TODO-marker dots inside each node (suggests "task") -->
+  <g fill="#ffffff" opacity="0.92">
+    <circle cx="140" cy="540" r="20"/>
+    <circle cx="432" cy="300" r="20"/>
+    <circle cx="724" cy="540" r="20"/>
+  </g>
+</svg>
