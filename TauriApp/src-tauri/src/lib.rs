@@ -223,6 +223,142 @@ fn emacsclient_bin() -> String {
     "emacsclient".to_string()
 }
 
+/// Resolve the matching `emacs` executable. Tries an env override first, then
+/// derives the path from emacsclient_bin (sibling binary), then probes the
+/// usual locations.
+fn emacs_bin() -> String {
+    if let Ok(p) = std::env::var("ORG_GUI_EMACS") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    let client = emacsclient_bin();
+    // Most installations ship emacs alongside emacsclient — just swap the file name.
+    let sibling = client.replace("/emacsclient", "/emacs");
+    if std::path::Path::new(&sibling).exists() {
+        return sibling;
+    }
+    let candidates = [
+        "/opt/homebrew/bin/emacs",
+        "/usr/local/bin/emacs",
+        "/usr/bin/emacs",
+        "/Applications/Emacs.app/Contents/MacOS/Emacs",
+    ];
+    for c in candidates {
+        if std::path::Path::new(c).exists() {
+            return c.to_string();
+        }
+    }
+    "emacs".to_string()
+}
+
+/// Cheap probe: does the named daemon answer a no-op eval?
+fn probe_daemon(client: &str) -> bool {
+    std::process::Command::new(client)
+        .arg(format!("--socket-name={SOCKET_NAME}"))
+        .arg("--eval")
+        .arg("t")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Poll for the daemon to come up after we spawned it.
+fn wait_for_daemon(client: &str, secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if probe_daemon(client) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    false
+}
+
+/// Make sure an `org-gui` Emacs daemon is running. On a healthy system this is
+/// a single noop probe. When the daemon isn't responding, we (a) clear any
+/// lingering stale socket file, (b) explicitly spawn `emacs --daemon=org-gui`
+/// (capturing stderr so we can surface the real config error), (c) fall back
+/// to `emacs -q --daemon=org-gui` if user init is the problem. Returns Ok
+/// once the daemon answers a probe; Err carries the actual Emacs stderr so
+/// the user sees "X-mode failed to require Y" instead of the opaque
+/// emacsclient "Could not start the Emacs daemon".
+fn ensure_daemon(client: &str) -> Result<(), String> {
+    if probe_daemon(client) {
+        return Ok(());
+    }
+    // Clean any orphaned socket files so a fresh daemon can claim the name.
+    let parents: Vec<std::path::PathBuf> = [
+        std::env::var("XDG_RUNTIME_DIR").ok(),
+        std::env::var("TMPDIR").ok(),
+        Some("/tmp".to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(std::path::PathBuf::from)
+    .collect();
+    for parent in &parents {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name == "emacs" || name.starts_with("emacs") {
+                        let sock = entry.path().join(SOCKET_NAME);
+                        if sock.exists() {
+                            let _ = std::fs::remove_file(&sock);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let emacs = emacs_bin();
+    // Attempt 1: spawn daemon with the user's normal init.
+    let out_full = std::process::Command::new(&emacs)
+        .arg(format!("--daemon={SOCKET_NAME}"))
+        .output();
+    if let Ok(out) = &out_full {
+        if out.status.success() && wait_for_daemon(client, 15) {
+            return Ok(());
+        }
+    }
+
+    // Attempt 2: maybe the user's init (Doom config, etc.) is broken or too
+    // slow. Try a minimal Emacs daemon with `-q` so bridge calls still work.
+    let out_min = std::process::Command::new(&emacs)
+        .arg("-q")
+        .arg(format!("--daemon={SOCKET_NAME}"))
+        .output();
+    if let Ok(out) = &out_min {
+        if out.status.success() && wait_for_daemon(client, 10) {
+            return Ok(());
+        }
+    }
+
+    // Both failed — bubble up the most informative stderr we captured.
+    let full_err = out_full
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+        .unwrap_or_else(|e| format!("could not exec {emacs}: {e}"));
+    let min_err = out_min
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+        .unwrap_or_else(|e| format!("could not exec {emacs} -q: {e}"));
+    let msg = if !full_err.is_empty() {
+        full_err
+    } else if !min_err.is_empty() {
+        min_err
+    } else {
+        "Emacs daemon spawned but never bound the org-gui socket within 15 s.".to_string()
+    };
+    Err(format!(
+        "Could not start the org-gui Emacs daemon.\n\n\
+         Emacs reported:\n{msg}\n\n\
+         Try `{emacs} --daemon={SOCKET_NAME}` in a terminal to reproduce \
+         the error directly. If your init file errors out you'll see it there.",
+    ))
+}
+
 /// Escape a Rust string into an Emacs Lisp string literal body (the part
 /// between the surrounding quotes). Only backslash and double-quote need
 /// escaping for a valid elisp string.
@@ -308,70 +444,41 @@ async fn org_call(
     let bin = emacsclient_bin();
     let tmp_for_blk = tmp.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        // Two attempts: if the first fails with the "stale socket" signature
-        // (socket file present but no process listening, and `-a ""` can't
-        // bind a new daemon to the same path), we unlink the orphaned file
-        // and try again. Self-heals the daemon-died-but-socket-lingers case
-        // that otherwise required the user to rm the socket by hand.
-        for attempt in 0..2 {
-            let output = std::process::Command::new(&bin)
-                .arg(format!("--socket-name={SOCKET_NAME}"))
-                .arg("-a")
-                .arg("")
-                .arg("--eval")
-                .arg(&elisp)
-                .output();
-            let out = match output {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(format!(
-                        "Failed to launch '{bin}': {e}. Is Emacs installed and the server started?"
-                    ));
-                }
-            };
-            if out.status.success() {
-                return match std::fs::read_to_string(&tmp_for_blk) {
-                    Ok(s) => {
-                        let _ = std::fs::remove_file(&tmp_for_blk);
-                        Ok(s)
-                    }
-                    Err(e) => Err(format!("Could not read bridge result: {e}")),
-                };
-            }
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let combined = format!("{stderr}{stdout}");
-            // Detect the stale-socket pattern only on the first attempt; if
-            // unlinking + retrying still fails we surface the original error.
-            if attempt == 0
-                && combined.contains("Connection refused")
-                && combined.contains("can't connect to")
-            {
-                if let Some(idx) = combined.find("can't connect to ") {
-                    let after = &combined[idx + "can't connect to ".len()..];
-                    let path: String = after
-                        .chars()
-                        .take_while(|c| *c != ':' && *c != ' ' && *c != '\n')
-                        .collect();
-                    if !path.is_empty() {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-                continue;
-            }
-            let msg = {
-                let s = stderr.trim().to_string();
-                if !s.is_empty() {
-                    s
-                } else {
-                    stdout.trim().to_string()
-                }
-            };
-            return Err(format!(
-                "Emacs call failed (is the Emacs server running?): {msg}"
-            ));
+        // Guarantee the named daemon is alive BEFORE running emacsclient. We
+        // used to rely on `emacsclient -a ""` to autospawn, but that path
+        // swallows Emacs's stderr and surfaces only the generic "Could not
+        // start the Emacs daemon" message; ensure_daemon spawns explicitly
+        // and bubbles up the real error.
+        if let Err(e) = ensure_daemon(&bin) {
+            return Err(e);
         }
-        Err("Emacs call failed: unreachable".to_string())
+
+        let output = std::process::Command::new(&bin)
+            .arg(format!("--socket-name={SOCKET_NAME}"))
+            .arg("--eval")
+            .arg(&elisp)
+            .output();
+        let out = match output {
+            Ok(o) => o,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to launch '{bin}': {e}. Is Emacs installed?"
+                ));
+            }
+        };
+        if out.status.success() {
+            return match std::fs::read_to_string(&tmp_for_blk) {
+                Ok(s) => {
+                    let _ = std::fs::remove_file(&tmp_for_blk);
+                    Ok(s)
+                }
+                Err(e) => Err(format!("Could not read bridge result: {e}")),
+            };
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let msg = if !stderr.is_empty() { stderr } else { stdout };
+        Err(format!("Emacs call failed: {msg}"))
     })
     .await
     .map_err(|e| format!("Join error: {e}"))?;
@@ -492,6 +599,11 @@ async fn emacs_term_open(
         .map_err(|e| format!("openpty failed: {e}"))?;
 
     let bin = emacsclient_bin();
+    // Make sure the named daemon is alive before we try to attach a `-t`
+    // frame; otherwise emacsclient races the daemon startup and the frame
+    // attaches to a half-initialised server (or to nothing at all).
+    ensure_daemon(&bin)?;
+
     // Arm a one-shot hook (server-after-make-frame-hook) that prepares the next
     // new frame: narrow it (via an indirect buffer) to the subtree at BEGIN, or
     // show the whole file when BEGIN is 0.
@@ -514,8 +626,6 @@ async fn emacs_term_open(
     );
     let _ = std::process::Command::new(&bin)
         .arg(format!("--socket-name={SOCKET_NAME}"))
-        .arg("-a")
-        .arg("")
         .arg("--eval")
         .arg(&arm)
         .output();
@@ -523,8 +633,6 @@ async fn emacs_term_open(
     let mut cmd = CommandBuilder::new(bin.clone());
     // App-private daemon (named socket so it never fights the user's Doom).
     cmd.arg(format!("--socket-name={SOCKET_NAME}"));
-    cmd.arg("-a");
-    cmd.arg("");
     cmd.arg("-t"); // interactive terminal frame; the armed hook sets the buffer
     cmd.env("TERM", "xterm-256color");
 
