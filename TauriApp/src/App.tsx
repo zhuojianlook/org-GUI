@@ -65,7 +65,7 @@ export default function App() {
         {/* Left column: milestone timeline band on top, graph below */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           {doc && (
-            <div style={{ flex: "0 0 26%", minHeight: 120, maxHeight: 240, position: "relative", minWidth: 0 }}>
+            <div style={{ flex: "0 0 32%", minHeight: 180, maxHeight: 380, position: "relative", minWidth: 0 }}>
               <TimelineBand />
             </div>
           )}

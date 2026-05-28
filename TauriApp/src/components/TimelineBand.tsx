@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useOrgStore, type ZoomLevel } from "../store/useOrgStore";
 import { parseOrgDate, startOfDay } from "../utils/time";
+import { setDeadline, setScheduled } from "../api/org";
 
 // A horizontal calendar band across the top of the canvas. Shows zoom-level
 // controls (1W / 2W / 1M / 3M / 6M / 1Y / Fit), a month axis with adaptive day
@@ -37,6 +38,40 @@ function pickColor(initial: string, onPick: (color: string) => void) {
 
 function isoOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Extract the "HH:MM" component from an ISO timestamp, or null when the
+ *  value is date-only (no T separator). */
+function timeOfDayFromIso(iso: string | null | undefined): string | null {
+  if (!iso || !iso.includes("T")) return null;
+  return iso.slice(11, 16);
+}
+
+// Vertical zone in the band where task chips live; y in this zone maps
+// linearly to time of day (00:00 at top, 23:59 at bottom). The top
+// padding clears the zoom toolbar; the bottom padding clears the month
+// labels and milestone pins.
+const TIME_TOP_PX = 56;
+const TIME_BOTTOM_OFFSET = 32;
+
+function yForTimeOfDay(timeOfDay: string | null, bandHeight: number): number {
+  const usable = Math.max(40, bandHeight - TIME_TOP_PX - TIME_BOTTOM_OFFSET);
+  if (!timeOfDay) return TIME_TOP_PX + usable / 2; // unscheduled time → mid-band
+  const [h, m] = timeOfDay.split(":").map((s) => parseInt(s, 10));
+  const min = (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+  return TIME_TOP_PX + (min / 1440) * usable;
+}
+
+/** Inverse of yForTimeOfDay — convert a clientY (relative to railRef) into a
+ *  "HH:MM" string snapped to the nearest 15-minute mark. */
+function timeAtRailY(yRel: number, bandHeight: number): string {
+  const usable = Math.max(40, bandHeight - TIME_TOP_PX - TIME_BOTTOM_OFFSET);
+  const frac = Math.max(0, Math.min(1, (yRel - TIME_TOP_PX) / usable));
+  const mins = Math.round((frac * 1440) / 15) * 15;
+  const clamped = Math.min(1425, mins); // 23:45 cap so we don't emit 24:00
+  const h = Math.floor(clamped / 60);
+  const m = clamped % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
 const ZOOMS: { id: ZoomLevel; label: string; days: number | null }[] = [
@@ -95,12 +130,26 @@ export default function TimelineBand() {
   const removeMilestone = useOrgStore((s) => s.removeMilestone);
   const timelineView = useOrgStore((s) => s.timelineView);
   const setTimelineView = useOrgStore((s) => s.setTimelineView);
+  const edit = useOrgStore((s) => s.edit);
 
   const railRef = useRef<HTMLDivElement>(null);
   const dragId = useRef<string | null>(null);
   const panRef = useRef<{ startX: number; startCenterMs: number } | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // Live preview of a task chip being dragged — shows a ghost at the cursor
+  // with the proposed date + time so the user can see where they're aiming
+  // before they release.
+  const [chipGhost, setChipGhost] = useState<{
+    nodeId: string;
+    deadline: boolean;
+    title: string;
+    color: string;
+    x: number;
+    y: number;
+    iso: string;
+    time: string;
+  } | null>(null);
 
   // All node-date ticks (scheduled / deadline). We carry the node id so a
   // double-click on a tick can focus that node in the graph, and the
@@ -113,6 +162,8 @@ export default function TimelineBand() {
       nodeId: string;
       title: string;
       color: string;
+      timeOfDay: string | null; // "HH:MM" when the timestamp carries a time
+      iso: string; // the underlying YYYY-MM-DD[ THH:MM] stored on the node
     }[] = [];
     for (const n of doc?.nodes ?? []) {
       if (n.done) continue;
@@ -124,6 +175,8 @@ export default function TimelineBand() {
           nodeId: n.id,
           title: n.title ?? "(untitled)",
           color: "#51afef",
+          timeOfDay: timeOfDayFromIso(n.scheduled),
+          iso: n.scheduled ?? "",
         });
       const d = parseOrgDate(n.deadline);
       if (d)
@@ -133,6 +186,8 @@ export default function TimelineBand() {
           nodeId: n.id,
           title: n.title ?? "(untitled)",
           color: n.deadlineColor || "#ff6c6b",
+          timeOfDay: timeOfDayFromIso(n.deadline),
+          iso: n.deadline ?? "",
         });
     }
     return out;
@@ -203,6 +258,61 @@ export default function TimelineBand() {
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+  };
+
+  /** Drag a task chip on the timeline to reschedule it. X → date,
+   *  Y → time of day. Sub-threshold gestures become a click that focuses
+   *  the node in the graph; past-threshold gestures commit a new
+   *  scheduled/deadline date via the bridge. */
+  const onChipDown = (
+    e: React.PointerEvent,
+    info: { nodeId: string; deadline: boolean; title: string; color: string },
+  ) => {
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+    const move = (ev: PointerEvent) => {
+      if (!dragging) {
+        if (Math.abs(ev.clientX - startX) < 4 && Math.abs(ev.clientY - startY) < 4) return;
+        dragging = true;
+      }
+      const r = railRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const dt = dateAtClientX(ev.clientX);
+      const time = timeAtRailY(ev.clientY - r.top, r.height);
+      setChipGhost({
+        ...info,
+        x: ev.clientX,
+        y: ev.clientY,
+        iso: `${isoOf(dt)} ${time}`,
+        time,
+      });
+    };
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      setChipGhost(null);
+      if (!dragging) {
+        // Sub-threshold gesture = click → focus the node in the graph (same
+        // as the previous dbl-click behaviour, now on single click since the
+        // chip is also the drag handle).
+        window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: info.nodeId } }));
+        return;
+      }
+      // Drag committed — push the new date+time to the bridge.
+      const node = doc?.nodes.find((n) => n.id === info.nodeId);
+      if (!node) return;
+      const r = railRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const dt = dateAtClientX(ev.clientX);
+      const time = timeAtRailY(ev.clientY - r.top, r.height);
+      const dateStr = `${isoOf(dt)} ${time}`;
+      if (info.deadline) edit(setDeadline, node, dateStr);
+      else edit(setScheduled, node, dateStr);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   };
 
   const onPinDown = (e: React.PointerEvent, id: string) => {
@@ -381,102 +491,101 @@ export default function TimelineBand() {
         );
       })}
 
-      {/* Task-date ticks with truncated labels. Lanes are assigned greedily
-          left-to-right so labels that would overlap horizontally bump up to
-          the next vertical lane. Double-click a tick to focus the node in the
-          graph. */}
-      {(() => {
-        const railWidth = railRef.current?.getBoundingClientRect().width ?? 800;
-        const LABEL_PX = 92; // approximate width of a 12-char truncated label
-        const LANE_H = 16; // vertical step per lane
-        const LANE_BASE = 22; // px above bottom of band (above month axis)
-        const MAX_LANES = 4;
-
-        // Sort by x; deadlines first so they end up in the lower lanes (more
-        // visible) when stacked against same-day scheduled ticks.
-        const sorted = nodeDates
-          .map((d, i) => ({ ...d, idx: i, leftPct: pct(d.ms) }))
-          .filter((d) => d.leftPct > -5 && d.leftPct < 105)
-          .sort((a, b) =>
-            a.leftPct === b.leftPct ? Number(b.deadline) - Number(a.deadline) : a.leftPct - b.leftPct,
-          );
-
-        // Greedy lane assignment.
-        const laneEnds: number[] = []; // last-occupied right-edge (px) per lane
-        const placed = sorted.map((t) => {
-          const xPx = (t.leftPct / 100) * railWidth;
-          let lane = 0;
-          while (lane < laneEnds.length && xPx < laneEnds[lane] + 6) lane++;
-          if (lane >= MAX_LANES) lane = MAX_LANES - 1; // overflow lane (will overlap visually)
-          laneEnds[lane] = xPx + LABEL_PX;
-          return { ...t, lane };
-        });
-
-        return placed.map((d) => {
-          const truncated = d.title.length > 14 ? d.title.slice(0, 13) + "…" : d.title;
-          const bottom = LANE_BASE + d.lane * LANE_H;
-          return (
-            <button
-              key={`t${d.idx}`}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: d.nodeId } }));
-              }}
-              onPointerDown={(e) => e.stopPropagation()}
-              title={`${d.deadline ? "⚑ Deadline" : "⏱ Scheduled"}: ${d.title} — double-click to focus in graph`}
-              style={{
-                position: "absolute",
-                left: `${d.leftPct}%`,
-                bottom,
-                display: "flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "1px 4px 1px 0",
-                borderRadius: 4,
-                background: "transparent",
-                border: "none",
-                cursor: "pointer",
-                lineHeight: 1,
-                color: d.color,
-                maxWidth: LABEL_PX,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-              }}
-            >
-              {/* Bigger, glyph-based icon — ⚑ for deadlines, ⏱ for scheduled
-                  — so the date is recognisable at a glance instead of being a
-                  tiny coloured pixel. The marginLeft centres the icon on the
-                  tick's x coordinate. */}
-              <span
-                aria-hidden
-                style={{
-                  flexShrink: 0,
-                  marginLeft: -7,
-                  fontSize: 13,
-                  lineHeight: 1,
-                  color: d.color,
-                  textShadow: d.deadline ? `0 0 6px ${d.color}aa` : "none",
-                  filter: d.deadline ? "drop-shadow(0 0 1px rgba(0,0,0,0.5))" : "none",
-                }}
-              >
-                {d.deadline ? "⚑" : "⏱"}
+      {/* Task chips: real, draggable task representations on the timeline.
+          X coordinate is the task's date; Y coordinate is its time of day
+          (00:00 at the top of the chip-zone, 23:59 at the bottom). Drag in
+          2D to reschedule (X commits date, Y commits time); single-click
+          (no drag) focuses the node in the graph. Overdue deadlines
+          inherit the .deadline-flash CSS animation so they pulse red. */}
+      {nodeDates.map((d, i) => {
+        const left = pct(d.ms);
+        if (left < -5 || left > 105) return null;
+        const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
+        const top = yForTimeOfDay(d.timeOfDay, bandH);
+        const isOverdue = d.deadline && d.ms <= todayMs;
+        const truncated = d.title.length > 22 ? d.title.slice(0, 21) + "…" : d.title;
+        return (
+          <button
+            key={`t${i}`}
+            className={isOverdue ? "deadline-flash" : undefined}
+            data-pin
+            onPointerDown={(e) =>
+              onChipDown(e, { nodeId: d.nodeId, deadline: d.deadline, title: d.title, color: d.color })
+            }
+            title={`${d.deadline ? "⚑ Deadline" : "⏱ Scheduled"}: ${d.title}${d.timeOfDay ? " @ " + d.timeOfDay : ""}\nDrag to reschedule (← → date · ↑ ↓ time of day) · click to focus`}
+            style={{
+              position: "absolute",
+              left: `${left}%`,
+              top,
+              transform: "translate(-50%, -50%)",
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "3px 8px",
+              borderRadius: 6,
+              background: d.color,
+              color: "#1c1c1e",
+              border: "1px solid rgba(0,0,0,0.25)",
+              cursor: "grab",
+              fontSize: 10.5,
+              fontWeight: 700,
+              lineHeight: 1.1,
+              whiteSpace: "nowrap",
+              boxShadow: d.deadline ? `0 1px 6px ${d.color}aa` : "0 1px 3px rgba(0,0,0,0.4)",
+              maxWidth: 200,
+              overflow: "hidden",
+              userSelect: "none",
+            }}
+          >
+            <span aria-hidden style={{ fontSize: 11, flexShrink: 0 }}>
+              {d.deadline ? "⚑" : "⏱"}
+            </span>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{truncated}</span>
+            {d.timeOfDay && (
+              <span style={{ opacity: 0.7, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
+                {d.timeOfDay}
               </span>
-              <span
-                style={{
-                  fontSize: 9.5,
-                  fontWeight: d.deadline ? 700 : 500,
-                  color: "var(--c-text)",
-                  opacity: 0.85,
-                  textOverflow: "ellipsis",
-                  overflow: "hidden",
-                }}
-              >
-                {truncated}
-              </span>
-            </button>
-          );
-        });
-      })()}
+            )}
+          </button>
+        );
+      })}
+
+      {/* Live drag preview: ghost chip pinned at the cursor showing the
+          date+time that will be committed on pointerup. */}
+      {chipGhost && (
+        <div
+          style={{
+            position: "fixed",
+            left: chipGhost.x,
+            top: chipGhost.y,
+            transform: "translate(-50%, -50%)",
+            pointerEvents: "none",
+            zIndex: 10002,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 2,
+          }}
+        >
+          <div
+            style={{
+              padding: "3px 8px",
+              borderRadius: 6,
+              background: chipGhost.color,
+              color: "#1c1c1e",
+              fontSize: 10.5,
+              fontWeight: 700,
+              boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
+              opacity: 0.85,
+            }}
+          >
+            {chipGhost.deadline ? "⚑" : "⏱"} {chipGhost.title.slice(0, 20)} {chipGhost.time}
+          </div>
+          <div style={{ fontSize: 9.5, color: "var(--c-text-dim)", fontFamily: "ui-monospace, monospace" }}>
+            {chipGhost.iso}
+          </div>
+        </div>
+      )}
 
       {/* Today marker */}
       {todayMs >= startMs && todayMs <= endMs && (
