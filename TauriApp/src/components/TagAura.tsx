@@ -125,22 +125,25 @@ export default function TagAura() {
                 still scales the overall thickness so far edges stay thin. */}
             <g filter="url(#org-aura-line)" opacity={0.9}>
               {edges.map(([a, b], i) => {
-                // Anchor the dendrite endpoints to the node *edges*, not their
-                // centres. Otherwise the wide ends of the taper sit inside the
-                // node card and the user only sees the pinched middle outside —
-                // making the filament look uniformly thin near the node.
+                // Anchor the dendrite endpoints to the node *edges* so the
+                // wide ends of the taper are visible outside the card.
                 const [acx, acy] = centerOf(a);
                 const [bcx, bcy] = centerOf(b);
                 const [ax, ay] = rectEdgeTowards(a, bcx, bcy);
                 const [bx, by] = rectEdgeTowards(b, acx, acy);
                 const d = Math.hypot(ax - bx, ay - by);
                 const scale = widthScaleForDistance(d);
-                const wide = 12 * scale; // width at endpoints (at the node edge)
-                const narrow = Math.max(0.6, 1.4 * scale); // width at midpoint
+                // Per-endpoint width proportional to the node it attaches to
+                // (smaller dimension × 0.45 so the dendrite fits the node
+                // even for tall/narrow or short/wide cards). Asymmetric when
+                // the two nodes differ in size.
+                const wideA = nodeFilamentWidth(a) * scale;
+                const wideB = nodeFilamentWidth(b) * scale;
+                const narrow = Math.max(0.8, 2 * scale); // width at midpoint
                 return (
                   <path
                     key={i}
-                    d={taperedBezierPolygon(ax, ay, bx, by, wide, narrow)}
+                    d={taperedBezierPolygon(ax, ay, bx, by, wideA, wideB, narrow)}
                     fill={color}
                   />
                 );
@@ -203,7 +206,8 @@ function taperedBezierPolygon(
   ay: number,
   bx: number,
   by: number,
-  wide: number,
+  wideA: number,
+  wideB: number,
   narrow: number,
   samples = 24,
 ): string {
@@ -211,7 +215,6 @@ function taperedBezierPolygon(
   const dy = by - ay;
   const len = Math.max(1, Math.hypot(dx, dy));
   const offset = Math.min(len * 0.15, 60);
-  // Perpendicular unit vector for the control-point offset.
   const ux = -dy / len;
   const uy = dx / len;
   const cx = (ax + bx) / 2 + ux * offset;
@@ -222,31 +225,37 @@ function taperedBezierPolygon(
   for (let i = 0; i <= samples; i++) {
     const t = i / samples;
     const ti = 1 - t;
-    // Point on quadratic bezier P(t) = (1-t)²A + 2t(1-t)C + t²B
     const px = ti * ti * ax + 2 * t * ti * cx + t * t * bx;
     const py = ti * ti * ay + 2 * t * ti * cy + t * t * by;
-    // Tangent P'(t) = 2(1-t)(C-A) + 2t(B-C)
     const tx = 2 * ti * (cx - ax) + 2 * t * (bx - cx);
     const ty = 2 * ti * (cy - ay) + 2 * t * (by - cy);
     const tl = Math.max(0.0001, Math.hypot(tx, ty));
-    // Perpendicular to the tangent (rotated 90°), unit length.
     const nxi = -ty / tl;
     const nyi = tx / tl;
-    // Smooth dendrite taper: width(0) = wide, width(0.5) = narrow,
-    // width(1) = wide. `1 - sin(πt)` is wide → narrow → wide with C¹
-    // continuity (no kinks at the endpoints).
+    // Endpoint cap interpolates linearly between wideA at t=0 and wideB at
+    // t=1, so asymmetric pairs (small + large node) get a smoothly-varying
+    // dendrite cap. Pinch factor `u = 1 - sin(πt)` is 1 at the ends, 0 in
+    // the middle. Combined: w(t) = narrow at midpoint, smoothly opening to
+    // wideA at t=0 and wideB at t=1.
     const u = 1 - Math.sin(Math.PI * t);
-    const w = (narrow + (wide - narrow) * u) / 2;
+    const endpointCap = wideA + (wideB - wideA) * t;
+    const w = (narrow + (endpointCap - narrow) * u) / 2;
     upper.push([px + nxi * w, py + nyi * w]);
     lower.push([px - nxi * w, py - nyi * w]);
   }
 
-  // Walk upper forward, then lower in reverse, close the polygon.
   const parts: string[] = [`M ${upper[0][0]},${upper[0][1]}`];
   for (let i = 1; i < upper.length; i++) parts.push(`L ${upper[i][0]},${upper[i][1]}`);
   for (let i = lower.length - 1; i >= 0; i--) parts.push(`L ${lower[i][0]},${lower[i][1]}`);
   parts.push("Z");
   return parts.join(" ");
+}
+
+/** Endpoint width of a filament attached to a given node — proportional to
+ *  the node's smaller dimension so a tall/narrow card and a short/wide card
+ *  both end up with dendrites that read as "fitting" the node. */
+function nodeFilamentWidth(h: { w: number; h: number }): number {
+  return Math.max(8, Math.min(h.w, h.h) * 0.45);
 }
 
 /** Prim's MST over the halo centres. Returns pairs of halos forming the
