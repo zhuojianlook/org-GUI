@@ -23,6 +23,7 @@ export default function App() {
   const checkEmacs = useOrgStore((s) => s.checkEmacs);
   const loadFile = useOrgStore((s) => s.loadFile);
   const addHeading = useOrgStore((s) => s.addHeading);
+  const showTimeline = useOrgStore((s) => s.showTimeline);
 
   const [showSetup, setShowSetup] = useState(false);
 
@@ -67,7 +68,7 @@ export default function App() {
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* Left column: milestone timeline band on top, graph below */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-          {doc && (
+          {doc && showTimeline && (
             <div style={{ flex: "0 0 32%", minHeight: 180, maxHeight: 380, position: "relative", minWidth: 0 }}>
               <TimelineBand />
             </div>

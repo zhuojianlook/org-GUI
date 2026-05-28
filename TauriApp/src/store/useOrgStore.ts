@@ -264,6 +264,26 @@ function saveTagAuraEnabled(v: boolean) {
   }
 }
 
+// Top-of-window calendar timeline visibility. Persisted globally so the
+// user's preference (often hidden when working on a deep edit, or shown
+// when planning) sticks across launches. Defaults to ON — the timeline
+// is the visual centrepiece for first-time users.
+const SHOW_TIMELINE_KEY = "org-gui:showTimeline";
+function loadShowTimeline(): boolean {
+  try {
+    return localStorage.getItem(SHOW_TIMELINE_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+function saveShowTimeline(v: boolean) {
+  try {
+    localStorage.setItem(SHOW_TIMELINE_KEY, v ? "true" : "false");
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // Update channel — which manifest URL the "Check for updates" button reads from.
 // Persisted globally (not per-file) so users opt in once.
 export type UpdateChannel = "stable" | "experimental";
@@ -355,6 +375,7 @@ interface OrgState {
   tagColors: Record<string, string>; // tag name → CSS colour (per file)
   tagFilter: string | null; // when set, only nodes carrying this tag stay sharp
   tagAuraEnabled: boolean; // global toggle for the metaball halo overlay
+  showTimeline: boolean; // top-of-window calendar timeline visibility
   /** Currently-selected timeline chip (single click on a chip). Arrow keys
    *  nudge this chip's scheduled or deadline date. Esc clears. */
   timelineSelectedChip: { nodeId: string; isDeadline: boolean } | null;
@@ -413,6 +434,7 @@ interface OrgState {
   setTagColor: (tag: string, color: string | null) => void;
   setTagFilter: (tag: string | null) => void;
   setTagAuraEnabled: (v: boolean) => void;
+  setShowTimeline: (v: boolean) => void;
   setTimelineSelectedChip: (chip: { nodeId: string; isDeadline: boolean } | null) => void;
   scheduleNode: (node: OrgNode, dateStr: string, kind: "scheduled" | "deadline") => Promise<void>;
   toggleMultiSelected: (id: string) => void;
@@ -454,6 +476,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   tagColors: {},
   tagFilter: null,
   tagAuraEnabled: loadTagAuraEnabled(),
+  showTimeline: loadShowTimeline(),
   timelineSelectedChip: null,
   multiSelected: new Set<string>(),
   updateChannel: loadUpdateChannel(),
@@ -744,6 +767,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   setTagAuraEnabled: (v) => {
     saveTagAuraEnabled(v);
     set({ tagAuraEnabled: v });
+  },
+
+  setShowTimeline: (v) => {
+    saveShowTimeline(v);
+    set({ showTimeline: v });
   },
 
   setTimelineSelectedChip: (chip) => set({ timelineSelectedChip: chip }),

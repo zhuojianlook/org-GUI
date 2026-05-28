@@ -45,6 +45,8 @@ export default function Toolbar() {
   const tagFilter = useOrgStore((s) => s.tagFilter);
   const updateChannel = useOrgStore((s) => s.updateChannel);
   const setUpdateChannel = useOrgStore((s) => s.setUpdateChannel);
+  const showTimeline = useOrgStore((s) => s.showTimeline);
+  const setShowTimeline = useOrgStore((s) => s.setShowTimeline);
 
   const [updateState, setUpdateState] = useState<UpdateState>("idle");
   const [updatePct, setUpdatePct] = useState(0);
@@ -250,6 +252,28 @@ export default function Toolbar() {
         title={tagFilter ? `Filtering :${tagFilter}: — click to manage tags` : "Manage tag colours and filters"}
       >
         🏷 {tagFilter ? `:${tagFilter}:` : "Tags"}
+      </button>
+      <button
+        onClick={() => setShowTimeline(!showTimeline)}
+        style={{
+          ...btn,
+          ...(showTimeline
+            ? {
+                background: "var(--c-accent)",
+                color: "#fff",
+                borderColor: "var(--c-accent)",
+                fontWeight: 700,
+              }
+            : {}),
+        }}
+        disabled={!doc}
+        title={
+          showTimeline
+            ? "Hide the calendar timeline strip"
+            : "Show the calendar timeline strip"
+        }
+      >
+        🗓 Timeline
       </button>
       {tagsOpen && (
         <TagsPopover
