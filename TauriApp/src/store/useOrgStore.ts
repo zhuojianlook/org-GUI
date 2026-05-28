@@ -392,6 +392,13 @@ interface OrgState {
   // Open files in the top tab strip. The active tab is whichever path
   // equals `file`. Order matches user insertion (most recent open last).
   openTabs: string[];
+  // The file the user just clicked but whose parse hasn't completed yet.
+  // The TabBar highlights this so the click feels instant, while the
+  // graph keeps rendering the previous doc until the new one is ready.
+  // Doubles as a stale-load discriminator: a parse result is only applied
+  // when its file still equals loadingFile (otherwise the user has moved
+  // on and the result is stale).
+  loadingFile: string | null;
   scheduleMode: boolean; // drag-node-to-timeline scheduling mode
   // The nodeId of the node currently being dragged from the graph in
   // schedule mode. Null when no drag is in progress. The timeline reads
@@ -486,6 +493,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   panel: null,
   depMode: false,
   openTabs: loadOpenTabs(),
+  loadingFile: null,
   scheduleMode: false,
   scheduleDragNodeId: null,
   connectFrom: null,
@@ -512,32 +520,56 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     const currentTabs = get().openTabs;
     const nextTabs = currentTabs.includes(file) ? currentTabs : [...currentTabs, file];
     if (nextTabs !== currentTabs) saveOpenTabs(nextTabs);
+    // Mark the target file as loading WITHOUT changing the active doc/
+    // positions/milestones yet. The previous version reset all of that
+    // up-front, which meant the graph rendered the old doc against the
+    // new file's positions for the duration of the parse — visible as a
+    // jumpy / glitchy tab switch. Now we keep the previous tab fully
+    // rendered until we have a complete new state to swap to atomically.
     set({
       loading: true,
       error: null,
-      file,
       openTabs: nextTabs,
-      expanded: new Set<string>(),
-      rootPositions: loadPositions(file),
-      milestones: loadMilestones(file),
-      timelineView: loadTimelineView(file),
-      tableCollapsed: loadTableCollapsed(file),
-      tagColors: loadTagColors(file),
-      tagFilter: null,
-      multiSelected: new Set<string>(),
-      editBegin: 0,
+      loadingFile: file,
     });
     try {
       const doc = await parseOrg(file);
-      // Prefer the user's persisted expand/collapse choices for this file;
-      // fall back to autoExpandForDeps on first open (so dep arrows are visible).
+      // If the user clicked yet another tab while this parse was in
+      // flight, the more recent click owns loadingFile — drop this stale
+      // result so we don't suddenly swap to an old target.
+      if (get().loadingFile !== file) return;
       const saved = loadExpanded(file);
       const expanded = saved ?? autoExpandForDeps(doc);
       if (!saved) saveExpanded(file, expanded);
-      set({ doc, loading: false, emacsOk: true, expanded });
+      // Atomic swap: every piece of per-file state lands in a single
+      // set() so React never observes a frame where they disagree.
+      set({
+        file,
+        doc,
+        loading: false,
+        loadingFile: null,
+        emacsOk: true,
+        expanded,
+        rootPositions: loadPositions(file),
+        milestones: loadMilestones(file),
+        timelineView: loadTimelineView(file),
+        tableCollapsed: loadTableCollapsed(file),
+        tagColors: loadTagColors(file),
+        tagFilter: null,
+        multiSelected: new Set<string>(),
+        editBegin: 0,
+        // Also clear cross-doc transient selections so a node id from
+        // tab A doesn't accidentally match an id in tab B.
+        selectedId: null,
+        highlightDepth: new Map<string, number>(),
+        highlightDone: new Set<string>(),
+        timelineSelectedChip: null,
+      });
       rememberLastFile(file);
     } catch (e) {
-      set({ error: String(e), loading: false });
+      if (get().loadingFile === file) {
+        set({ error: String(e), loading: false, loadingFile: null });
+      }
     }
   },
 
@@ -564,6 +596,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         file: null,
         doc: null,
         loading: false,
+        loadingFile: null,
         error: null,
         expanded: new Set<string>(),
         rootPositions: {},
@@ -572,6 +605,10 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         tagFilter: null,
         multiSelected: new Set<string>(),
         editBegin: 0,
+        selectedId: null,
+        highlightDepth: new Map<string, number>(),
+        highlightDone: new Set<string>(),
+        timelineSelectedChip: null,
       });
     }
   },

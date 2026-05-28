@@ -17,8 +17,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 export default function TabBar() {
   const openTabs = useOrgStore((s) => s.openTabs);
   const file = useOrgStore((s) => s.file);
+  const loadingFile = useOrgStore((s) => s.loadingFile);
   const loadFile = useOrgStore((s) => s.loadFile);
   const closeTab = useOrgStore((s) => s.closeTab);
+  // Highlight the tab the user JUST clicked even before its parse
+  // completes, otherwise the click feels unresponsive while the bridge
+  // is reading the file. Falls back to the currently-mounted file once
+  // no load is in flight.
+  const activePath = loadingFile ?? file;
 
   // Hide the strip entirely when no tabs are open — the EmptyState component
   // in App.tsx will be visible and offers its own "Open .org…" affordance.
@@ -52,15 +58,20 @@ export default function TabBar() {
       }}
     >
       {openTabs.map((path) => {
-        const active = path === file;
+        const active = path === activePath;
+        const isPending = loadingFile === path;
         const name = path.split("/").pop() || path;
         return (
           <div
             key={path}
             onClick={() => {
-              if (!active) loadFile(path);
+              // Ignore clicks on the currently active tab — and on a tab
+              // whose parse is already in flight, so an impatient user
+              // can't queue duplicate loads on the same target.
+              if (path === file || loadingFile === path) return;
+              loadFile(path);
             }}
-            title={path}
+            title={isPending ? `${path}\n(loading…)` : path}
             style={{
               display: "flex",
               alignItems: "center",
@@ -87,9 +98,15 @@ export default function TabBar() {
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
                 maxWidth: 200,
+                fontStyle: isPending ? "italic" : "normal",
               }}
             >
               {name}
+              {isPending && (
+                <span aria-hidden style={{ marginLeft: 4, color: "var(--c-text-dim)" }}>
+                  …
+                </span>
+              )}
             </span>
             <button
               onClick={(e) => {
