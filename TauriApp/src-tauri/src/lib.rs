@@ -253,41 +253,121 @@ fn emacs_bin() -> String {
 }
 
 /// Cheap probe: does the named daemon answer a no-op eval?
-fn probe_daemon(client: &str) -> bool {
-    std::process::Command::new(client)
+/// Probe the daemon with a hard timeout so a slow-to-respond server
+/// (e.g. Doom mid-startup) doesn't make us think it's dead. Spawns
+/// emacsclient, polls try_wait every 100 ms, and kills the child if the
+/// deadline expires. Returns true only on a clean success status.
+fn probe_daemon_timeout(client: &str, timeout_secs: u64) -> bool {
+    let mut child = match std::process::Command::new(client)
         .arg(format!("--socket-name={SOCKET_NAME}"))
         .arg("--eval")
         .arg("t")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => return false,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    false
 }
 
-/// Poll for the daemon to come up after we spawned it.
-fn wait_for_daemon(client: &str, secs: u64) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+/// Poll for the daemon to bind, with per-attempt timeout so a long-running
+/// daemon startup doesn't make the entire poll loop hang on a single probe.
+fn wait_for_daemon_with_timeout(client: &str, total_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(total_secs);
     while std::time::Instant::now() < deadline {
-        if probe_daemon(client) {
+        if probe_daemon_timeout(client, 3) {
             return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
     false
 }
 
-/// Make sure an `org-gui` Emacs daemon is running. On a healthy system this is
-/// a single noop probe. When the daemon isn't responding, we (a) clear any
-/// lingering stale socket file, (b) explicitly spawn `emacs --daemon=org-gui`
-/// (capturing stderr so we can surface the real config error), (c) fall back
-/// to `emacs -q --daemon=org-gui` if user init is the problem. Returns Ok
-/// once the daemon answers a probe; Err carries the actual Emacs stderr so
-/// the user sees "X-mode failed to require Y" instead of the opaque
-/// emacsclient "Could not start the Emacs daemon".
+/// Does ANY emacs --daemon=org-gui process currently exist on the system?
+/// pgrep returns 0 (exit-success) iff at least one match was found.
+fn daemon_process_alive() -> bool {
+    std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(format!("emacs.*--daemon={SOCKET_NAME}"))
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+// Concurrency lock around ensure_daemon: rapid bridge calls (drag, arrow-key
+// nudge) used to race here and each tried to spawn its own daemon, producing
+// "Unable to start daemon: server already running" once Doom's 19 s startup
+// began. With a global Mutex, only one thread at a time inspects/spawns; the
+// others wait, re-probe under the lock, and find the daemon already healthy.
+static DAEMON_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Wall-clock seconds of the last successful probe. Subsequent ensure_daemon
+// calls within `DAEMON_PROBE_CACHE_SECS` skip the probe entirely so a hot
+// stream of bridge calls doesn't spawn an emacsclient round-trip for every
+// keystroke.
+static DAEMON_LAST_OK_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const DAEMON_PROBE_CACHE_SECS: u64 = 10;
+
+/// Make sure an `org-gui` Emacs daemon is running. The fast path is a single
+/// noop probe (cached for 10 s). When the probe fails we DON'T immediately
+/// assume the daemon is gone — we pgrep for an `emacs --daemon=org-gui`
+/// process first. If one exists, the daemon is mid-startup (Doom can take
+/// 20 s); just wait for it. Only when no daemon process exists do we clean
+/// stale sockets and spawn a fresh server. Two spawn fallbacks: user init
+/// first; `emacs -q` if user init fails or hangs.
 fn ensure_daemon(client: &str) -> Result<(), String> {
-    if probe_daemon(client) {
+    let _guard = DAEMON_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last_ok = DAEMON_LAST_OK_SECS.load(Ordering::Relaxed);
+    if now_secs.saturating_sub(last_ok) < DAEMON_PROBE_CACHE_SECS {
         return Ok(());
     }
-    // Clean any orphaned socket files so a fresh daemon can claim the name.
+
+    // Quick probe with a 2 s ceiling — enough to ride out a brief stall but
+    // not enough to make the user wait if the daemon really is dead.
+    if probe_daemon_timeout(client, 2) {
+        DAEMON_LAST_OK_SECS.store(now_secs, Ordering::Relaxed);
+        return Ok(());
+    }
+
+    // Probe failed. Maybe the daemon process is alive but mid-startup
+    // (Doom takes ~19 s). Don't spawn a duplicate — wait for the existing
+    // process to become responsive.
+    if daemon_process_alive() {
+        if wait_for_daemon_with_timeout(client, 60) {
+            DAEMON_LAST_OK_SECS.store(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                Ordering::Relaxed,
+            );
+            return Ok(());
+        }
+        return Err(format!(
+            "An org-gui Emacs daemon is running but didn't respond within 60 s.\n\nIf this persists, click ↻ Daemon in the toolbar to reset it.",
+        ));
+    }
+
+    // No daemon process. Clean orphan socket files so a fresh daemon can
+    // claim the name without colliding.
     let parents: Vec<std::path::PathBuf> = [
         std::env::var("XDG_RUNTIME_DIR").ok(),
         std::env::var("TMPDIR").ok(),
@@ -318,7 +398,14 @@ fn ensure_daemon(client: &str) -> Result<(), String> {
         .arg(format!("--daemon={SOCKET_NAME}"))
         .output();
     if let Ok(out) = &out_full {
-        if out.status.success() && wait_for_daemon(client, 15) {
+        if out.status.success() && wait_for_daemon_with_timeout(client, 60) {
+            DAEMON_LAST_OK_SECS.store(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                Ordering::Relaxed,
+            );
             return Ok(());
         }
     }
@@ -330,7 +417,14 @@ fn ensure_daemon(client: &str) -> Result<(), String> {
         .arg(format!("--daemon={SOCKET_NAME}"))
         .output();
     if let Ok(out) = &out_min {
-        if out.status.success() && wait_for_daemon(client, 10) {
+        if out.status.success() && wait_for_daemon_with_timeout(client, 15) {
+            DAEMON_LAST_OK_SECS.store(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                Ordering::Relaxed,
+            );
             return Ok(());
         }
     }
@@ -349,7 +443,7 @@ fn ensure_daemon(client: &str) -> Result<(), String> {
     } else if !min_err.is_empty() {
         min_err
     } else {
-        "Emacs daemon spawned but never bound the org-gui socket within 15 s.".to_string()
+        "Emacs daemon spawned but never bound the org-gui socket within 60 s.".to_string()
     };
     Err(format!(
         "Could not start the org-gui Emacs daemon.\n\n\
