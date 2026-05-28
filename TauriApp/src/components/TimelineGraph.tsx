@@ -50,6 +50,7 @@ export default function TimelineGraph() {
   const reorder = useOrgStore((s) => s.reorder);
   const refile = useOrgStore((s) => s.refile);
   const depMode = useOrgStore((s) => s.depMode);
+  const scheduleMode = useOrgStore((s) => s.scheduleMode);
   const addDependency = useOrgStore((s) => s.addDependency);
   const setConnectDrag = useOrgStore((s) => s.setConnectDrag);
   const rf = useReactFlow();
@@ -367,7 +368,7 @@ export default function TimelineGraph() {
         }
         if (layout) setNodes(layout.nodes); // snap back
       }}
-      nodesDraggable={!depMode}
+      nodesDraggable={!depMode && !scheduleMode}
       zoomOnDoubleClick={false}
       deleteKeyCode={null}
       fitView

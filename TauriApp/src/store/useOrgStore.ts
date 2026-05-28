@@ -342,6 +342,11 @@ interface OrgState {
   editBegin: number; // subtree the Emacs sidebar narrows to (0 = whole file)
   panel: PanelTab; // right-side pull-out panel
   depMode: boolean; // dependency-drawing mode in the graph
+  scheduleMode: boolean; // drag-node-to-timeline scheduling mode
+  // The nodeId of the node currently being dragged from the graph in
+  // schedule mode. Null when no drag is in progress. The timeline reads
+  // this to know whose schedule to set on drop.
+  scheduleDragNodeId: string | null;
   // Live state while dragging a dependency link in dep mode (for node indicators)
   connectFrom: string | null; // node id the drag started on
   connectHover: string | null; // node id currently under the cursor
@@ -361,6 +366,8 @@ interface OrgState {
   flashNode: (id: string) => void;
   setPanel: (p: PanelTab) => void;
   setDepMode: (on: boolean) => void;
+  setScheduleMode: (on: boolean) => void;
+  setScheduleDragNode: (id: string | null) => void;
   setConnectDrag: (from: string | null, hover: string | null, valid: boolean) => void;
   addDependency: (fromNode: OrgNode, toNode: OrgNode) => Promise<void>;
   removeDependency: (fromNode: OrgNode, toNode: OrgNode) => Promise<void>;
@@ -423,6 +430,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   editBegin: 0,
   panel: null,
   depMode: false,
+  scheduleMode: false,
+  scheduleDragNodeId: null,
   connectFrom: null,
   connectHover: null,
   connectValid: false,
@@ -574,6 +583,16 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   // the graph is full-width for drawing.
   setDepMode: (on) =>
     set(on ? { depMode: true, panel: null } : { depMode: false, connectFrom: null, connectHover: null, connectValid: false }),
+  setScheduleMode: (on) =>
+    // Mutually exclusive with depMode — only one "graph interaction mode"
+    // can be active at a time, otherwise the cursor / draggable semantics
+    // get ambiguous.
+    set(
+      on
+        ? { scheduleMode: true, depMode: false, connectFrom: null, connectHover: null, connectValid: false, panel: null }
+        : { scheduleMode: false, scheduleDragNodeId: null },
+    ),
+  setScheduleDragNode: (id) => set({ scheduleDragNodeId: id }),
 
   setConnectDrag: (from, hover, valid) => set({ connectFrom: from, connectHover: hover, connectValid: valid }),
 

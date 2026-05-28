@@ -219,6 +219,10 @@ export default function TimelineBand() {
   const timelineSelectedChip = useOrgStore((s) => s.timelineSelectedChip);
   const setTimelineSelectedChip = useOrgStore((s) => s.setTimelineSelectedChip);
   const tagColors = useOrgStore((s) => s.tagColors);
+  const scheduleMode = useOrgStore((s) => s.scheduleMode);
+  const setScheduleMode = useOrgStore((s) => s.setScheduleMode);
+  const scheduleDragNodeId = useOrgStore((s) => s.scheduleDragNodeId);
+  const setScheduleDragNode = useOrgStore((s) => s.setScheduleDragNode);
 
   const railRef = useRef<HTMLDivElement>(null);
   const dragId = useRef<string | null>(null);
@@ -417,68 +421,88 @@ export default function TimelineBand() {
    *   ↑ / ↓  shift the time of day by ∓15 min  (↑ = earlier, ↓ = later)
    *   Esc    deselect
    *
-   * Holding an arrow key auto-repeats at ~30 events/s. Firing scheduleNode
-   * on every event spawns 30 parallel emacsclient processes per second,
-   * which overloads the daemon and produces "Connection refused" / stale-
-   * socket errors. We coalesce instead: at most one bridge call is in
-   * flight at a time. Further keypresses accumulate into pendingDelta
-   * (date + minute offsets) and flush in a single combined call once the
-   * previous one returns. End result: pressing & holding ↓ produces ~3-5
-   * bridge calls per second, each advancing the schedule by however many
-   * 15-min steps elapsed since the last flush.
+   * The previous "coalesce while held" approach still spawned several
+   * emacsclient processes per second of holding a key, which was enough
+   * to overload the daemon for some users. The bridge call is now
+   * deferred entirely until the key is RELEASED:
+   *  - keydown only accumulates (ddate, dminutes) into pendingNudge state
+   *  - the selected chip renders at the optimistic preview position
+   *  - keyup of the last held arrow flushes one combined call
+   *  - failsafe: if no keyup arrives within 800 ms (e.g. user alt-tabbed
+   *    while a key was down) the pending delta commits anyway, so the
+   *    edit doesn't sit forever uncommitted
+   * One bridge call per gesture, no matter how long you hold the key.
    */
-  const nudgeInflight = useRef(false);
-  const nudgePending = useRef({ ddate: 0, dminutes: 0 });
+  const [pendingNudge, setPendingNudge] = useState<{
+    nodeId: string;
+    isDeadline: boolean;
+    ddate: number;
+    dminutes: number;
+  } | null>(null);
+  const heldArrowKeys = useRef(new Set<string>());
+  const idleCommitTimer = useRef<number | null>(null);
   useEffect(() => {
-    if (!timelineSelectedChip) return;
+    if (!timelineSelectedChip) {
+      // Clear any pending nudge when selection drops; nothing to commit
+      // against.
+      setPendingNudge(null);
+      heldArrowKeys.current.clear();
+      if (idleCommitTimer.current) {
+        window.clearTimeout(idleCommitTimer.current);
+        idleCommitTimer.current = null;
+      }
+      return;
+    }
 
-    const flush = () => {
-      if (nudgeInflight.current) return;
-      const { ddate, dminutes } = nudgePending.current;
-      if (ddate === 0 && dminutes === 0) return;
-      const sel = timelineSelectedChip;
-      const node = doc?.nodes.find((n) => n.id === sel.nodeId);
-      if (!node) {
-        nudgePending.current = { ddate: 0, dminutes: 0 };
-        return;
+    const commit = () => {
+      if (idleCommitTimer.current) {
+        window.clearTimeout(idleCommitTimer.current);
+        idleCommitTimer.current = null;
       }
-      const isoNow = sel.isDeadline ? node.deadline : node.scheduled;
-      const cur = parseOrgDate(isoNow);
-      if (!cur) {
-        nudgePending.current = { ddate: 0, dminutes: 0 };
-        return;
-      }
-      const curTime = timeOfDayFromIso(isoNow) ?? "12:00";
-      const [hh, mm] = curTime.split(":").map((s) => parseInt(s, 10));
-      const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
-      const newDate = new Date(cur);
-      newDate.setHours(0, 0, 0, 0);
-      newDate.setDate(newDate.getDate() + ddate);
-      const wrapped = ((baseMin + dminutes) % 1440 + 1440) % 1440;
-      const newH = Math.floor(wrapped / 60);
-      const newM = wrapped % 60;
-      const dateStr = `${isoOf(newDate)} ${String(newH).padStart(2, "0")}:${String(newM).padStart(2, "0")}`;
-      nudgePending.current = { ddate: 0, dminutes: 0 };
-      nudgeInflight.current = true;
-      Promise.resolve(scheduleNode(node, dateStr, sel.isDeadline ? "deadline" : "scheduled"))
-        .catch(() => {
-          // scheduleNode already surfaces errors via store.error → toast;
-          // we just need to make sure inflight clears so the next nudge
-          // can fire instead of getting stuck.
-        })
-        .finally(() => {
-          nudgeInflight.current = false;
-          // Drain anything the user accumulated while we were waiting.
-          if (nudgePending.current.ddate !== 0 || nudgePending.current.dminutes !== 0) {
-            flush();
-          }
-        });
+      setPendingNudge((cur) => {
+        if (!cur) return null;
+        if (cur.ddate === 0 && cur.dminutes === 0) return null;
+        const node = doc?.nodes.find((n) => n.id === cur.nodeId);
+        if (!node) return null;
+        const isoNow = cur.isDeadline ? node.deadline : node.scheduled;
+        const parsed = parseOrgDate(isoNow);
+        if (!parsed) return null;
+        const curTime = timeOfDayFromIso(isoNow) ?? "12:00";
+        const [hh, mm] = curTime.split(":").map((s) => parseInt(s, 10));
+        const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
+        const newDate = new Date(parsed);
+        newDate.setHours(0, 0, 0, 0);
+        newDate.setDate(newDate.getDate() + cur.ddate);
+        const wrapped = ((baseMin + cur.dminutes) % 1440 + 1440) % 1440;
+        const newH = Math.floor(wrapped / 60);
+        const newM = wrapped % 60;
+        const dateStr = `${isoOf(newDate)} ${String(newH).padStart(2, "0")}:${String(newM).padStart(2, "0")}`;
+        // Fire the bridge call; on error the store will surface a toast
+        // and the chip snaps back to the doc's real value on next render.
+        Promise.resolve(
+          scheduleNode(node, dateStr, cur.isDeadline ? "deadline" : "scheduled"),
+        ).catch(() => {});
+        return null;
+      });
+    };
+
+    const armIdleCommit = () => {
+      if (idleCommitTimer.current) window.clearTimeout(idleCommitTimer.current);
+      idleCommitTimer.current = window.setTimeout(commit, 800);
     };
 
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
       if (e.key === "Escape") {
+        // Esc abandons the pending preview AND deselects — feels more
+        // useful than committing on escape.
+        setPendingNudge(null);
+        heldArrowKeys.current.clear();
+        if (idleCommitTimer.current) {
+          window.clearTimeout(idleCommitTimer.current);
+          idleCommitTimer.current = null;
+        }
         setTimelineSelectedChip(null);
         return;
       }
@@ -490,17 +514,49 @@ export default function TimelineBand() {
       else if (e.key === "ArrowDown") dminutes = 15;
       else return;
       e.preventDefault();
-      nudgePending.current.ddate += ddate;
-      nudgePending.current.dminutes += dminutes;
-      flush();
+      heldArrowKeys.current.add(e.key);
+      const sel = timelineSelectedChip;
+      setPendingNudge((cur) => {
+        if (cur && cur.nodeId === sel.nodeId && cur.isDeadline === sel.isDeadline) {
+          return { ...cur, ddate: cur.ddate + ddate, dminutes: cur.dminutes + dminutes };
+        }
+        return { nodeId: sel.nodeId, isDeadline: sel.isDeadline, ddate, dminutes };
+      });
+      armIdleCommit();
     };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (
+        e.key !== "ArrowLeft" &&
+        e.key !== "ArrowRight" &&
+        e.key !== "ArrowUp" &&
+        e.key !== "ArrowDown"
+      )
+        return;
+      heldArrowKeys.current.delete(e.key);
+      if (heldArrowKeys.current.size === 0) {
+        commit();
+      }
+    };
+
+    // Window blur is the most reliable way to catch "user switched to
+    // another app while holding a key" — keyup may never fire for that
+    // key. Commit whatever's pending so the edit doesn't get stranded.
+    const onBlur = () => {
+      heldArrowKeys.current.clear();
+      commit();
+    };
+
     window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("keydown", onKey);
-      // Don't carry pending deltas across selection changes — a queued
-      // nudge for the previous chip would silently retarget when the
-      // selection moves.
-      nudgePending.current = { ddate: 0, dminutes: 0 };
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+      // Effect re-runs when timelineSelectedChip changes — commit anything
+      // pending against the OLD selection before the new effect arms.
+      commit();
     };
   }, [timelineSelectedChip, doc, scheduleNode, setTimelineSelectedChip]);
 
@@ -619,10 +675,40 @@ export default function TimelineBand() {
       ref={railRef}
       onPointerDown={onPanStart}
       onDoubleClick={onBandDoubleClick}
+      // HTML5 drag-and-drop drop target for the Schedule mode. Accepting
+      // dragover (with preventDefault) is required for drop to fire. The
+      // dataTransfer payload is set by OrgNode in its onDragStart handler
+      // when scheduleMode is on.
+      onDragOver={(e) => {
+        if (!scheduleMode) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={(e) => {
+        if (!scheduleMode) return;
+        e.preventDefault();
+        const nodeId =
+          e.dataTransfer.getData("application/orggui-node-id") ||
+          scheduleDragNodeId ||
+          "";
+        if (!nodeId) return;
+        const node = doc?.nodes.find((n) => n.id === nodeId);
+        if (!node) return;
+        const r = railRef.current?.getBoundingClientRect();
+        if (!r) return;
+        const dt = dateAtClientX(e.clientX);
+        const time = timeAtRailY(e.clientY - r.top, r.height, workHoursMode);
+        const dateStr = `${isoOf(dt)} ${time}`;
+        Promise.resolve(scheduleNode(node, dateStr, "scheduled")).catch(() => {});
+        setScheduleDragNode(null);
+        setScheduleMode(false);
+      }}
       title={
-        timelineView.zoom === "fit"
-          ? "Double-click to add a milestone · use the zoom buttons to focus a date range"
-          : "Drag to pan · double-click empty band to add a milestone · double-click a tick to focus that node"
+        scheduleMode
+          ? "Drop a graph node here to schedule it at the X = date, Y = time of the drop point"
+          : timelineView.zoom === "fit"
+            ? "Double-click to add a milestone · use the zoom buttons to focus a date range"
+            : "Drag to pan · double-click empty band to add a milestone · double-click a tick to focus that node"
       }
       style={{
         position: "relative",
@@ -631,7 +717,15 @@ export default function TimelineBand() {
         borderBottom: "1px solid var(--c-border)",
         overflow: "hidden",
         userSelect: "none",
-        cursor: timelineView.zoom === "fit" ? "default" : panRef.current ? "grabbing" : "grab",
+        cursor: scheduleMode
+          ? "copy"
+          : timelineView.zoom === "fit"
+            ? "default"
+            : panRef.current
+              ? "grabbing"
+              : "grab",
+        // Visual hint that the rail is an active drop target.
+        boxShadow: scheduleMode ? "inset 0 0 0 2px #a3be8c" : undefined,
       }}
     >
       {/* Top row: title + zoom selector. Fixed height so the band stays compact. */}
@@ -731,6 +825,33 @@ export default function TimelineBand() {
             }}
           >
             💼 {workHoursMode ? "8–20" : "24h"}
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setScheduleMode(!scheduleMode);
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            title={
+              scheduleMode
+                ? "Exit schedule mode"
+                : "Schedule mode: drag a node from the graph onto the timeline to set its date + time"
+            }
+            style={{
+              background: scheduleMode ? "#a3be8c" : "transparent",
+              color: scheduleMode ? "#1c1c1e" : "var(--c-text-dim)",
+              border: scheduleMode ? "1px solid #a3be8c" : "1px solid var(--c-border)",
+              borderRadius: 4,
+              padding: "1px 7px",
+              fontSize: 10.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              marginLeft: 4,
+            }}
+          >
+            📅 {scheduleMode ? "Drop on date" : "Schedule"}
           </button>
         </div>
       </div>
@@ -935,16 +1056,43 @@ export default function TimelineBand() {
           if (chips.length === 1) {
             // ── Singleton chip ────────────────────────────────────────────
             const d = chips[0];
-            const left = d.leftPct;
-            const top = d.topPx;
+            // Optimistic preview while the user is holding arrow keys:
+            // shift the chip's apparent date+time by the pending delta so
+            // the motion is immediate, even though the bridge call only
+            // fires on keyup. The committed position (after the bridge
+            // round-trip) overrides this on next render.
+            const isPreview =
+              pendingNudge != null &&
+              pendingNudge.nodeId === d.nodeId &&
+              pendingNudge.isDeadline === d.deadline &&
+              (pendingNudge.ddate !== 0 || pendingNudge.dminutes !== 0);
+            let left = d.leftPct;
+            let top = d.topPx;
+            let dispTime = d.timeOfDay;
+            if (isPreview && pendingNudge) {
+              const newMs = d.ms + pendingNudge.ddate * MS_DAY;
+              const baseTime = d.timeOfDay ?? "12:00";
+              const [bh, bm] = baseTime.split(":").map((s) => parseInt(s, 10));
+              const baseMin =
+                (Number.isFinite(bh) ? bh : 12) * 60 + (Number.isFinite(bm) ? bm : 0);
+              const wrapped = ((baseMin + pendingNudge.dminutes) % 1440 + 1440) % 1440;
+              const nh = Math.floor(wrapped / 60);
+              const nm = wrapped % 60;
+              dispTime = `${String(nh).padStart(2, "0")}:${String(nm).padStart(2, "0")}`;
+              left = pct(newMs);
+              top = yForTimeOfDay(dispTime, bandH, workHoursMode);
+            }
             const isOverdue = d.deadline && d.ms <= todayMs;
             const isSelected =
               timelineSelectedChip != null &&
               timelineSelectedChip.nodeId === d.nodeId &&
               timelineSelectedChip.isDeadline === d.deadline;
-            const outOfWorkHours = workHoursMode && isOutsideWorkHours(d.timeOfDay);
+            // While previewing, use the optimistic time for the OOH check and
+            // display so the chip's label keeps up with the cursor.
+            const effectiveTime = isPreview ? dispTime : d.timeOfDay;
+            const outOfWorkHours = workHoursMode && isOutsideWorkHours(effectiveTime);
             const showTitle = tier === "full";
-            const showTime = tier !== "dot" && !!d.timeOfDay;
+            const showTime = tier !== "dot" && !!effectiveTime;
             // Trim title aggressively at narrow zooms.
             const titleLimit = chipWidthAvail >= 180 ? 28 : chipWidthAvail >= 130 ? 18 : 12;
             const truncated =
@@ -964,8 +1112,8 @@ export default function TimelineBand() {
                   })
                 }
                 title={`${d.deadline ? "⚑ Deadline" : "⏱ Scheduled"}: ${d.title}${
-                  d.timeOfDay ? " @ " + d.timeOfDay : ""
-                }${
+                  effectiveTime ? " @ " + effectiveTime : ""
+                }${isPreview ? "\n(pending — release key to commit)" : ""}${
                   outOfWorkHours ? "\n(outside working hours — clamped to edge)" : ""
                 }\nClick to select (arrow keys nudge), drag to reschedule freely`}
                 style={{
@@ -1019,11 +1167,11 @@ export default function TimelineBand() {
                       fontSize: tier === "compact" ? 10 : 10.5,
                     }}
                   >
-                    {d.timeOfDay}
+                    {effectiveTime}
                     {outOfWorkHours && (
                       <span aria-hidden style={{ marginLeft: 2 }}>
                         {(() => {
-                          const [h] = (d.timeOfDay as string)
+                          const [h] = (effectiveTime as string)
                             .split(":")
                             .map((s) => parseInt(s, 10));
                           const minOfDay = (Number.isFinite(h) ? h : 0) * 60;
@@ -1065,7 +1213,7 @@ export default function TimelineBand() {
                   }}
                 >
                   {externalLabel}
-                  {d.timeOfDay ? ` · ${d.timeOfDay}` : ""}
+                  {effectiveTime ? ` · ${effectiveTime}` : ""}
                 </div>,
               );
             }
