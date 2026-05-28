@@ -42,12 +42,19 @@ export default function EmacsTerminal() {
     fit.fit();
 
     let id: number | null = null;
+    // Timestamp of the most recent keystroke sent to the PTY. The idle
+    // refresh timer uses this to skip a parse when the user is actively
+    // typing — a concurrent `org-gui-parse` would lock the daemon's
+    // single-threaded elisp executor and freeze the terminal until the
+    // parse completes (seconds, on a large file).
+    let lastKeystrokeAt = 0;
 
     // Workaround so your usual macOS Emacs shortcuts work in a terminal frame:
     // treat ⌘ (Command) as Meta, and encode modified Return / Tab as xterm
     // modifyOtherKeys (CSI 27;mod;code~), which Emacs decodes. So ⌘+Enter→M-RET
     // (new heading), ⌘+Shift+Enter→M-S-RET (new TODO), ⌘+x→M-x, etc.
     const send = (data: string) => {
+      lastKeystrokeAt = Date.now();
       if (id != null) invoke("emacs_term_write", { id, data });
     };
     term.attachCustomKeyEventHandler((e) => {
@@ -78,35 +85,49 @@ export default function EmacsTerminal() {
     let unlistenData: UnlistenFn | undefined;
     let unlistenExit: UnlistenFn | undefined;
 
-    // Keep the graph live: whenever Emacs redraws (i.e. the user edited
-    // something), debounce a re-parse of the file so the graph reflects the
-    // change without toggling back to Graph. The parse reads the live buffer,
-    // so even unsaved edits show up.
-    let syncTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleSync = () => {
-      if (syncTimer) clearTimeout(syncTimer);
-      syncTimer = setTimeout(() => {
-        syncTimer = null;
-        refreshDoc();
-      }, 450);
-    };
+    // Slow, idle-only graph sync. The earlier implementation called
+    // refreshDoc() on EVERY emacs-term-data event, which while typing
+    // produces 20-30 events/sec (cursor echo, line redraws, evil cursor
+    // blink, …). Each refreshDoc spawns `org-gui-parse` against the
+    // daemon, and elisp is single-threaded — while the parse runs, no
+    // PTY input is serviced, which manifests as the app hanging mid-keypress.
+    // We now refresh every 8 s, and ONLY when the user hasn't typed for
+    // at least 3 s, so the parse never competes with the typing pipeline.
+    // Final state catches up on unmount (terminal close).
+    const REFRESH_INTERVAL_MS = 8000;
+    const KEYSTROKE_QUIET_MS = 3000;
+    const idleRefresh = window.setInterval(() => {
+      if (Date.now() - lastKeystrokeAt < KEYSTROKE_QUIET_MS) return;
+      refreshDoc();
+    }, REFRESH_INTERVAL_MS);
 
     (async () => {
       unlistenData = await listen<{ id: number; data: string }>("emacs-term-data", (e) => {
         term.write(b64ToBytes(e.payload.data));
-        scheduleSync();
       });
       unlistenExit = await listen<number>("emacs-term-exit", () => {
         term.writeln("\r\n\x1b[2m[emacs frame closed — toggle back to Graph]\x1b[0m");
       });
       if (disposed) return;
+      let newId: number;
       try {
-        id = await invoke<number>("emacs_term_open", { file, begin, cols: term.cols, rows: term.rows });
+        newId = await invoke<number>("emacs_term_open", { file, begin, cols: term.cols, rows: term.rows });
       } catch (err) {
         term.writeln(`\x1b[31m${String(err)}\x1b[0m`);
         return;
       }
+      // The async open await window is long enough (50-500 ms) that the
+      // user can switch tabs / close the panel mid-open. In that case
+      // the cleanup function has already fired but `id` was still null,
+      // so the PTY would leak. Close it explicitly here when we detect
+      // post-await dispose.
+      if (disposed) {
+        invoke("emacs_term_close", { id: newId }).catch(() => {});
+        return;
+      }
+      id = newId;
       term.onData((d) => {
+        lastKeystrokeAt = Date.now();
         if (id != null) invoke("emacs_term_write", { id, data: d });
       });
       term.onResize(({ cols, rows }) => {
@@ -128,13 +149,17 @@ export default function EmacsTerminal() {
 
     return () => {
       disposed = true;
-      if (syncTimer) clearTimeout(syncTimer);
+      window.clearInterval(idleRefresh);
       window.removeEventListener("resize", onResize);
       ro.disconnect();
       if (id != null) invoke("emacs_term_close", { id });
       unlistenData?.();
       unlistenExit?.();
       term.dispose();
+      // One final refresh so the graph picks up whatever the user just
+      // committed in the terminal, even if we skipped recent idle ticks
+      // because they were typing.
+      refreshDoc();
     };
   }, [file, begin, refreshDoc]);
 

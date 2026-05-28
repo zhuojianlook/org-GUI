@@ -623,10 +623,18 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   // sync with live edits made in the embedded Emacs editor. No-ops the update
   // when nothing changed so we don't churn the graph while the user types.
   refreshDoc: async () => {
-    const { file, doc } = get();
-    if (!file) return;
+    const { file, doc, loadingFile } = get();
+    // Skip mid-tab-switch: the user has clicked another tab; the active
+    // file we'd parse is about to be torn down, and the parse would race
+    // with loadFile's atomic swap.
+    if (!file || loadingFile) return;
+    const target = file;
     try {
-      const fresh = await parseOrg(file);
+      const fresh = await parseOrg(target);
+      // The user may have switched tabs while we awaited the parse — only
+      // apply the result when we're still on the same file.
+      const after = get();
+      if (after.file !== target || after.loadingFile) return;
       const a = JSON.stringify(fresh.nodes);
       const b = JSON.stringify(doc?.nodes ?? null);
       if (a !== b) set({ doc: fresh });
