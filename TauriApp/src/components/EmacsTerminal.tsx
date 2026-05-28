@@ -85,20 +85,30 @@ export default function EmacsTerminal() {
     let unlistenData: UnlistenFn | undefined;
     let unlistenExit: UnlistenFn | undefined;
 
-    // Slow, idle-only graph sync. The earlier implementation called
+    // Live-but-safe graph sync. The previous implementation called
     // refreshDoc() on EVERY emacs-term-data event, which while typing
     // produces 20-30 events/sec (cursor echo, line redraws, evil cursor
-    // blink, …). Each refreshDoc spawns `org-gui-parse` against the
-    // daemon, and elisp is single-threaded — while the parse runs, no
-    // PTY input is serviced, which manifests as the app hanging mid-keypress.
-    // We now refresh every 8 s, and ONLY when the user hasn't typed for
-    // at least 3 s, so the parse never competes with the typing pipeline.
-    // Final state catches up on unmount (terminal close).
-    const REFRESH_INTERVAL_MS = 8000;
-    const KEYSTROKE_QUIET_MS = 3000;
+    // blink, modeline ticks, …). Each refreshDoc spawns `org-gui-parse`
+    // against the daemon, and elisp is single-threaded — while the parse
+    // runs, no PTY input is serviced, which manifests as the app hanging
+    // mid-keypress.
+    //
+    // Strategy: a small interval ticks at REFRESH_INTERVAL_MS and fires
+    // refreshDoc iff (a) no keystroke in the last KEYSTROKE_QUIET_MS, and
+    // (b) no other refresh is currently in flight. That gives a sub-2 s
+    // graph latency after you pause typing, without the parse ever
+    // competing with the input pipeline. Final state still catches up on
+    // unmount.
+    const REFRESH_INTERVAL_MS = 1000;
+    const KEYSTROKE_QUIET_MS = 600;
+    let refreshInflight = false;
     const idleRefresh = window.setInterval(() => {
+      if (refreshInflight) return;
       if (Date.now() - lastKeystrokeAt < KEYSTROKE_QUIET_MS) return;
-      refreshDoc();
+      refreshInflight = true;
+      Promise.resolve(refreshDoc()).finally(() => {
+        refreshInflight = false;
+      });
     }, REFRESH_INTERVAL_MS);
 
     (async () => {
