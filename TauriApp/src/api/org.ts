@@ -79,6 +79,62 @@ export function incompleteDeps(node: OrgNode, doc: OrgDoc | null): OrgNode[] {
 }
 
 /**
+ * Validate a proposed scheduled date for NODE against the dependency graph:
+ *   (a) each of node's prerequisites must be scheduled ≤ the new date
+ *   (b) every node depending on `node` must be scheduled ≥ the new date
+ * Returns an actionable error string on violation, or null when the move is
+ * compatible with the dependency ordering.
+ */
+export function validateScheduleAgainstDeps(
+  nodeId: string,
+  newScheduled: string | null,
+  doc: OrgDoc | null,
+): string | null {
+  if (!doc || !newScheduled) return null;
+  const node = doc.nodes.find((n) => n.id === nodeId);
+  if (!node) return null;
+  const newDate = parseOrgDate(newScheduled);
+  if (!newDate) return null;
+  const newMs = new Date(newDate.getFullYear(), newDate.getMonth(), newDate.getDate()).getTime();
+
+  const byOrgId = new Map<string, OrgNode>();
+  for (const n of doc.nodes) if (n.orgId) byOrgId.set(n.orgId, n);
+
+  const startOfDayMs = (s: string | null): number | null => {
+    if (!s) return null;
+    const d = parseOrgDate(s);
+    if (!d) return null;
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  };
+
+  // (a) every prerequisite of node must be scheduled no LATER than newMs.
+  for (const prereqOrgId of node.dependsOn ?? []) {
+    const prereq = byOrgId.get(prereqOrgId);
+    if (!prereq) continue;
+    const pMs = startOfDayMs(prereq.scheduled);
+    if (pMs !== null && pMs > newMs) {
+      return `Can't schedule "${node.title ?? "(untitled)"}" earlier than its prerequisite "${
+        prereq.title ?? "(untitled)"
+      }" (scheduled ${(prereq.scheduled ?? "").slice(0, 10)}). Reschedule the prerequisite first.`;
+    }
+  }
+
+  // (b) every node depending on `node` must be scheduled no EARLIER than newMs.
+  if (node.orgId) {
+    for (const other of doc.nodes) {
+      if (!(other.dependsOn ?? []).includes(node.orgId)) continue;
+      const oMs = startOfDayMs(other.scheduled);
+      if (oMs !== null && oMs < newMs) {
+        return `Can't schedule "${node.title ?? "(untitled)"}" later than its dependent "${
+          other.title ?? "(untitled)"
+        }" (scheduled ${(other.scheduled ?? "").slice(0, 10)}). Reschedule the dependent first.`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Would adding "toNode depends on fromNode" create a dependency cycle?
  * That happens when fromNode already (transitively) depends on toNode — then the
  * new edge closes a loop (A→B→C→A). Walks fromNode's DEPENDS_ON closure looking

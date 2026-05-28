@@ -18,7 +18,10 @@ import {
   toggleCheckbox as apiToggleCheckbox,
   addDependency as apiAddDependency,
   removeDependency as apiRemoveDependency,
+  setScheduled as apiSetScheduled,
+  setDeadline as apiSetDeadline,
   incompleteDeps,
+  validateScheduleAgainstDeps,
   wouldCreateCycle,
   parseOrg,
   pingEmacs,
@@ -326,6 +329,9 @@ interface OrgState {
   tagColors: Record<string, string>; // tag name → CSS colour (per file)
   tagFilter: string | null; // when set, only nodes carrying this tag stay sharp
   tagAuraEnabled: boolean; // global toggle for the metaball halo overlay
+  /** Currently-selected timeline chip (single click on a chip). Arrow keys
+   *  nudge this chip's scheduled or deadline date. Esc clears. */
+  timelineSelectedChip: { nodeId: string; isDeadline: boolean } | null;
   /** Multi-selection set for bulk operations (e.g. tag-many). Holds node ids.
    *  Separate from selectedId so the Details panel and ordinary single-select
    *  workflow don't interfere with bulk gestures. */
@@ -368,6 +374,8 @@ interface OrgState {
   setTagColor: (tag: string, color: string | null) => void;
   setTagFilter: (tag: string | null) => void;
   setTagAuraEnabled: (v: boolean) => void;
+  setTimelineSelectedChip: (chip: { nodeId: string; isDeadline: boolean } | null) => void;
+  scheduleNode: (node: OrgNode, dateStr: string, kind: "scheduled" | "deadline") => Promise<void>;
   toggleMultiSelected: (id: string) => void;
   clearMultiSelected: () => void;
   applyTagToSelection: (tag: string) => Promise<void>;
@@ -407,6 +415,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   tagColors: {},
   tagFilter: null,
   tagAuraEnabled: loadTagAuraEnabled(),
+  timelineSelectedChip: null,
   multiSelected: new Set<string>(),
   updateChannel: loadUpdateChannel(),
   contextMenu: null,
@@ -641,6 +650,31 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   setTagAuraEnabled: (v) => {
     saveTagAuraEnabled(v);
     set({ tagAuraEnabled: v });
+  },
+
+  setTimelineSelectedChip: (chip) => set({ timelineSelectedChip: chip }),
+
+  /**
+   * Commit a scheduled or deadline date for NODE, but only after
+   * cross-checking against the dependency graph. If a prerequisite would
+   * end up later than its dependent (or vice versa), set the store's
+   * error field (surfacing a toast) and skip the bridge call.
+   */
+  scheduleNode: async (node, dateStr, kind) => {
+    const { doc } = get();
+    if (!doc) return;
+    // Validation only applies to "scheduled" dates; deadlines aren't
+    // required by org-mode's dependency semantics (you can have a
+    // deadline later than a prerequisite — it's still your problem to
+    // finish on time, but it's not an ordering violation).
+    if (kind === "scheduled") {
+      const err = validateScheduleAgainstDeps(node.id, dateStr, doc);
+      if (err) {
+        set({ error: err });
+        return;
+      }
+    }
+    await get().edit(kind === "scheduled" ? apiSetScheduled : apiSetDeadline, node, dateStr);
   },
 
   toggleMultiSelected: (id) =>

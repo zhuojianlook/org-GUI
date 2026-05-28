@@ -1,7 +1,6 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useOrgStore, type ZoomLevel } from "../store/useOrgStore";
 import { parseOrgDate, startOfDay } from "../utils/time";
-import { setDeadline, setScheduled } from "../api/org";
 
 // A horizontal calendar band across the top of the canvas. Shows zoom-level
 // controls (1W / 2W / 1M / 3M / 6M / 1Y / Fit), a month axis with adaptive day
@@ -130,7 +129,9 @@ export default function TimelineBand() {
   const removeMilestone = useOrgStore((s) => s.removeMilestone);
   const timelineView = useOrgStore((s) => s.timelineView);
   const setTimelineView = useOrgStore((s) => s.setTimelineView);
-  const edit = useOrgStore((s) => s.edit);
+  const scheduleNode = useOrgStore((s) => s.scheduleNode);
+  const timelineSelectedChip = useOrgStore((s) => s.timelineSelectedChip);
+  const setTimelineSelectedChip = useOrgStore((s) => s.setTimelineSelectedChip);
 
   const railRef = useRef<HTMLDivElement>(null);
   const dragId = useRef<string | null>(null);
@@ -237,11 +238,13 @@ export default function TimelineBand() {
   };
 
   // Drag the band to pan through time (no-op at Fit zoom — range is auto).
+  // Also clears any active timeline-chip selection so the arrow-key nudge
+  // stops watching once the user clicks anywhere off a chip.
   const onPanStart = (e: React.PointerEvent) => {
-    if (timelineView.zoom === "fit") return;
     if (e.button !== 0) return;
-    // Don't start a pan if the target is interactive (button, input, pin).
     if ((e.target as HTMLElement).closest("button,input,[data-pin]")) return;
+    if (timelineSelectedChip) setTimelineSelectedChip(null);
+    if (timelineView.zoom === "fit") return;
     panRef.current = { startX: e.clientX, startCenterMs: timelineView.centerMs };
     const onMove = (ev: PointerEvent) => {
       const r = railRef.current?.getBoundingClientRect();
@@ -259,6 +262,53 @@ export default function TimelineBand() {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
+
+  /**
+   * Arrow-key nudge when a timeline chip is selected:
+   *   ← / →  shift the date by ±1 day
+   *   ↑ / ↓  shift the time of day by ∓15 min  (↑ = earlier, ↓ = later)
+   *   Esc    deselect
+   * All commits go through scheduleNode → dependency validator.
+   */
+  useEffect(() => {
+    if (!timelineSelectedChip) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      if (e.key === "Escape") {
+        setTimelineSelectedChip(null);
+        return;
+      }
+      let ddate = 0;
+      let dminutes = 0;
+      if (e.key === "ArrowLeft") ddate = -1;
+      else if (e.key === "ArrowRight") ddate = 1;
+      else if (e.key === "ArrowUp") dminutes = -15;
+      else if (e.key === "ArrowDown") dminutes = 15;
+      else return;
+      e.preventDefault();
+      const node = doc?.nodes.find((n) => n.id === timelineSelectedChip.nodeId);
+      if (!node) return;
+      const isoNow = timelineSelectedChip.isDeadline ? node.deadline : node.scheduled;
+      const cur = parseOrgDate(isoNow);
+      if (!cur) return;
+      // Existing time of day if present, otherwise midday so the first
+      // ↑/↓ press moves a reasonable amount instead of jumping to midnight.
+      const curTime = timeOfDayFromIso(isoNow) ?? "12:00";
+      const [hh, mm] = curTime.split(":").map((s) => parseInt(s, 10));
+      const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
+      const newDate = new Date(cur);
+      newDate.setHours(0, 0, 0, 0);
+      newDate.setDate(newDate.getDate() + ddate);
+      const wrapped = ((baseMin + dminutes) % 1440 + 1440) % 1440;
+      const newH = Math.floor(wrapped / 60);
+      const newM = wrapped % 60;
+      const dateStr = `${isoOf(newDate)} ${String(newH).padStart(2, "0")}:${String(newM).padStart(2, "0")}`;
+      scheduleNode(node, dateStr, timelineSelectedChip.isDeadline ? "deadline" : "scheduled");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [timelineSelectedChip, doc, scheduleNode, setTimelineSelectedChip]);
 
   /** Drag a task chip on the timeline to reschedule it. X → date,
    *  Y → time of day. Sub-threshold gestures become a click that focuses
@@ -294,13 +344,14 @@ export default function TimelineBand() {
       window.removeEventListener("pointerup", up);
       setChipGhost(null);
       if (!dragging) {
-        // Sub-threshold gesture = click → focus the node in the graph (same
-        // as the previous dbl-click behaviour, now on single click since the
-        // chip is also the drag handle).
+        // Sub-threshold gesture = click → select this chip (so the arrow-key
+        // nudge handler kicks in) AND focus the node in the graph.
+        setTimelineSelectedChip({ nodeId: info.nodeId, isDeadline: info.deadline });
         window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: info.nodeId } }));
         return;
       }
-      // Drag committed — push the new date+time to the bridge.
+      // Drag committed — push the new date+time through scheduleNode so the
+      // dependency-ordering validator catches violations.
       const node = doc?.nodes.find((n) => n.id === info.nodeId);
       if (!node) return;
       const r = railRef.current?.getBoundingClientRect();
@@ -308,8 +359,7 @@ export default function TimelineBand() {
       const dt = dateAtClientX(ev.clientX);
       const time = timeAtRailY(ev.clientY - r.top, r.height);
       const dateStr = `${isoOf(dt)} ${time}`;
-      if (info.deadline) edit(setDeadline, node, dateStr);
-      else edit(setScheduled, node, dateStr);
+      scheduleNode(node, dateStr, info.deadline ? "deadline" : "scheduled");
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -504,6 +554,10 @@ export default function TimelineBand() {
         const top = yForTimeOfDay(d.timeOfDay, bandH);
         const isOverdue = d.deadline && d.ms <= todayMs;
         const truncated = d.title.length > 22 ? d.title.slice(0, 21) + "…" : d.title;
+        const isSelected =
+          timelineSelectedChip != null &&
+          timelineSelectedChip.nodeId === d.nodeId &&
+          timelineSelectedChip.isDeadline === d.deadline;
         return (
           <button
             key={`t${i}`}
@@ -512,7 +566,7 @@ export default function TimelineBand() {
             onPointerDown={(e) =>
               onChipDown(e, { nodeId: d.nodeId, deadline: d.deadline, title: d.title, color: d.color })
             }
-            title={`${d.deadline ? "⚑ Deadline" : "⏱ Scheduled"}: ${d.title}${d.timeOfDay ? " @ " + d.timeOfDay : ""}\nDrag to reschedule (← → date · ↑ ↓ time of day) · click to focus`}
+            title={`${d.deadline ? "⚑ Deadline" : "⏱ Scheduled"}: ${d.title}${d.timeOfDay ? " @ " + d.timeOfDay : ""}\nClick to select (then arrow keys nudge), drag to reschedule freely`}
             style={{
               position: "absolute",
               left: `${left}%`,
@@ -525,13 +579,17 @@ export default function TimelineBand() {
               borderRadius: 6,
               background: d.color,
               color: "#1c1c1e",
-              border: "1px solid rgba(0,0,0,0.25)",
+              border: isSelected ? "2px solid #ffd166" : "1px solid rgba(0,0,0,0.25)",
               cursor: "grab",
               fontSize: 10.5,
               fontWeight: 700,
               lineHeight: 1.1,
               whiteSpace: "nowrap",
-              boxShadow: d.deadline ? `0 1px 6px ${d.color}aa` : "0 1px 3px rgba(0,0,0,0.4)",
+              boxShadow: isSelected
+                ? `0 0 0 2px rgba(255,209,102,0.6), 0 2px 10px ${d.color}cc`
+                : d.deadline
+                  ? `0 1px 6px ${d.color}aa`
+                  : "0 1px 3px rgba(0,0,0,0.4)",
               maxWidth: 200,
               overflow: "hidden",
               userSelect: "none",

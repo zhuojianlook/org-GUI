@@ -24,6 +24,7 @@ export default function DetailPanel() {
   const addHeading = useOrgStore((s) => s.addHeading);
   const removeNode = useOrgStore((s) => s.removeNode);
   const start = useOrgStore((s) => s.start);
+  const scheduleNode = useOrgStore((s) => s.scheduleNode);
 
   const node = doc?.nodes.find((n) => n.id === selectedId);
 
@@ -167,7 +168,7 @@ export default function DetailPanel() {
       <DateField
         label="Scheduled"
         value={dateVal(node.scheduled)}
-        onChange={(v) => edit(setScheduled, node, v)}
+        onChange={(v) => scheduleNode(node, v, "scheduled")}
         onClear={() => edit(setScheduled, node, "")}
       />
       {/* Deadline */}
