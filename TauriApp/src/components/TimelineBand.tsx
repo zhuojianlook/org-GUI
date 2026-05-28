@@ -416,10 +416,65 @@ export default function TimelineBand() {
    *   ← / →  shift the date by ±1 day
    *   ↑ / ↓  shift the time of day by ∓15 min  (↑ = earlier, ↓ = later)
    *   Esc    deselect
-   * All commits go through scheduleNode → dependency validator.
+   *
+   * Holding an arrow key auto-repeats at ~30 events/s. Firing scheduleNode
+   * on every event spawns 30 parallel emacsclient processes per second,
+   * which overloads the daemon and produces "Connection refused" / stale-
+   * socket errors. We coalesce instead: at most one bridge call is in
+   * flight at a time. Further keypresses accumulate into pendingDelta
+   * (date + minute offsets) and flush in a single combined call once the
+   * previous one returns. End result: pressing & holding ↓ produces ~3-5
+   * bridge calls per second, each advancing the schedule by however many
+   * 15-min steps elapsed since the last flush.
    */
+  const nudgeInflight = useRef(false);
+  const nudgePending = useRef({ ddate: 0, dminutes: 0 });
   useEffect(() => {
     if (!timelineSelectedChip) return;
+
+    const flush = () => {
+      if (nudgeInflight.current) return;
+      const { ddate, dminutes } = nudgePending.current;
+      if (ddate === 0 && dminutes === 0) return;
+      const sel = timelineSelectedChip;
+      const node = doc?.nodes.find((n) => n.id === sel.nodeId);
+      if (!node) {
+        nudgePending.current = { ddate: 0, dminutes: 0 };
+        return;
+      }
+      const isoNow = sel.isDeadline ? node.deadline : node.scheduled;
+      const cur = parseOrgDate(isoNow);
+      if (!cur) {
+        nudgePending.current = { ddate: 0, dminutes: 0 };
+        return;
+      }
+      const curTime = timeOfDayFromIso(isoNow) ?? "12:00";
+      const [hh, mm] = curTime.split(":").map((s) => parseInt(s, 10));
+      const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
+      const newDate = new Date(cur);
+      newDate.setHours(0, 0, 0, 0);
+      newDate.setDate(newDate.getDate() + ddate);
+      const wrapped = ((baseMin + dminutes) % 1440 + 1440) % 1440;
+      const newH = Math.floor(wrapped / 60);
+      const newM = wrapped % 60;
+      const dateStr = `${isoOf(newDate)} ${String(newH).padStart(2, "0")}:${String(newM).padStart(2, "0")}`;
+      nudgePending.current = { ddate: 0, dminutes: 0 };
+      nudgeInflight.current = true;
+      Promise.resolve(scheduleNode(node, dateStr, sel.isDeadline ? "deadline" : "scheduled"))
+        .catch(() => {
+          // scheduleNode already surfaces errors via store.error → toast;
+          // we just need to make sure inflight clears so the next nudge
+          // can fire instead of getting stuck.
+        })
+        .finally(() => {
+          nudgeInflight.current = false;
+          // Drain anything the user accumulated while we were waiting.
+          if (nudgePending.current.ddate !== 0 || nudgePending.current.dminutes !== 0) {
+            flush();
+          }
+        });
+    };
+
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
@@ -435,27 +490,18 @@ export default function TimelineBand() {
       else if (e.key === "ArrowDown") dminutes = 15;
       else return;
       e.preventDefault();
-      const node = doc?.nodes.find((n) => n.id === timelineSelectedChip.nodeId);
-      if (!node) return;
-      const isoNow = timelineSelectedChip.isDeadline ? node.deadline : node.scheduled;
-      const cur = parseOrgDate(isoNow);
-      if (!cur) return;
-      // Existing time of day if present, otherwise midday so the first
-      // ↑/↓ press moves a reasonable amount instead of jumping to midnight.
-      const curTime = timeOfDayFromIso(isoNow) ?? "12:00";
-      const [hh, mm] = curTime.split(":").map((s) => parseInt(s, 10));
-      const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
-      const newDate = new Date(cur);
-      newDate.setHours(0, 0, 0, 0);
-      newDate.setDate(newDate.getDate() + ddate);
-      const wrapped = ((baseMin + dminutes) % 1440 + 1440) % 1440;
-      const newH = Math.floor(wrapped / 60);
-      const newM = wrapped % 60;
-      const dateStr = `${isoOf(newDate)} ${String(newH).padStart(2, "0")}:${String(newM).padStart(2, "0")}`;
-      scheduleNode(node, dateStr, timelineSelectedChip.isDeadline ? "deadline" : "scheduled");
+      nudgePending.current.ddate += ddate;
+      nudgePending.current.dminutes += dminutes;
+      flush();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      // Don't carry pending deltas across selection changes — a queued
+      // nudge for the previous chip would silently retarget when the
+      // selection moves.
+      nudgePending.current = { ddate: 0, dminutes: 0 };
+    };
   }, [timelineSelectedChip, doc, scheduleNode, setTimelineSelectedChip]);
 
   /** Drag a task chip on the timeline to reschedule it. X → date,
