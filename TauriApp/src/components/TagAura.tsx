@@ -125,11 +125,17 @@ export default function TagAura() {
                 still scales the overall thickness so far edges stay thin. */}
             <g filter="url(#org-aura-line)" opacity={0.9}>
               {edges.map(([a, b], i) => {
-                const [ax, ay] = centerOf(a);
-                const [bx, by] = centerOf(b);
+                // Anchor the dendrite endpoints to the node *edges*, not their
+                // centres. Otherwise the wide ends of the taper sit inside the
+                // node card and the user only sees the pinched middle outside —
+                // making the filament look uniformly thin near the node.
+                const [acx, acy] = centerOf(a);
+                const [bcx, bcy] = centerOf(b);
+                const [ax, ay] = rectEdgeTowards(a, bcx, bcy);
+                const [bx, by] = rectEdgeTowards(b, acx, acy);
                 const d = Math.hypot(ax - bx, ay - by);
                 const scale = widthScaleForDistance(d);
-                const wide = 12 * scale; // width at endpoints
+                const wide = 12 * scale; // width at endpoints (at the node edge)
                 const narrow = Math.max(0.6, 1.4 * scale); // width at midpoint
                 return (
                   <path
@@ -149,6 +155,30 @@ export default function TagAura() {
 
 function centerOf(h: { x: number; y: number; w: number; h: number }): [number, number] {
   return [h.x + h.w / 2, h.y + h.h / 2];
+}
+
+/**
+ * Where does a ray from rect H's centre toward (tx, ty) exit H's bounding
+ * rectangle? Used to start/end dendrite filaments AT the node edge instead
+ * of buried inside the node card. Closed-form rect/ray intersection: solve
+ * for the smallest positive scale that lands on either the vertical or
+ * horizontal edge, pick the smaller — that's the first edge the ray crosses.
+ */
+function rectEdgeTowards(
+  h: { x: number; y: number; w: number; h: number },
+  tx: number,
+  ty: number,
+): [number, number] {
+  const cx = h.x + h.w / 2;
+  const cy = h.y + h.h / 2;
+  const dx = tx - cx;
+  const dy = ty - cy;
+  if (dx === 0 && dy === 0) return [cx, cy];
+  // How far we can scale (dx, dy) before hitting the rect's vertical / horizontal edge.
+  const sx = dx !== 0 ? h.w / 2 / Math.abs(dx) : Infinity;
+  const sy = dy !== 0 ? h.h / 2 / Math.abs(dy) : Infinity;
+  const s = Math.min(sx, sy);
+  return [cx + dx * s, cy + dy * s];
 }
 
 /** Inverse decay: scale factor for the overall dendrite thickness. Near pairs
