@@ -788,50 +788,123 @@ export default function TimelineBand() {
         });
       })()}
 
-      {/* Task chips. Tasks scheduled at the same date+time+type collapse
-          into a single "stack" indicator with a count; clicking it expands
-          a popover listing each task. Singleton buckets render the usual
-          draggable chip. */}
+      {/* Task chips with pixel-proximity clustering. Two chips whose on-
+          screen positions are within CLUSTER_PX of each other (and share
+          the deadline-vs-scheduled flag) collapse into a single stack
+          indicator. This catches the visually-overlapping case — e.g. a
+          10:00 and a 10:15 task end up at the same dot at most zoom
+          levels — not just exact same-time matches.
+          The chip body adapts to available horizontal space: full (icon +
+          title + time) when the day cell is wide, compact (icon + time)
+          mid-range, dot (icon only) when narrow. */}
       {(() => {
-        // Bucket by (date, time-of-day, deadline-vs-scheduled). Same
-        // bucket = same dot on the timeline.
-        const buckets = new Map<string, typeof nodeDates>();
-        for (const d of nodeDates) {
-          const left = pct(d.ms);
-          if (left < -5 || left > 105) continue;
-          const key = `${d.ms}:${d.timeOfDay ?? ""}:${d.deadline ? "d" : "s"}`;
-          const arr = buckets.get(key) ?? ([] as typeof nodeDates);
-          arr.push(d);
-          buckets.set(key, arr);
-        }
+        const railWidthPx = railRef.current?.getBoundingClientRect().width ?? 800;
         const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
-        const out: React.ReactNode[] = [];
+        const CLUSTER_X_PX = 22; // ~one chip width on a typical 1Y zoom
+        const CLUSTER_Y_PX = 16; // chip height ≈ 18 px → overlap if within this
 
-        for (const [key, chips] of buckets) {
+        // Per-day-cell rendering tier based on horizontal room. Same value
+        // is used by every singleton + stack chip below so the look is
+        // uniform across the band.
+        const chipWidthAvail = Math.max(20, Math.min(220, pxPerDay - 6));
+        type Tier = "full" | "compact" | "dot";
+        const tier: Tier =
+          chipWidthAvail >= 110 ? "full" : chipWidthAvail >= 56 ? "compact" : "dot";
+
+        type Anchor = (typeof nodeDates)[number] & {
+          leftPct: number;
+          leftPx: number;
+          topPx: number;
+        };
+
+        const visible: Anchor[] = [];
+        for (const d of nodeDates) {
+          const leftPct = pct(d.ms);
+          if (leftPct < -5 || leftPct > 105) continue;
+          visible.push({
+            ...d,
+            leftPct,
+            leftPx: (leftPct / 100) * railWidthPx,
+            topPx: yForTimeOfDay(d.timeOfDay, bandH, workHoursMode),
+          });
+        }
+        // Sort by x then y so the greedy clustering below is stable.
+        visible.sort((a, b) => a.leftPx - b.leftPx || a.topPx - b.topPx);
+
+        // Greedy pixel-proximity clustering. Same deadline-flag only — we
+        // don't want a deadline pin merging with a scheduled chip even if
+        // they coincidentally land in the same pixel.
+        const clusters: Anchor[][] = [];
+        const centers: { x: number; y: number; deadline: boolean }[] = [];
+        for (const c of visible) {
+          let placed = false;
+          for (let i = 0; i < clusters.length; i++) {
+            const bc = centers[i];
+            if (bc.deadline !== c.deadline) continue;
+            if (
+              Math.abs(bc.x - c.leftPx) <= CLUSTER_X_PX &&
+              Math.abs(bc.y - c.topPx) <= CLUSTER_Y_PX
+            ) {
+              clusters[i].push(c);
+              const n = clusters[i].length;
+              bc.x = bc.x + (c.leftPx - bc.x) / n;
+              bc.y = bc.y + (c.topPx - bc.y) / n;
+              placed = true;
+              break;
+            }
+          }
+          if (!placed) {
+            clusters.push([c]);
+            centers.push({ x: c.leftPx, y: c.topPx, deadline: c.deadline });
+          }
+        }
+
+        // Bucket key: sorted nodeIds + deadline flag. Stable across
+        // re-renders so the open popover survives small data changes.
+        const keyFor = (chips: Anchor[]) =>
+          chips
+            .map((c) => `${c.nodeId}:${c.deadline ? "d" : "s"}`)
+            .sort()
+            .join(",");
+
+        const out: React.ReactNode[] = [];
+        for (const chips of clusters) {
+          const key = keyFor(chips);
           if (chips.length === 1) {
-            // ── Singleton chip: full draggable, selectable chip ────────────
+            // ── Singleton chip ────────────────────────────────────────────
             const d = chips[0];
-            const left = pct(d.ms);
-            const top = yForTimeOfDay(d.timeOfDay, bandH, workHoursMode);
+            const left = d.leftPct;
+            const top = d.topPx;
             const isOverdue = d.deadline && d.ms <= todayMs;
-            const truncated = d.title.length > 22 ? d.title.slice(0, 21) + "…" : d.title;
             const isSelected =
               timelineSelectedChip != null &&
               timelineSelectedChip.nodeId === d.nodeId &&
               timelineSelectedChip.isDeadline === d.deadline;
-            // In working-hours mode a chip whose time falls outside [08:00,20:00]
-            // is clamped to the top/bottom edge. Dim it slightly so the user can
-            // tell it's not really at that visual position.
             const outOfWorkHours = workHoursMode && isOutsideWorkHours(d.timeOfDay);
+            const showTitle = tier === "full";
+            const showTime = tier !== "dot" && !!d.timeOfDay;
+            // Trim title aggressively at narrow zooms.
+            const titleLimit = chipWidthAvail >= 180 ? 28 : chipWidthAvail >= 130 ? 18 : 12;
+            const truncated =
+              d.title.length > titleLimit ? d.title.slice(0, titleLimit - 1) + "…" : d.title;
             out.push(
               <button
                 key={`t${key}`}
                 className={isOverdue ? "deadline-flash" : undefined}
                 data-pin
                 onPointerDown={(e) =>
-                  onChipDown(e, { nodeId: d.nodeId, deadline: d.deadline, title: d.title, color: d.color })
+                  onChipDown(e, {
+                    nodeId: d.nodeId,
+                    deadline: d.deadline,
+                    title: d.title,
+                    color: d.color,
+                  })
                 }
-                title={`${d.deadline ? "⚑ Deadline" : "⏱ Scheduled"}: ${d.title}${d.timeOfDay ? " @ " + d.timeOfDay : ""}${outOfWorkHours ? "\n(outside working hours — clamped to edge)" : ""}\nClick to select (then arrow keys nudge), drag to reschedule freely`}
+                title={`${d.deadline ? "⚑ Deadline" : "⏱ Scheduled"}: ${d.title}${
+                  d.timeOfDay ? " @ " + d.timeOfDay : ""
+                }${
+                  outOfWorkHours ? "\n(outside working hours — clamped to edge)" : ""
+                }\nClick to select (arrow keys nudge), drag to reschedule freely`}
                 style={{
                   position: "absolute",
                   left: `${left}%`,
@@ -839,12 +912,17 @@ export default function TimelineBand() {
                   transform: "translate(-50%, -50%)",
                   display: "flex",
                   alignItems: "center",
-                  gap: 5,
-                  padding: "3px 8px",
-                  borderRadius: 6,
-                  background: chipBackground(d.tagsAll, tagColors, 0.78),
+                  justifyContent: tier === "dot" ? "center" : "flex-start",
+                  gap: tier === "dot" ? 0 : 4,
+                  padding: tier === "dot" ? "0" : "3px 7px",
+                  width: tier === "dot" ? 16 : undefined,
+                  height: tier === "dot" ? 16 : undefined,
+                  borderRadius: tier === "dot" ? 999 : 6,
+                  background: chipBackground(d.tagsAll, tagColors, 0.82),
                   color: "#1c1c1e",
-                  border: isSelected ? "2px solid #ffd166" : "1px solid rgba(0,0,0,0.25)",
+                  border: isSelected
+                    ? "2px solid #ffd166"
+                    : "1px solid rgba(0,0,0,0.3)",
                   cursor: "grab",
                   fontSize: 10.5,
                   fontWeight: 700,
@@ -855,27 +933,36 @@ export default function TimelineBand() {
                     : d.deadline
                       ? `0 1px 6px ${d.color}aa`
                       : "0 1px 3px rgba(0,0,0,0.4)",
-                  // Clamp the chip to its date cell on the timeline so it doesn't
-                  // visually bleed into adjacent days. Floor of 40 px so very
-                  // zoomed-out views still leave the chip readable instead of
-                  // collapsing it into a hair.
-                  maxWidth: Math.max(40, Math.min(220, pxPerDay - 6)),
+                  maxWidth: chipWidthAvail,
                   overflow: "hidden",
                   userSelect: "none",
-                  opacity: outOfWorkHours ? 0.55 : 1,
+                  opacity: outOfWorkHours ? 0.6 : 1,
                 }}
               >
                 <span aria-hidden style={{ fontSize: 11, flexShrink: 0 }}>
                   {d.deadline ? "⚑" : "⏱"}
                 </span>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{truncated}</span>
-                {d.timeOfDay && (
-                  <span style={{ opacity: 0.7, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
+                {showTitle && (
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {truncated}
+                  </span>
+                )}
+                {showTime && (
+                  <span
+                    style={{
+                      opacity: 0.75,
+                      fontVariantNumeric: "tabular-nums",
+                      flexShrink: 0,
+                      fontSize: tier === "compact" ? 10 : 10.5,
+                    }}
+                  >
                     {d.timeOfDay}
                     {outOfWorkHours && (
                       <span aria-hidden style={{ marginLeft: 2 }}>
                         {(() => {
-                          const [h] = d.timeOfDay.split(":").map((s) => parseInt(s, 10));
+                          const [h] = (d.timeOfDay as string)
+                            .split(":")
+                            .map((s) => parseInt(s, 10));
                           const minOfDay = (Number.isFinite(h) ? h : 0) * 60;
                           return minOfDay < WORK_START_MIN ? "↑" : "↓";
                         })()}
@@ -886,23 +973,29 @@ export default function TimelineBand() {
               </button>,
             );
           } else {
-            // ── Multi-chip stack: single pill with a 📚 + count badge ──────
-            // Click to expand a popover; the popover lists each task with its
-            // tag-colour stripe and offers focus-in-graph.
-            const d0 = chips[0];
-            const left = pct(d0.ms);
-            const top = yForTimeOfDay(d0.timeOfDay, bandH, workHoursMode);
+            // ── Stack chip ────────────────────────────────────────────────
+            // Click expands a popover listing each task. Position uses the
+            // cluster centroid so a tight 3-chip cluster still pins on the
+            // average spot rather than the first chip's exact dot.
+            const railRect = railRef.current?.getBoundingClientRect();
+            const cIdx = clusters.indexOf(chips);
+            const centroidLeftPx = centers[cIdx].x;
+            const centroidTopPx = centers[cIdx].y;
+            const left = railRect ? (centroidLeftPx / railRect.width) * 100 : chips[0].leftPct;
+            const top = centroidTopPx;
             const anyOverdue = chips.some((c) => c.deadline && c.ms <= todayMs);
             const allDeadlines = chips.every((c) => c.deadline);
             const isOpen = stackPopover?.key === key;
-            // A stack is "out of hours" when its time-of-day (shared across
-            // all members of the bucket) falls outside the working window.
-            const stackOutOfWorkHours = workHoursMode && isOutsideWorkHours(d0.timeOfDay);
-            // Aggregate tags across the stack so the chip background still
-            // hints at the colour mix of what's inside.
+            // Use the first chip's time-of-day as the stack's display time
+            // when chips actually share a time; otherwise show a span.
+            const allSameTime =
+              chips.every((c) => c.timeOfDay === chips[0].timeOfDay) && !!chips[0].timeOfDay;
+            const stackOutOfWorkHours =
+              workHoursMode && allSameTime && isOutsideWorkHours(chips[0].timeOfDay);
             const tagSet = new Set<string>();
             for (const c of chips) for (const t of c.tagsAll) tagSet.add(t);
             const aggTags = Array.from(tagSet);
+            const showTime = tier !== "dot" && allSameTime;
             out.push(
               <button
                 key={`stk${key}`}
@@ -915,7 +1008,9 @@ export default function TimelineBand() {
                   if (isOpen) setStackPopover(null);
                   else setStackPopover({ key, x: e.clientX, y: e.clientY });
                 }}
-                title={`${chips.length} tasks ${allDeadlines ? "due" : "scheduled"}${d0.timeOfDay ? " @ " + d0.timeOfDay : " this day"} — click to expand`}
+                title={`${chips.length} tasks ${allDeadlines ? "due" : "scheduled"} near this point${
+                  allSameTime ? " @ " + chips[0].timeOfDay : ""
+                } — click to expand`}
                 style={{
                   position: "absolute",
                   left: `${left}%`,
@@ -923,44 +1018,46 @@ export default function TimelineBand() {
                   transform: "translate(-50%, -50%)",
                   display: "flex",
                   alignItems: "center",
-                  gap: 5,
-                  padding: "3px 9px",
+                  justifyContent: "center",
+                  gap: tier === "dot" ? 0 : 4,
+                  padding: tier === "dot" ? "0" : "3px 8px",
+                  width: tier === "dot" ? 20 : undefined,
+                  height: tier === "dot" ? 20 : undefined,
                   borderRadius: 999,
-                  background: chipBackground(aggTags, tagColors, 0.78),
+                  background: chipBackground(aggTags, tagColors, 0.85),
                   color: "#1c1c1e",
-                  border: isOpen ? "2px solid #ffd166" : "1px solid rgba(0,0,0,0.35)",
+                  border: isOpen ? "2px solid #ffd166" : "1px solid rgba(0,0,0,0.4)",
                   cursor: "pointer",
-                  fontSize: 10.5,
+                  fontSize: tier === "dot" ? 9.5 : 10.5,
                   fontWeight: 800,
                   lineHeight: 1.1,
                   whiteSpace: "nowrap",
                   boxShadow: isOpen
                     ? "0 0 0 2px rgba(255,209,102,0.55), 0 2px 10px rgba(0,0,0,0.45)"
-                    : "0 1px 6px rgba(0,0,0,0.45)",
-                  maxWidth: Math.max(48, Math.min(220, pxPerDay - 6)),
+                    : "0 1px 6px rgba(0,0,0,0.5)",
+                  maxWidth: chipWidthAvail,
                   overflow: "hidden",
                   userSelect: "none",
-                  opacity: stackOutOfWorkHours ? 0.55 : 1,
+                  opacity: stackOutOfWorkHours ? 0.6 : 1,
                 }}
               >
-                <span aria-hidden style={{ fontSize: 11, flexShrink: 0 }}>
-                  {allDeadlines ? "⚑" : "📚"}
+                {tier !== "dot" && (
+                  <span aria-hidden style={{ fontSize: 11, flexShrink: 0 }}>
+                    {allDeadlines ? "⚑" : "📚"}
+                  </span>
+                )}
+                <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                  {tier === "dot" ? chips.length : `×${chips.length}`}
                 </span>
-                <span style={{ fontVariantNumeric: "tabular-nums" }}>×{chips.length}</span>
-                {d0.timeOfDay && (
-                  <span style={{ opacity: 0.7, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-                    {d0.timeOfDay}
-                    {stackOutOfWorkHours && (
-                      <span aria-hidden style={{ marginLeft: 2 }}>
-                        {(() => {
-                          const [h] = (d0.timeOfDay as string)
-                            .split(":")
-                            .map((s) => parseInt(s, 10));
-                          const minOfDay = (Number.isFinite(h) ? h : 0) * 60;
-                          return minOfDay < WORK_START_MIN ? "↑" : "↓";
-                        })()}
-                      </span>
-                    )}
+                {showTime && (
+                  <span
+                    style={{
+                      opacity: 0.75,
+                      fontVariantNumeric: "tabular-nums",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {chips[0].timeOfDay}
                   </span>
                 )}
               </button>,
@@ -971,12 +1068,16 @@ export default function TimelineBand() {
       })()}
 
       {stackPopover && (() => {
-        // Rebuild the bucket once more to pick out which chips belong to the
-        // expanded stack (cheap — N is small).
+        // Decompose the stored key (sorted "nodeId:s|d" comma list) back into
+        // its members and gather the live chip data so the popover stays in
+        // sync with the underlying doc. If a member is no longer scheduled
+        // (e.g. the user nudged it away from the cluster) the popover just
+        // closes — the count would have changed under us anyway.
+        const memberSet = new Set(stackPopover.key.split(","));
         const expanded: typeof nodeDates = [];
         for (const d of nodeDates) {
-          const key = `${d.ms}:${d.timeOfDay ?? ""}:${d.deadline ? "d" : "s"}`;
-          if (key === stackPopover.key) expanded.push(d);
+          const m = `${d.nodeId}:${d.deadline ? "d" : "s"}`;
+          if (memberSet.has(m)) expanded.push(d);
         }
         if (expanded.length === 0) return null;
         const WIDTH = 260;
@@ -1004,8 +1105,25 @@ export default function TimelineBand() {
             }}
           >
             <div style={{ padding: "4px 8px 6px 8px", fontSize: 10.5, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--c-text-dim)", borderBottom: "1px solid var(--c-border)" }}>
-              {expanded.length} task{expanded.length === 1 ? "" : "s"} · {expanded[0].deadline ? "⚑ Deadline" : "⏱ Scheduled"}
-              {expanded[0].timeOfDay ? ` @ ${expanded[0].timeOfDay}` : ""}
+              {(() => {
+                const allDead = expanded.every((d) => d.deadline);
+                const anyDead = expanded.some((d) => d.deadline);
+                const kind = allDead
+                  ? "⚑ Deadline"
+                  : anyDead
+                    ? "⚑ Deadlines + ⏱ Scheduled"
+                    : "⏱ Scheduled";
+                const times = Array.from(
+                  new Set(expanded.map((d) => d.timeOfDay).filter(Boolean) as string[]),
+                ).sort();
+                const timeLabel =
+                  times.length === 0
+                    ? ""
+                    : times.length === 1
+                      ? ` @ ${times[0]}`
+                      : ` @ ${times[0]} – ${times[times.length - 1]}`;
+                return `${expanded.length} task${expanded.length === 1 ? "" : "s"} · ${kind}${timeLabel}`;
+              })()}
             </div>
             {expanded.map((d, idx) => (
               <button
