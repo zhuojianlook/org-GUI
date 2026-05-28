@@ -178,6 +178,9 @@ export default function TimelineBand() {
   const panRef = useRef<{ startX: number; startCenterMs: number } | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // User-controllable visibility of the day-cell gridlines. ON by default so
+  // the timeline reads as a calendar from the very first render.
+  const [showDayTicks, setShowDayTicks] = useState(true);
   // Live preview of a task chip being dragged — shows a ghost at the cursor
   // with the proposed date + time so the user can see where they're aiming
   // before they release.
@@ -457,9 +460,12 @@ export default function TimelineBand() {
   }, [span]);
 
   // Adaptive day-tick density: only draw day labels when there's room.
-  const showDayLabels = pxPerDay >= 26;
+  // Day gridlines visibility — driven by the 📆 toggle in the header, not
+  // by zoom-level heuristics. Labels still gate on having enough width to
+  // avoid overlapping each other.
+  const showDayLabels = showDayTicks && pxPerDay >= 26;
   const months = monthStarts(startMs, endMs);
-  const days = pxPerDay >= 18 ? dayStarts(startMs, endMs) : [];
+  const days = showDayTicks ? dayStarts(startMs, endMs) : [];
 
   return (
     <div
@@ -529,6 +535,29 @@ export default function TimelineBand() {
               {z.label}
             </button>
           ))}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowDayTicks((v) => !v);
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            title={showDayTicks ? "Hide day gridlines" : "Show day gridlines"}
+            style={{
+              background: showDayTicks ? "var(--c-accent)" : "transparent",
+              color: showDayTicks ? "#fff" : "var(--c-text-dim)",
+              border: "1px solid var(--c-border)",
+              borderRadius: 4,
+              padding: "1px 7px",
+              fontSize: 10.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              marginLeft: 4,
+            }}
+          >
+            📆 Days
+          </button>
         </div>
       </div>
 
@@ -585,6 +614,50 @@ export default function TimelineBand() {
         );
       })}
 
+      {/* Horizontal time gridlines spanning the chip-zone, at 3-hour
+          intervals. Make the Y-as-time mapping immediately visible: chips
+          sitting near a line are scheduled around that hour. */}
+      {(() => {
+        const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
+        const usable = Math.max(40, bandH - TIME_TOP_PX - TIME_BOTTOM_OFFSET);
+        const hours = [0, 3, 6, 9, 12, 15, 18, 21];
+        return hours.map((h) => {
+          const y = TIME_TOP_PX + (h / 24) * usable;
+          const isMajor = h === 0 || h === 12;
+          return (
+            <div key={`tg${h}`}>
+              <div
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  top: y,
+                  height: 1,
+                  background: "var(--c-border)",
+                  opacity: isMajor ? 0.32 : 0.16,
+                  pointerEvents: "none",
+                }}
+              />
+              <div
+                style={{
+                  position: "absolute",
+                  left: 4,
+                  top: y - 6,
+                  fontSize: 9,
+                  fontFamily: "ui-monospace, monospace",
+                  fontVariantNumeric: "tabular-nums",
+                  color: "var(--c-text-dim)",
+                  opacity: isMajor ? 0.7 : 0.45,
+                  pointerEvents: "none",
+                }}
+              >
+                {String(h).padStart(2, "0")}:00
+              </div>
+            </div>
+          );
+        });
+      })()}
+
       {/* Task chips: real, draggable task representations on the timeline.
           X coordinate is the task's date; Y coordinate is its time of day
           (00:00 at the top of the chip-zone, 23:59 at the bottom). Drag in
@@ -634,7 +707,11 @@ export default function TimelineBand() {
                 : d.deadline
                   ? `0 1px 6px ${d.color}aa`
                   : "0 1px 3px rgba(0,0,0,0.4)",
-              maxWidth: 200,
+              // Clamp the chip to its date cell on the timeline so it doesn't
+              // visually bleed into adjacent days. Floor of 40 px so very
+              // zoomed-out views still leave the chip readable instead of
+              // collapsing it into a hair.
+              maxWidth: Math.max(40, Math.min(220, pxPerDay - 6)),
               overflow: "hidden",
               userSelect: "none",
             }}
