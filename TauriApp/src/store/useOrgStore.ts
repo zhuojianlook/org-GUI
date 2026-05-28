@@ -53,6 +53,32 @@ export function lastOpenedFile(): string | null {
   }
 }
 
+// Per-file state (positions, expanded set, milestones, tag colours) already
+// persists per absolute path. The list of OPEN tabs is its own thing: which
+// files the user currently has docked in the top-of-window tab strip. We
+// store it as a plain array of absolute paths. Switching tabs simply calls
+// loadFile(path) again, which re-parses the file but pulls back its
+// per-file localStorage state, so each tab feels independent.
+const OPEN_TABS_KEY = "org-gui:openTabs";
+function loadOpenTabs(): string[] {
+  if (!IN_TAURI) return [];
+  try {
+    const raw = localStorage.getItem(OPEN_TABS_KEY);
+    const v = raw ? JSON.parse(raw) : [];
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function saveOpenTabs(tabs: string[]) {
+  if (!IN_TAURI) return;
+  try {
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(tabs));
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // Remember where the user dragged the top-level ("root") nodes, per file, so the
 // canvas layout survives reloads, view toggles, and app restarts. Keyed by root
 // index (stable across edits as long as roots aren't reordered/removed).
@@ -342,6 +368,9 @@ interface OrgState {
   editBegin: number; // subtree the Emacs sidebar narrows to (0 = whole file)
   panel: PanelTab; // right-side pull-out panel
   depMode: boolean; // dependency-drawing mode in the graph
+  // Open files in the top tab strip. The active tab is whichever path
+  // equals `file`. Order matches user insertion (most recent open last).
+  openTabs: string[];
   scheduleMode: boolean; // drag-node-to-timeline scheduling mode
   // The nodeId of the node currently being dragged from the graph in
   // schedule mode. Null when no drag is in progress. The timeline reads
@@ -368,6 +397,9 @@ interface OrgState {
   setDepMode: (on: boolean) => void;
   setScheduleMode: (on: boolean) => void;
   setScheduleDragNode: (id: string | null) => void;
+  /** Close a tab. If it was the active one, switch to the next/previous
+   *  remaining tab — or to the empty state when nothing's left. */
+  closeTab: (file: string) => Promise<void>;
   setConnectDrag: (from: string | null, hover: string | null, valid: boolean) => void;
   addDependency: (fromNode: OrgNode, toNode: OrgNode) => Promise<void>;
   removeDependency: (fromNode: OrgNode, toNode: OrgNode) => Promise<void>;
@@ -430,6 +462,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   editBegin: 0,
   panel: null,
   depMode: false,
+  openTabs: loadOpenTabs(),
   scheduleMode: false,
   scheduleDragNodeId: null,
   connectFrom: null,
@@ -450,10 +483,17 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   },
 
   loadFile: async (file: string) => {
+    // Insert into the tab list on first load. Re-loading an already-open
+    // tab (e.g. tab switch) is a no-op for the list — keeps the order
+    // stable.
+    const currentTabs = get().openTabs;
+    const nextTabs = currentTabs.includes(file) ? currentTabs : [...currentTabs, file];
+    if (nextTabs !== currentTabs) saveOpenTabs(nextTabs);
     set({
       loading: true,
       error: null,
       file,
+      openTabs: nextTabs,
       expanded: new Set<string>(),
       rootPositions: loadPositions(file),
       milestones: loadMilestones(file),
@@ -475,6 +515,41 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       rememberLastFile(file);
     } catch (e) {
       set({ error: String(e), loading: false });
+    }
+  },
+
+  closeTab: async (file: string) => {
+    const { openTabs, file: active } = get();
+    const idx = openTabs.indexOf(file);
+    if (idx === -1) return;
+    const remaining = openTabs.filter((p) => p !== file);
+    saveOpenTabs(remaining);
+    if (file !== active) {
+      // Just remove from the strip — active tab is unaffected.
+      set({ openTabs: remaining });
+      return;
+    }
+    // Active tab being closed: switch to a neighbour, or empty out if none.
+    const fallback = remaining[Math.max(0, idx - 1)] ?? remaining[0];
+    if (fallback) {
+      set({ openTabs: remaining });
+      await get().loadFile(fallback);
+    } else {
+      // No tabs left → return to empty state.
+      set({
+        openTabs: [],
+        file: null,
+        doc: null,
+        loading: false,
+        error: null,
+        expanded: new Set<string>(),
+        rootPositions: {},
+        milestones: [],
+        tagColors: {},
+        tagFilter: null,
+        multiSelected: new Set<string>(),
+        editBegin: 0,
+      });
     }
   },
 
@@ -892,7 +967,10 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   },
 
   createFile: async (file, title) => {
-    set({ loading: true, error: null, file });
+    const currentTabs = get().openTabs;
+    const nextTabs = currentTabs.includes(file) ? currentTabs : [...currentTabs, file];
+    if (nextTabs !== currentTabs) saveOpenTabs(nextTabs);
+    set({ loading: true, error: null, file, openTabs: nextTabs });
     try {
       const doc = await apiCreateOrg(file, title);
       set({ doc, loading: false, selectedId: null });

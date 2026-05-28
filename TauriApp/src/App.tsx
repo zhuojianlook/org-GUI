@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Toolbar from "./components/Toolbar";
+import TabBar from "./components/TabBar";
 import TimelineGraph from "./components/TimelineGraph";
 import DetailPanel from "./components/DetailPanel";
 import EmacsTerminal from "./components/EmacsTerminal";
@@ -62,6 +63,7 @@ export default function App() {
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <Toolbar />
+      <TabBar />
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {/* Left column: milestone timeline band on top, graph below */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
