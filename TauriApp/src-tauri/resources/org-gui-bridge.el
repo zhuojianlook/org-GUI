@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.20")
+(defconst org-gui-bridge-version "0.2.21")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -219,13 +219,34 @@ buffer is never touched (so we don't spuriously mark it modified)."
       (org-gui--doc-json file))))
 
 (defun org-gui-set-todo (file begin keyword)
-  "Set (or clear, when KEYWORD is empty) the TODO state of the heading."
-  (org-gui--with-heading
-   file begin
-   (lambda ()
-     (if (string-empty-p keyword)
-         (org-todo 'none)
-       (org-todo keyword)))))
+  "Set (or clear, when KEYWORD is empty) the TODO state of the heading.
+After the (org-todo …) call, verifies that the heading's state actually
+changed to the requested KEYWORD. Org's built-in blockers
+(`org-enforce-todo-dependencies', `org-blocker-hook',
+`org-enforce-todo-checkbox-dependencies') can refuse DONE transitions
+when sub-tasks or DEPENDS_ON prerequisites are unfinished — and they do
+so silently, leaving the state unchanged. From the GUI that looks like
+the click did nothing. Signal a diagnostic error instead so the frontend
+can surface a toast explaining what's blocking the change."
+  (let ((begin (org-gui--num begin)))
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (goto-char (min begin (point-max)))
+       (org-back-to-heading t)
+       (if (string-empty-p keyword)
+           (org-todo 'none)
+         (org-todo keyword))
+       (let ((after (org-get-todo-state)))
+         (when (and (not (string-empty-p keyword))
+                    (not (and after (string= after keyword))))
+           (error
+            "Org refused to change state to %s — current state remains %s. \
+Likely cause: org-enforce-todo-dependencies or DEPENDS_ON \
+prerequisites are blocking the transition (e.g. unfinished sub-tasks)."
+            keyword (or after "none"))))
+       (org-gui--refresh-cookies))
+      (save-buffer)
+      (org-gui--doc-json file))))
 
 (defun org-gui-set-title (file begin title)
   "Replace just the headline text, preserving TODO/priority/tags."

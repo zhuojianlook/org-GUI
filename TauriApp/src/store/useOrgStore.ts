@@ -384,6 +384,7 @@ interface OrgState {
   edit: (apiFn: Mutator, node: OrgNode, value: string) => Promise<void>;
   setBody: (node: OrgNode, body: string) => Promise<void>;
   addTableChild: (parentNode: OrgNode | null) => Promise<void>;
+  clearError: () => void;
   createFile: (file: string, title: string) => Promise<void>;
   addHeading: (parentBegin: number, title: string) => Promise<void>;
   removeNode: (node: OrgNode) => Promise<void>;
@@ -802,6 +803,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       set({ error: String(e), saving: false });
     }
   },
+
+  clearError: () => set({ error: null }),
 
   setBody: async (node, body) => {
     const { file, doc } = get();
