@@ -319,6 +319,22 @@ static DAEMON_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static DAEMON_LAST_OK_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const DAEMON_PROBE_CACHE_SECS: u64 = 10;
 
+/// Recognise the family of emacsclient error messages that mean "the socket is
+/// stale / the daemon went away". Trigger our one-shot recovery (clear the
+/// cache, force ensure_daemon, retry the call) when we see one — so a daemon
+/// that died inside the 10 s probe-cache window doesn't surface as a hard
+/// error to the user.
+fn looks_like_stale_socket(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("connection refused")
+        || m.contains("can't connect to")
+        || m.contains("cant connect to")
+        || m.contains("can't find socket")
+        || m.contains("cant find socket")
+        || m.contains("error accessing socket")
+        || m.contains("no such file or directory")
+}
+
 /// Make sure an `org-gui` Emacs daemon is running. The fast path is a single
 /// noop probe (cached for 10 s). When the probe fails we DON'T immediately
 /// assume the daemon is gone — we pgrep for an `emacs --daemon=org-gui`
@@ -538,41 +554,61 @@ async fn org_call(
     let bin = emacsclient_bin();
     let tmp_for_blk = tmp.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        // Guarantee the named daemon is alive BEFORE running emacsclient. We
-        // used to rely on `emacsclient -a ""` to autospawn, but that path
-        // swallows Emacs's stderr and surfaces only the generic "Could not
-        // start the Emacs daemon" message; ensure_daemon spawns explicitly
-        // and bubbles up the real error.
-        if let Err(e) = ensure_daemon(&bin) {
-            return Err(e);
-        }
+        // One attempt = ensure_daemon → emacsclient --eval → read temp file.
+        // Returns Err with a stale-socket-shaped message when we want the
+        // caller to invalidate the probe cache and retry once.
+        let attempt = || -> Result<String, String> {
+            // Guarantee the named daemon is alive BEFORE running emacsclient. We
+            // used to rely on `emacsclient -a ""` to autospawn, but that path
+            // swallows Emacs's stderr and surfaces only the generic "Could not
+            // start the Emacs daemon" message; ensure_daemon spawns explicitly
+            // and bubbles up the real error.
+            ensure_daemon(&bin)?;
 
-        let output = std::process::Command::new(&bin)
-            .arg(format!("--socket-name={SOCKET_NAME}"))
-            .arg("--eval")
-            .arg(&elisp)
-            .output();
-        let out = match output {
-            Ok(o) => o,
-            Err(e) => {
-                return Err(format!(
-                    "Failed to launch '{bin}': {e}. Is Emacs installed?"
-                ));
-            }
-        };
-        if out.status.success() {
-            return match std::fs::read_to_string(&tmp_for_blk) {
-                Ok(s) => {
-                    let _ = std::fs::remove_file(&tmp_for_blk);
-                    Ok(s)
+            let output = std::process::Command::new(&bin)
+                .arg(format!("--socket-name={SOCKET_NAME}"))
+                .arg("--eval")
+                .arg(&elisp)
+                .output();
+            let out = match output {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to launch '{bin}': {e}. Is Emacs installed?"
+                    ));
                 }
-                Err(e) => Err(format!("Could not read bridge result: {e}")),
             };
+            if out.status.success() {
+                return match std::fs::read_to_string(&tmp_for_blk) {
+                    Ok(s) => {
+                        let _ = std::fs::remove_file(&tmp_for_blk);
+                        Ok(s)
+                    }
+                    Err(e) => Err(format!("Could not read bridge result: {e}")),
+                };
+            }
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            Err(format!("Emacs call failed: {msg}"))
+        };
+
+        match attempt() {
+            Ok(s) => Ok(s),
+            Err(e) if looks_like_stale_socket(&e) => {
+                // The probe-cache fast-path returned Ok because the daemon
+                // looked alive seconds ago, but the socket has gone stale (or
+                // the daemon died) since. Invalidate the cache so the next
+                // ensure_daemon does the full probe → pgrep → cleanup → spawn
+                // dance, then retry the bridge call exactly once. If THAT
+                // also fails we surface the second error so users see the
+                // real underlying problem.
+                use std::sync::atomic::Ordering;
+                DAEMON_LAST_OK_SECS.store(0, Ordering::Relaxed);
+                attempt()
+            }
+            Err(e) => Err(e),
         }
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let msg = if !stderr.is_empty() { stderr } else { stdout };
-        Err(format!("Emacs call failed: {msg}"))
     })
     .await
     .map_err(|e| format!("Join error: {e}"))?;
