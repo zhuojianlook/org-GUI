@@ -244,6 +244,15 @@ export default function TimelineBand() {
       localStorage.setItem("org-gui:workHours", workHoursMode ? "1" : "0");
     } catch {}
   }, [workHoursMode]);
+  // Live wall-clock tick used by the TODAY marker so the vertical line
+  // advances through the day (and its label reads HH:MM:SS). One-second
+  // cadence is fine — the marker only moves a fraction of a pixel per
+  // second at typical zooms, but the seconds counter feels alive.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
   // Which stack-chip is currently expanded (its bucket key) and where on
   // screen to anchor the popover. Null = no popover open.
   const [stackPopover, setStackPopover] = useState<
@@ -700,6 +709,13 @@ export default function TimelineBand() {
         const left = pct(d.getTime());
         if (left < -2 || left > 102) return null;
         const isMonday = d.getDay() === 1;
+        // The gridline marks the boundary BETWEEN this day and the previous
+        // one. The number label belongs centered in this day's cell — so its
+        // x is the midpoint between this day's start and the next day's
+        // start. That puts "5" in the middle of the day-5 column rather than
+        // hugging the line separating day 4 from day 5.
+        const nextLeft = pct(d.getTime() + MS_DAY);
+        const labelLeft = (left + nextLeft) / 2;
         return (
           <div key={`d${d.getTime()}`}>
             <div
@@ -717,9 +733,9 @@ export default function TimelineBand() {
               <div
                 style={{
                   position: "absolute",
-                  left: `${left}%`,
+                  left: `${labelLeft}%`,
                   bottom: 2,
-                  transform: "translateX(3px)",
+                  transform: "translateX(-50%)",
                   fontSize: 9,
                   color: "var(--c-text-dim)",
                   whiteSpace: "nowrap",
@@ -887,6 +903,7 @@ export default function TimelineBand() {
             const titleLimit = chipWidthAvail >= 180 ? 28 : chipWidthAvail >= 130 ? 18 : 12;
             const truncated =
               d.title.length > titleLimit ? d.title.slice(0, titleLimit - 1) + "…" : d.title;
+            const externalLabel = tier === "dot" ? (d.title.length > 22 ? d.title.slice(0, 21) + "…" : d.title) : null;
             out.push(
               <button
                 key={`t${key}`}
@@ -972,6 +989,40 @@ export default function TimelineBand() {
                 )}
               </button>,
             );
+            // In dot mode the chip itself carries only an icon — surface the
+            // task title as a small floating label to the right of the dot so
+            // the user can still read what each indicator is for. pointer-
+            // events:none keeps the label from blocking drag on neighbouring
+            // chips.
+            if (externalLabel) {
+              out.push(
+                <div
+                  key={`tlbl${key}`}
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: `${left}%`,
+                    top,
+                    transform: "translate(12px, -50%)",
+                    fontSize: 9.5,
+                    color: "var(--c-text-dim)",
+                    background: "rgba(0,0,0,0.25)",
+                    padding: "1px 4px",
+                    borderRadius: 3,
+                    whiteSpace: "nowrap",
+                    pointerEvents: "none",
+                    maxWidth: 140,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    opacity: outOfWorkHours ? 0.55 : 0.85,
+                    zIndex: 1,
+                  }}
+                >
+                  {externalLabel}
+                  {d.timeOfDay ? ` · ${d.timeOfDay}` : ""}
+                </div>,
+              );
+            }
           } else {
             // ── Stack chip ────────────────────────────────────────────────
             // Click expands a popover listing each task. Position uses the
@@ -1062,6 +1113,44 @@ export default function TimelineBand() {
                 )}
               </button>,
             );
+            // External label for a dot-mode stack: brief preview of the
+            // first 1-2 titles + the count overflow. Keeps the indicator
+            // tiny while making it readable at a glance.
+            if (tier === "dot") {
+              const previewTitles = chips
+                .slice(0, 2)
+                .map((c) => (c.title.length > 16 ? c.title.slice(0, 15) + "…" : c.title))
+                .join(", ");
+              const more = chips.length > 2 ? ` +${chips.length - 2}` : "";
+              out.push(
+                <div
+                  key={`stklbl${key}`}
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: `${left}%`,
+                    top,
+                    transform: "translate(14px, -50%)",
+                    fontSize: 9.5,
+                    color: "var(--c-text-dim)",
+                    background: "rgba(0,0,0,0.3)",
+                    padding: "1px 4px",
+                    borderRadius: 3,
+                    whiteSpace: "nowrap",
+                    pointerEvents: "none",
+                    maxWidth: 180,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    opacity: stackOutOfWorkHours ? 0.55 : 0.85,
+                    zIndex: 1,
+                    fontWeight: 600,
+                  }}
+                >
+                  {previewTitles}
+                  {more}
+                </div>,
+              );
+            }
           }
         }
         return out;
@@ -1214,13 +1303,53 @@ export default function TimelineBand() {
         </div>
       )}
 
-      {/* Today marker */}
-      {todayMs >= startMs && todayMs <= endMs && (
-        <>
-          <div style={{ position: "absolute", left: `${pct(todayMs)}%`, top: 24, bottom: 18, width: 2, marginLeft: -1, background: "#e0a458" }} />
-          <div style={{ position: "absolute", left: `${pct(todayMs)}%`, top: 28, transform: "translateX(4px)", fontSize: 9, color: "#e0a458", fontWeight: 700 }}>TODAY</div>
-        </>
-      )}
+      {/* TODAY marker — vertical line at the current wall-clock instant.
+          The line advances through the day on a 1 s tick (subtle but
+          real: a few px/min at 1W zoom), and the label reads HH:MM:SS so
+          you can see it moving. Z-index 0 keeps it BEHIND task chips and
+          milestone pins so the marker doesn't visually punch through
+          deadline/scheduled indicators. */}
+      {nowMs >= startMs && nowMs <= endMs && (() => {
+        const nowDate = new Date(nowMs);
+        const hh = String(nowDate.getHours()).padStart(2, "0");
+        const mm = String(nowDate.getMinutes()).padStart(2, "0");
+        const ss = String(nowDate.getSeconds()).padStart(2, "0");
+        return (
+          <>
+            <div
+              style={{
+                position: "absolute",
+                left: `${pct(nowMs)}%`,
+                top: 24,
+                bottom: 18,
+                width: 2,
+                marginLeft: -1,
+                background: "#e0a458",
+                zIndex: 0,
+                pointerEvents: "none",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: `${pct(nowMs)}%`,
+                top: 28,
+                transform: "translateX(4px)",
+                fontSize: 9,
+                color: "#e0a458",
+                fontWeight: 700,
+                fontFamily: "ui-monospace, monospace",
+                fontVariantNumeric: "tabular-nums",
+                zIndex: 0,
+                pointerEvents: "none",
+                whiteSpace: "nowrap",
+              }}
+            >
+              TODAY {hh}:{mm}:{ss}
+            </div>
+          </>
+        );
+      })()}
 
       {/* Milestone pins — greedy lane assignment so close-by dates stagger
           vertically instead of overlapping their labels. Click ⚑ to recolour,
@@ -1229,10 +1358,25 @@ export default function TimelineBand() {
         const railWidth = railRef.current?.getBoundingClientRect().width ?? 800;
         const PIN_BASE_TOP = 44;
         const PIN_LANE_H = 26;
-        const MAX_PIN_LANES = 3;
-        const LABEL_PX = 160;
+        const MAX_PIN_LANES = 5;
+        // Per-pin flag width estimate: enough room for the flag icon (~16),
+        // padding (~10), close ✕ (~12), and a label sized to its actual
+        // string length capped at 160 px. Short labels pack tighter; long
+        // labels get a real reservation. Date label below ("1 Jun" etc.)
+        // is ~46 px wide centered on the pin → ±23 px around the x, smaller
+        // than the flag's bounding box, so it doesn't dominate the layout.
+        const flagWidthPx = (label: string) => {
+          const approx = 38 + Math.min(160, label.length * 6.5);
+          return Math.max(70, approx);
+        };
 
-        type Placed = { m: typeof milestones[number]; d: Date; leftPct: number; lane: number };
+        type Placed = {
+          m: typeof milestones[number];
+          d: Date;
+          leftPct: number;
+          lane: number;
+          overflow: boolean;
+        };
         const candidates = milestones
           .map((m) => {
             const d = parseOrgDate(m.iso);
@@ -1248,14 +1392,20 @@ export default function TimelineBand() {
         const laneEnds: number[] = [];
         const placed: Placed[] = candidates.map((c) => {
           const xPx = (c.leftPct / 100) * railWidth;
+          const w = flagWidthPx(c.m.label || "(unnamed)");
           let lane = 0;
           while (lane < laneEnds.length && xPx < laneEnds[lane] + 8) lane++;
-          if (lane >= MAX_PIN_LANES) lane = MAX_PIN_LANES - 1;
-          laneEnds[lane] = xPx + LABEL_PX;
-          return { ...c, lane };
+          // Overflow: when more pins crowd in than we have lanes for, the
+          // last lane keeps stacking. Track this so we can hide that pin's
+          // date label below (otherwise it'd collide horizontally with the
+          // pin already occupying that x-slot in the same lane).
+          const overflow = lane >= MAX_PIN_LANES;
+          if (overflow) lane = MAX_PIN_LANES - 1;
+          laneEnds[lane] = xPx + w;
+          return { ...c, lane, overflow };
         });
 
-        return placed.map(({ m, d, leftPct, lane }) => {
+        return placed.map(({ m, d, leftPct, lane, overflow }) => {
           const isEditing = editing === m.id;
           const color = m.color || MILESTONE_COLOR;
           const topPx = PIN_BASE_TOP + lane * PIN_LANE_H;
@@ -1361,9 +1511,17 @@ export default function TimelineBand() {
                   ✕
                 </button>
               </div>
-              <div style={{ position: "absolute", top: 18, left: 0, transform: "translateX(-50%)", fontSize: 8.5, color: color, whiteSpace: "nowrap" }}>
-                {d.getDate()} {MONTHS[d.getMonth()]}
-              </div>
+              {/* Small "1 Jun" date label under the flag. Hidden when this
+                  pin overflowed its lane — at that density the date text
+                  would horizontally collide with the pin sharing its slot,
+                  which is exactly the "1 Jun overlapping into another
+                  deadline" case the user reported. The flag itself stays
+                  visible; the date is recoverable from the tooltip. */}
+              {!overflow && (
+                <div style={{ position: "absolute", top: 18, left: 0, transform: "translateX(-50%)", fontSize: 8.5, color: color, whiteSpace: "nowrap" }}>
+                  {d.getDate()} {MONTHS[d.getMonth()]}
+                </div>
+              )}
             </div>
           );
         });
