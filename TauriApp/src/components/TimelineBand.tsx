@@ -39,6 +39,45 @@ function isoOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// Doom-style neutral grey used when a chip's node has no coloured tag —
+// matches `font-lock-comment-face` from doom-one so it sits naturally
+// against the canvas.
+const DOOM_GREY = "#5b6268";
+
+function hexToRgba(hex: string, alpha: number): string {
+  const m = hex.match(/^#?([0-9a-f]{6})$/i);
+  if (!m) return hex;
+  const v = parseInt(m[1], 16);
+  return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${alpha})`;
+}
+
+/** Background for a timeline task chip. Pure tag colour when the node
+ *  carries exactly one coloured tag; an equal-stripe linear-gradient when
+ *  it carries multiple; Doom grey when no tag is coloured. Always wrapped
+ *  with `alpha` so the chip feels softer against the band. */
+function chipBackground(
+  tagsAll: string[],
+  tagColors: Record<string, string>,
+  alpha: number,
+): string {
+  const colours: string[] = [];
+  for (const t of tagsAll) {
+    const c = tagColors[t];
+    if (c) colours.push(c);
+  }
+  if (colours.length === 0) return hexToRgba(DOOM_GREY, alpha);
+  if (colours.length === 1) return hexToRgba(colours[0], alpha);
+  const stops = colours
+    .map((c, i) => {
+      const start = (i / colours.length) * 100;
+      const end = ((i + 1) / colours.length) * 100;
+      const rgba = hexToRgba(c, alpha);
+      return `${rgba} ${start}%, ${rgba} ${end}%`;
+    })
+    .join(", ");
+  return `linear-gradient(90deg, ${stops})`;
+}
+
 /** Extract the "HH:MM" component from an ISO timestamp, or null when the
  *  value is date-only (no T separator). */
 function timeOfDayFromIso(iso: string | null | undefined): string | null {
@@ -132,6 +171,7 @@ export default function TimelineBand() {
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const timelineSelectedChip = useOrgStore((s) => s.timelineSelectedChip);
   const setTimelineSelectedChip = useOrgStore((s) => s.setTimelineSelectedChip);
+  const tagColors = useOrgStore((s) => s.tagColors);
 
   const railRef = useRef<HTMLDivElement>(null);
   const dragId = useRef<string | null>(null);
@@ -162,12 +202,14 @@ export default function TimelineBand() {
       deadline: boolean;
       nodeId: string;
       title: string;
-      color: string;
-      timeOfDay: string | null; // "HH:MM" when the timestamp carries a time
-      iso: string; // the underlying YYYY-MM-DD[ THH:MM] stored on the node
+      color: string; // legacy fallback used by drag-ghost; chips read background via chipBackground()
+      tagsAll: string[]; // for chip-background computation (tag → colour map)
+      timeOfDay: string | null;
+      iso: string;
     }[] = [];
     for (const n of doc?.nodes ?? []) {
       if (n.done) continue;
+      const tags = n.tagsAll ?? [];
       const s = parseOrgDate(n.scheduled);
       if (s)
         out.push({
@@ -176,6 +218,7 @@ export default function TimelineBand() {
           nodeId: n.id,
           title: n.title ?? "(untitled)",
           color: "#51afef",
+          tagsAll: tags,
           timeOfDay: timeOfDayFromIso(n.scheduled),
           iso: n.scheduled ?? "",
         });
@@ -187,6 +230,7 @@ export default function TimelineBand() {
           nodeId: n.id,
           title: n.title ?? "(untitled)",
           color: n.deadlineColor || "#ff6c6b",
+          tagsAll: tags,
           timeOfDay: timeOfDayFromIso(n.deadline),
           iso: n.deadline ?? "",
         });
@@ -577,7 +621,7 @@ export default function TimelineBand() {
               gap: 5,
               padding: "3px 8px",
               borderRadius: 6,
-              background: d.color,
+              background: chipBackground(d.tagsAll, tagColors, 0.78),
               color: "#1c1c1e",
               border: isSelected ? "2px solid #ffd166" : "1px solid rgba(0,0,0,0.25)",
               cursor: "grab",

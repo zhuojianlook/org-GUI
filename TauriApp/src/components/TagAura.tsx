@@ -86,61 +86,78 @@ export default function TagAura() {
         height="1"
       >
         <defs>
-          {/* Single shared blur filter for both node halos AND filaments —
-              uniform diffusion means the filament's wide cap blends straight
-              into the node halo with no intensity step. Smaller stdDeviation
-              than before so the node halo's radius is tighter and doesn't
-              over-dominate. */}
+          {/* Soft blur for halos + tapered filaments. Smaller stdDeviation
+              than v0.2.19 (11 → 7) so the rect halo's radius stays tight
+              around each node card instead of pillowing out. */}
           <filter id="org-aura-blur" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="11" />
+            <feGaussianBlur in="SourceGraphic" stdDeviation="7" />
           </filter>
         </defs>
 
         {groups.map(({ tag, color, halos, edges }) => (
-          <g key={tag} filter="url(#org-aura-blur)" opacity={0.9}>
-            {/* Per-node rounded-rect halo. Smaller blur than v0.2.18 keeps
-                the radius compact instead of pillowing far past the node. */}
-            {halos.map((h, i) => (
-              <rect
-                key={`h${i}`}
-                x={h.x}
-                y={h.y}
-                width={h.w}
-                height={h.h}
-                rx={10}
-                ry={10}
-                fill={color}
-              />
-            ))}
-            {/* MST filaments — tapered dendrites whose endpoint widths are
-                proportional to the node they attach to, AND whose per-edge
-                opacity scales with proximity so close pairs glow brighter
-                while distant pairs stay subtle. Because both this and the
-                halos share the same blur filter, the cap merges into the
-                halo as one continuous luminous body. */}
-            {edges.map(([a, b], i) => {
-              const [acx, acy] = centerOf(a);
-              const [bcx, bcy] = centerOf(b);
-              const [ax, ay] = rectEdgeTowards(a, bcx, bcy);
-              const [bx, by] = rectEdgeTowards(b, acx, acy);
-              const d = Math.hypot(ax - bx, ay - by);
-              const scale = widthScaleForDistance(d);
-              const wideA = nodeFilamentWidth(a) * scale;
-              const wideB = nodeFilamentWidth(b) * scale;
-              const narrow = Math.max(0.8, 2 * scale);
-              // Close pairs (scale → 1) glow at full opacity; far pairs
-              // (scale → 0.15) drop to about a third opacity, so brightness
-              // visibly tracks proximity.
-              const fillOpacity = 0.35 + 0.65 * scale;
-              return (
-                <path
-                  key={`e${i}`}
-                  d={taperedBezierPolygon(ax, ay, bx, by, wideA, wideB, narrow)}
+          <g key={tag}>
+            {/* Layer 1 — blurred glow body. Halos around each tagged node
+                + tapered dendrites along the MST. */}
+            <g filter="url(#org-aura-blur)" opacity={0.9}>
+              {halos.map((h, i) => (
+                <rect
+                  key={`h${i}`}
+                  x={h.x}
+                  y={h.y}
+                  width={h.w}
+                  height={h.h}
+                  rx={10}
+                  ry={10}
                   fill={color}
-                  fillOpacity={fillOpacity}
                 />
-              );
-            })}
+              ))}
+              {edges.map(([a, b], i) => {
+                const [acx, acy] = centerOf(a);
+                const [bcx, bcy] = centerOf(b);
+                const [ax, ay] = rectEdgeTowards(a, bcx, bcy);
+                const [bx, by] = rectEdgeTowards(b, acx, acy);
+                const d = Math.hypot(ax - bx, ay - by);
+                const scale = widthScaleForDistance(d);
+                const wideA = nodeFilamentWidth(a) * scale;
+                const wideB = nodeFilamentWidth(b) * scale;
+                const narrow = Math.max(0.8, 2 * scale);
+                const fillOpacity = 0.35 + 0.65 * scale;
+                return (
+                  <path
+                    key={`e${i}`}
+                    d={taperedBezierPolygon(ax, ay, bx, by, wideA, wideB, narrow)}
+                    fill={color}
+                    fillOpacity={fillOpacity}
+                  />
+                );
+              })}
+            </g>
+            {/* Layer 2 — sharp fiber-optic core. A thin un-blurred bezier
+                stroke along the centre of each MST edge so the link stays
+                visible at any distance, even after the surrounding glow
+                has fully diffused away. Stroke width still tapers with
+                distance but is clamped at ~0.6 px so it never vanishes. */}
+            <g opacity={0.85}>
+              {edges.map(([a, b], i) => {
+                const [acx, acy] = centerOf(a);
+                const [bcx, bcy] = centerOf(b);
+                const [ax, ay] = rectEdgeTowards(a, bcx, bcy);
+                const [bx, by] = rectEdgeTowards(b, acx, acy);
+                const d = Math.hypot(ax - bx, ay - by);
+                const scale = widthScaleForDistance(d);
+                const sw = Math.max(0.7, 1.6 * scale);
+                return (
+                  <path
+                    key={`c${i}`}
+                    d={curvedBezierPath(ax, ay, bx, by)}
+                    stroke={color}
+                    strokeWidth={sw}
+                    strokeLinecap="round"
+                    fill="none"
+                  />
+                );
+              })}
+            </g>
           </g>
         ))}
       </svg>
@@ -241,6 +258,22 @@ function taperedBezierPolygon(
   for (let i = lower.length - 1; i >= 0; i--) parts.push(`L ${lower[i][0]},${lower[i][1]}`);
   parts.push("Z");
   return parts.join(" ");
+}
+
+/** SVG `d` string for the same curved bezier whose centreline the tapered
+ *  polygon traces. Used to draw the sharp fiber-optic core that always
+ *  remains visible regardless of distance — without it the connection
+ *  disappears entirely once the blurred glow falls below threshold. */
+function curvedBezierPath(ax: number, ay: number, bx: number, by: number): string {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.max(1, Math.hypot(dx, dy));
+  const offset = Math.min(len * 0.15, 60);
+  const ux = -dy / len;
+  const uy = dx / len;
+  const cx = (ax + bx) / 2 + ux * offset;
+  const cy = (ay + by) / 2 + uy * offset;
+  return `M ${ax},${ay} Q ${cx},${cy} ${bx},${by}`;
 }
 
 /** Endpoint width of a filament attached to a given node — proportional to
