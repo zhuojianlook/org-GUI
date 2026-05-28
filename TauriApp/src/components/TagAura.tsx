@@ -86,69 +86,61 @@ export default function TagAura() {
         height="1"
       >
         <defs>
-          {/* Heavy blur for the per-node fuzz — gives each rounded rect a
-              soft, asymmetric glow that follows the node silhouette instead
-              of a perfect circle. */}
-          <filter id="org-aura-fuzz" x="-100%" y="-100%" width="300%" height="300%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="18" />
-          </filter>
-          {/* Subtler blur for the filaments so they have a slight glow
-              without smearing into invisibility. */}
-          <filter id="org-aura-line" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" />
+          {/* Single shared blur filter for both node halos AND filaments —
+              uniform diffusion means the filament's wide cap blends straight
+              into the node halo with no intensity step. Smaller stdDeviation
+              than before so the node halo's radius is tighter and doesn't
+              over-dominate. */}
+          <filter id="org-aura-blur" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="11" />
           </filter>
         </defs>
 
         {groups.map(({ tag, color, halos, edges }) => (
-          <g key={tag}>
-            {/* Per-node rectangular fuzz. The rect is drawn solid; the
-                heavy blur turns it into a fade-to-transparent halo with a
-                bright core where the node sits. */}
-            <g filter="url(#org-aura-fuzz)" opacity={0.75}>
-              {halos.map((h, i) => (
-                <rect
-                  key={i}
-                  x={h.x}
-                  y={h.y}
-                  width={h.w}
-                  height={h.h}
-                  rx={10}
-                  ry={10}
+          <g key={tag} filter="url(#org-aura-blur)" opacity={0.9}>
+            {/* Per-node rounded-rect halo. Smaller blur than v0.2.18 keeps
+                the radius compact instead of pillowing far past the node. */}
+            {halos.map((h, i) => (
+              <rect
+                key={`h${i}`}
+                x={h.x}
+                y={h.y}
+                width={h.w}
+                height={h.h}
+                rx={10}
+                ry={10}
+                fill={color}
+              />
+            ))}
+            {/* MST filaments — tapered dendrites whose endpoint widths are
+                proportional to the node they attach to, AND whose per-edge
+                opacity scales with proximity so close pairs glow brighter
+                while distant pairs stay subtle. Because both this and the
+                halos share the same blur filter, the cap merges into the
+                halo as one continuous luminous body. */}
+            {edges.map(([a, b], i) => {
+              const [acx, acy] = centerOf(a);
+              const [bcx, bcy] = centerOf(b);
+              const [ax, ay] = rectEdgeTowards(a, bcx, bcy);
+              const [bx, by] = rectEdgeTowards(b, acx, acy);
+              const d = Math.hypot(ax - bx, ay - by);
+              const scale = widthScaleForDistance(d);
+              const wideA = nodeFilamentWidth(a) * scale;
+              const wideB = nodeFilamentWidth(b) * scale;
+              const narrow = Math.max(0.8, 2 * scale);
+              // Close pairs (scale → 1) glow at full opacity; far pairs
+              // (scale → 0.15) drop to about a third opacity, so brightness
+              // visibly tracks proximity.
+              const fillOpacity = 0.35 + 0.65 * scale;
+              return (
+                <path
+                  key={`e${i}`}
+                  d={taperedBezierPolygon(ax, ay, bx, by, wideA, wideB, narrow)}
                   fill={color}
+                  fillOpacity={fillOpacity}
                 />
-              ))}
-            </g>
-            {/* MST filaments rendered as TAPERED dendrite polygons — wide at
-                each endpoint (near the node), pinched in the middle. SVG
-                strokes can't vary width along a path, so we sample the bezier
-                and emit a closed shape with perpendicular offsets. Distance
-                still scales the overall thickness so far edges stay thin. */}
-            <g filter="url(#org-aura-line)" opacity={0.9}>
-              {edges.map(([a, b], i) => {
-                // Anchor the dendrite endpoints to the node *edges* so the
-                // wide ends of the taper are visible outside the card.
-                const [acx, acy] = centerOf(a);
-                const [bcx, bcy] = centerOf(b);
-                const [ax, ay] = rectEdgeTowards(a, bcx, bcy);
-                const [bx, by] = rectEdgeTowards(b, acx, acy);
-                const d = Math.hypot(ax - bx, ay - by);
-                const scale = widthScaleForDistance(d);
-                // Per-endpoint width proportional to the node it attaches to
-                // (smaller dimension × 0.45 so the dendrite fits the node
-                // even for tall/narrow or short/wide cards). Asymmetric when
-                // the two nodes differ in size.
-                const wideA = nodeFilamentWidth(a) * scale;
-                const wideB = nodeFilamentWidth(b) * scale;
-                const narrow = Math.max(0.8, 2 * scale); // width at midpoint
-                return (
-                  <path
-                    key={i}
-                    d={taperedBezierPolygon(ax, ay, bx, by, wideA, wideB, narrow)}
-                    fill={color}
-                  />
-                );
-              })}
-            </g>
+              );
+            })}
           </g>
         ))}
       </svg>
@@ -253,9 +245,10 @@ function taperedBezierPolygon(
 
 /** Endpoint width of a filament attached to a given node — proportional to
  *  the node's smaller dimension so a tall/narrow card and a short/wide card
- *  both end up with dendrites that read as "fitting" the node. */
+ *  both end up with dendrites that read as "fitting" the node. Cranked
+ *  upward in v0.2.19 so the bulge at the node is unmistakable. */
 function nodeFilamentWidth(h: { w: number; h: number }): number {
-  return Math.max(8, Math.min(h.w, h.h) * 0.45);
+  return Math.max(12, Math.min(h.w, h.h) * 0.7);
 }
 
 /** Prim's MST over the halo centres. Returns pairs of halos forming the
