@@ -14,10 +14,86 @@ static TERM_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Dedicated emacsclient socket for this app so we never collide with the
 /// user's interactive Emacs (e.g. a running Doom session on the default
-/// "server" socket). `--socket-name=org-gui` paired with `-a ""` makes
-/// emacsclient connect to a daemon named "org-gui", auto-starting it (loading
-/// the user's config) if one isn't running yet.
+/// "server" socket). `--socket-name=org-gui` connects to a daemon named
+/// "org-gui".
 const SOCKET_NAME: &str = "org-gui";
+
+/// The macOS native per-user temp dir (from `confstr(_CS_DARWIN_USER_TEMP_DIR)`,
+/// exposed via `getconf DARWIN_USER_TEMP_DIR`). On macOS the Emacs *server*
+/// creates its socket under THIS directory (`<dir>/emacs<uid>/org-gui`),
+/// while `emacsclient` with a bare `--socket-name` resolves the directory
+/// from `$TMPDIR` — and those two can differ (e.g. a sandboxed or login-shell
+/// `$TMPDIR` vs the launchd value). When they disagree, emacsclient reports
+/// "can't find socket" even though the daemon is alive and bound. Cached
+/// because it's immutable per machine and we don't want to spawn `getconf`
+/// on every probe.
+fn darwin_user_temp_dir() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::process::Command::new("getconf")
+                .arg("DARWIN_USER_TEMP_DIR")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .clone()
+}
+
+/// Every directory the Emacs server might have placed its socket-containing
+/// `emacs<uid>` subdir under. Ordered most- to least-authoritative.
+fn candidate_socket_parents() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    if let Some(d) = darwin_user_temp_dir() {
+        v.push(PathBuf::from(d));
+    }
+    if let Ok(t) = std::env::var("TMPDIR") {
+        if !t.is_empty() {
+            v.push(PathBuf::from(t));
+        }
+    }
+    if let Ok(x) = std::env::var("XDG_RUNTIME_DIR") {
+        if !x.is_empty() {
+            v.push(PathBuf::from(x));
+        }
+    }
+    v.push(PathBuf::from("/tmp"));
+    v
+}
+
+/// Find the absolute path of the org-gui server socket if it exists, by
+/// scanning every candidate parent for an `emacs*` subdir containing a
+/// file named `org-gui`. Returns None when no socket exists yet (e.g. right
+/// before the first daemon spawn).
+fn resolve_socket_path() -> Option<PathBuf> {
+    for parent in candidate_socket_parents() {
+        if let Ok(entries) = std::fs::read_dir(&parent) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name == "emacs" || name.starts_with("emacs") {
+                        let sock = entry.path().join(SOCKET_NAME);
+                        if sock.exists() {
+                            return Some(sock);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The value to pass to `emacsclient --socket-name`. Prefers the resolved
+/// ABSOLUTE socket path (which bypasses emacsclient's own directory
+/// guessing and so always agrees with the server), falling back to the bare
+/// name when no socket exists yet.
+fn socket_name_arg() -> String {
+    resolve_socket_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| SOCKET_NAME.to_string())
+}
 
 /// A live embedded-Emacs terminal session (emacsclient -t running in a PTY).
 struct TermSession {
@@ -259,7 +335,7 @@ fn emacs_bin() -> String {
 /// deadline expires. Returns true only on a clean success status.
 fn probe_daemon_timeout(client: &str, timeout_secs: u64) -> bool {
     let mut child = match std::process::Command::new(client)
-        .arg(format!("--socket-name={SOCKET_NAME}"))
+        .arg(format!("--socket-name={}", socket_name_arg()))
         .arg("--eval")
         .arg("t")
         .stdout(std::process::Stdio::null())
@@ -604,8 +680,9 @@ async fn org_call(
             // and bubbles up the real error.
             ensure_daemon(&bin)?;
 
+            let sock = socket_name_arg();
             let output = std::process::Command::new(&bin)
-                .arg(format!("--socket-name={SOCKET_NAME}"))
+                .arg(format!("--socket-name={sock}"))
                 .arg("--eval")
                 .arg(&elisp)
                 .output();
@@ -628,7 +705,27 @@ async fn org_call(
             }
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let msg = if !stderr.is_empty() { stderr } else { stdout };
+            let msg = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                // Never surface an empty "Emacs call failed:" — when
+                // emacsclient exits non-zero with no output (e.g. killed,
+                // or a silent connection failure), attach actionable
+                // diagnostics: exit code, the socket path we targeted,
+                // and whether a daemon process is even alive.
+                let code = out
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
+                format!(
+                    "emacsclient exited {code} with no output (socket: {sock}; daemon process {}). \
+                     Try ↻ Restart Emacs daemon from the ⚙ menu.",
+                    if daemon_process_alive() { "alive" } else { "NOT found" },
+                )
+            };
             Err(format!("Emacs call failed: {msg}"))
         };
 
@@ -793,15 +890,19 @@ async fn emacs_term_open(
         elisp_string(&file),
         begin,
     );
+    // Resolve the absolute socket path once for both the arm-edit eval and
+    // the `-t` frame so a TMPDIR mismatch can't make the PTY attach to a
+    // socket emacsclient can't find.
+    let sock = socket_name_arg();
     let _ = std::process::Command::new(&bin)
-        .arg(format!("--socket-name={SOCKET_NAME}"))
+        .arg(format!("--socket-name={sock}"))
         .arg("--eval")
         .arg(&arm)
         .output();
 
     let mut cmd = CommandBuilder::new(bin.clone());
     // App-private daemon (named socket so it never fights the user's Doom).
-    cmd.arg(format!("--socket-name={SOCKET_NAME}"));
+    cmd.arg(format!("--socket-name={sock}"));
     cmd.arg("-t"); // interactive terminal frame; the armed hook sets the buffer
     cmd.env("TERM", "xterm-256color");
 
