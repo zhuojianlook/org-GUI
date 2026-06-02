@@ -25,6 +25,10 @@ export default function App() {
   const restoreSession = useOrgStore((s) => s.restoreSession);
   const addHeading = useOrgStore((s) => s.addHeading);
   const showTimeline = useOrgStore((s) => s.showTimeline);
+  const openTabs = useOrgStore((s) => s.openTabs);
+  const file = useOrgStore((s) => s.file);
+  const loading = useOrgStore((s) => s.loading);
+  const loadingFile = useOrgStore((s) => s.loadingFile);
 
   const [showSetup, setShowSetup] = useState(false);
 
@@ -116,6 +120,19 @@ export default function App() {
                 </div>
               )}
             </>
+          ) : openTabs.length > 0 ? (
+            // Tabs are restored but no doc is loaded yet — either a load is
+            // in flight, or the active tab's parse failed. Show a context-
+            // aware panel (loading / error + retry) instead of the generic
+            // "open a file" prompt, which is misleading when tabs exist.
+            <TabbedEmptyState
+              openTabs={openTabs}
+              activeFile={file}
+              loading={loading || loadingFile != null}
+              error={error}
+              onRetry={(f) => loadFile(f)}
+              onOpen={pickFile}
+            />
           ) : (
             <EmptyState onOpen={pickFile} error={error} />
           )}
@@ -220,6 +237,89 @@ function TabRailButton({
     >
       {label}
     </button>
+  );
+}
+
+/** Shown when tabs are restored but no document is loaded — distinguishes
+ *  "still loading", "load failed (retry)", and "pick a tab" so the user
+ *  isn't told to "open a file" when files are already open in the strip. */
+function TabbedEmptyState({
+  openTabs,
+  activeFile,
+  loading,
+  error,
+  onRetry,
+  onOpen,
+}: {
+  openTabs: string[];
+  activeFile: string | null;
+  loading: boolean;
+  error: string | null;
+  onRetry: (file: string) => void;
+  onOpen: () => void;
+}) {
+  // The file we'd retry: the active one if known, else the first tab.
+  const target = activeFile ?? openTabs[0];
+  const name = (target ?? "").split("/").pop() || target;
+  return (
+    <div
+      style={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 14,
+        color: "var(--c-text-dim)",
+        padding: 24,
+        textAlign: "center",
+      }}
+    >
+      {loading ? (
+        <div style={{ fontSize: 16 }}>Loading {name}…</div>
+      ) : (
+        <>
+          <div style={{ fontSize: 16 }}>
+            {error ? `Couldn't open ${name}` : `Click a tab above to open it`}
+          </div>
+          {target && (
+            <button
+              onClick={() => onRetry(target)}
+              style={{
+                background: "var(--c-accent)",
+                color: "#fff",
+                border: "none",
+                borderRadius: 8,
+                padding: "9px 18px",
+                fontSize: 14,
+                cursor: "pointer",
+              }}
+            >
+              {error ? `Retry ${name}` : `Open ${name}`}
+            </button>
+          )}
+          <button
+            onClick={onOpen}
+            style={{
+              background: "transparent",
+              color: "var(--c-text-dim)",
+              border: "1px solid var(--c-border)",
+              borderRadius: 8,
+              padding: "7px 16px",
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            Open another .org…
+          </button>
+          {error && (
+            <div style={{ color: "var(--c-red)", maxWidth: 520, fontSize: 12, whiteSpace: "pre-wrap" }}>
+              {error}
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

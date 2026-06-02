@@ -616,6 +616,18 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     // Activate the previous active tab if it survived, else the last one.
     const active = last && alive.includes(last) ? last : alive[alive.length - 1];
     await get().loadFile(active);
+    // Cold-start race guard: checkEmacs() and this restore both fire on
+    // launch and both spin up the daemon. If the very first parse lost that
+    // race and failed (doc still null — on error loadFile leaves `file`
+    // unset, so we can't key on it), give the daemon a moment to finish
+    // binding and try the active file once more, so the user lands on their
+    // file instead of an error panel they'd have to dismiss manually.
+    if (!get().doc && get().loadingFile == null) {
+      await new Promise((r) => setTimeout(r, 1200));
+      if (!get().doc && get().loadingFile == null && get().openTabs.includes(active)) {
+        await get().loadFile(active);
+      }
+    }
   },
 
   closeTab: async (file: string) => {
