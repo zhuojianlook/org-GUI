@@ -681,17 +681,51 @@ async fn org_call(
             ensure_daemon(&bin)?;
 
             let sock = socket_name_arg();
-            let output = std::process::Command::new(&bin)
+            // Run emacsclient --eval with a hard wall-clock ceiling. A bridge
+            // call should complete in well under a second; if it hasn't
+            // returned in BRIDGE_CALL_TIMEOUT_SECS the daemon is wedged (e.g.
+            // a runaway elisp loop, or a modal prompt with no frame to answer
+            // it). Rather than block this command forever — which strands the
+            // whole UI and lets emacsclient zombies pile up — we kill the
+            // client and surface a recoverable error pointing at ↻ Daemon.
+            const BRIDGE_CALL_TIMEOUT_SECS: u64 = 30;
+            let mut child = match std::process::Command::new(&bin)
                 .arg(format!("--socket-name={sock}"))
                 .arg("--eval")
                 .arg(&elisp)
-                .output();
-            let out = match output {
-                Ok(o) => o,
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
                 Err(e) => {
                     return Err(format!(
                         "Failed to launch '{bin}': {e}. Is Emacs installed?"
                     ));
+                }
+            };
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(BRIDGE_CALL_TIMEOUT_SECS);
+            let out = loop {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        break child
+                            .wait_with_output()
+                            .map_err(|e| format!("Failed to read emacsclient output: {e}"))?;
+                    }
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(format!(
+                                "Emacs call timed out after {BRIDGE_CALL_TIMEOUT_SECS}s — the \
+                                 daemon looks wedged (a runaway parse or a prompt with no \
+                                 frame). Click ↻ Restart Emacs daemon in the ⚙ menu to recover.",
+                            ));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    Err(e) => return Err(format!("Error waiting on emacsclient: {e}")),
                 }
             };
             if out.status.success() {

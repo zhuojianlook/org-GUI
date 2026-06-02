@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.41")
+(defconst org-gui-bridge-version "0.2.42")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -102,23 +102,33 @@ planning lines and property drawers."
 
 (defun org-gui--collect-nodes ()
   "Walk all headings in the current buffer in document order, returning a
-list of node alists with parent links resolved via a level stack."
+list of node alists with parent links resolved via a level stack.
+
+Iterates with `outline-next-heading', which always advances point to the
+NEXT heading and so guarantees forward progress. The previous
+implementation used a manual `re-search-forward' + `org-back-to-heading'
++ `end-of-line' dance that could INFINITE-LOOP on malformed or empty
+headings — e.g. a bare \"*\" or \"**\" line with no title text, which
+`org-back-to-heading' resolves backward so the same match is found over
+and over. Files with such lines (common in quick-jotted planners) would
+hang every parse. Each heading's processing is wrapped in
+`ignore-errors' so one weird heading can't abort the whole document."
   (let ((nodes '())
         (stack '())) ; list of (level . id), nearest ancestor first
     (org-with-wide-buffer
      (goto-char (point-min))
-     (while (re-search-forward org-heading-regexp nil t)
-       (org-back-to-heading t)
-       (let ((level (org-current-level)))
-         ;; Pop ancestors that are not shallower than this heading.
-         (while (and stack (>= (caar stack) level))
-           (setq stack (cdr stack)))
-         (let* ((parent-id (cdar stack))
-                (node (org-gui--node-at-point parent-id))
-                (id (cdr (assoc 'id node))))
-           (push node nodes)
-           (push (cons level id) stack)))
-       (end-of-line)))
+     (while (outline-next-heading)
+       (ignore-errors
+         (let ((level (org-current-level)))
+           (when level
+             ;; Pop ancestors that are not shallower than this heading.
+             (while (and stack (>= (caar stack) level))
+               (setq stack (cdr stack)))
+             (let* ((parent-id (cdar stack))
+                    (node (org-gui--node-at-point parent-id))
+                    (id (cdr (assoc 'id node))))
+               (push node nodes)
+               (push (cons level id) stack)))))))
     (nreverse nodes)))
 
 (defun org-gui-ping ()
