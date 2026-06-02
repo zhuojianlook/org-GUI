@@ -409,12 +409,15 @@ fn ensure_daemon(client: &str) -> Result<(), String> {
     }
 
     let emacs = emacs_bin();
-    // Attempt 1: spawn daemon with the user's normal init.
+    // Attempt 1: spawn daemon with the user's normal init. The Emacs parent
+    // exits quickly after forking the daemon (status 0), so output()
+    // returning success only tells us the fork happened — not that the
+    // daemon is bound and ready. Wait for it to bind.
     let out_full = std::process::Command::new(&emacs)
         .arg(format!("--daemon={SOCKET_NAME}"))
         .output();
     if let Ok(out) = &out_full {
-        if out.status.success() && wait_for_daemon_with_timeout(client, 60) {
+        if out.status.success() && wait_for_daemon_with_timeout(client, 90) {
             DAEMON_LAST_OK_SECS.store(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -426,14 +429,50 @@ fn ensure_daemon(client: &str) -> Result<(), String> {
         }
     }
 
-    // Attempt 2: maybe the user's init (Doom config, etc.) is broken or too
-    // slow. Try a minimal Emacs daemon with `-q` so bridge calls still work.
+    // Attempt 1 didn't bind in 90 s. Before racing it with a `-q` spawn —
+    // which would crash with "server already running" if the original is
+    // still booting — check whether the Doom daemon process is actually
+    // still alive. Cold-boot Doom can take several minutes to byte-compile
+    // packages on first run; if it's still chugging, we keep waiting
+    // rather than trying to outrun it.
+    if daemon_process_alive() {
+        if wait_for_daemon_with_timeout(client, 180) {
+            DAEMON_LAST_OK_SECS.store(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                Ordering::Relaxed,
+            );
+            return Ok(());
+        }
+        // Process exists but still didn't bind after 4.5 min total. Don't
+        // spawn -q — it would just collide. Surface a helpful error.
+        let full_err = out_full
+            .as_ref()
+            .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+            .unwrap_or_default();
+        return Err(format!(
+            "Emacs daemon process is running but hasn't bound the org-gui socket after 4.5 min. \
+             Your init may be hung. Try `pkill -f 'emacs.*--daemon=org-gui'` then click ↻ Daemon \
+             to restart with a minimal Emacs.{}",
+            if full_err.is_empty() {
+                String::new()
+            } else {
+                format!("\n\nEmacs stderr from initial spawn:\n{full_err}")
+            }
+        ));
+    }
+
+    // Attempt 2: no daemon process alive — Attempt 1 must have crashed
+    // (broken init.el, missing package, etc.). Try a minimal `-q` daemon
+    // so the bridge can still operate.
     let out_min = std::process::Command::new(&emacs)
         .arg("-q")
         .arg(format!("--daemon={SOCKET_NAME}"))
         .output();
     if let Ok(out) = &out_min {
-        if out.status.success() && wait_for_daemon_with_timeout(client, 15) {
+        if out.status.success() && wait_for_daemon_with_timeout(client, 30) {
             DAEMON_LAST_OK_SECS.store(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
