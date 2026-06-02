@@ -58,18 +58,25 @@ export default function TabBar() {
       }}
     >
       {openTabs.map((path) => {
-        const active = path === activePath;
         const isPending = loadingFile === path;
+        // "Active" highlight follows the load target while a switch is in
+        // flight, then settles on the loaded file.
+        const active = path === activePath;
+        // The tab is "settled" (a no-op to click) ONLY when it's the fully
+        // loaded file and nothing is loading. Crucially we do NOT gate on
+        // `path === file` alone: during a switch, `file` still points at the
+        // PREVIOUS tab while its parse runs, and the old guard made that
+        // previous tab unclickable — so if the new tab's parse stalled, the
+        // whole strip froze. Now any click that isn't the settled-active tab
+        // (re)loads that tab, superseding an in-flight/stuck load.
+        const settled = path === file && loadingFile == null;
         const name = path.split("/").pop() || path;
         return (
           <div
             key={path}
             onClick={() => {
-              // Ignore clicks on the currently active tab — and on a tab
-              // whose parse is already in flight, so an impatient user
-              // can't queue duplicate loads on the same target.
-              if (path === file || loadingFile === path) return;
-              loadFile(path);
+              if (settled) return; // already showing this file — no-op
+              loadFile(path); // supersedes any in-flight/stuck load
             }}
             title={isPending ? `${path}\n(loading…)` : path}
             style={{
@@ -82,7 +89,7 @@ export default function TabBar() {
               color: active ? "var(--c-text)" : "var(--c-text-dim)",
               fontSize: 12,
               fontWeight: active ? 600 : 500,
-              cursor: active ? "default" : "pointer",
+              cursor: settled ? "default" : "pointer",
               // The active tab sits flush with the working area below — its
               // border-bottom disappears into the bg, while inactive tabs
               // sit recessed.
