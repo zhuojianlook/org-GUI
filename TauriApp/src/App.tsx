@@ -11,7 +11,7 @@ import TimelineBand from "./components/TimelineBand";
 import ContextMenu from "./components/ContextMenu";
 import ErrorToast from "./components/ErrorToast";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
-import { useOrgStore, lastOpenedFile } from "./store/useOrgStore";
+import { useOrgStore } from "./store/useOrgStore";
 import { IN_TAURI } from "./api/org";
 
 export default function App() {
@@ -22,6 +22,7 @@ export default function App() {
   const selectedId = useOrgStore((s) => s.selectedId);
   const checkEmacs = useOrgStore((s) => s.checkEmacs);
   const loadFile = useOrgStore((s) => s.loadFile);
+  const restoreSession = useOrgStore((s) => s.restoreSession);
   const addHeading = useOrgStore((s) => s.addHeading);
   const showTimeline = useOrgStore((s) => s.showTimeline);
 
@@ -34,9 +35,10 @@ export default function App() {
       loadFile("demo.org");
       return;
     }
-    // Desktop: reopen the file from the last session, if any.
-    const last = lastOpenedFile();
-    if (last) loadFile(last);
+    // Desktop: restore the previous session — re-open every tab that still
+    // exists on disk and activate the last one. Falls back to the single
+    // last-opened file for users upgrading from a pre-multi-tab build.
+    restoreSession();
     // Auto-open the Setup modal on first launch if Emacs or Doom is missing.
     (async () => {
       const s = await fetchPrereqStatus();
@@ -46,7 +48,7 @@ export default function App() {
     const onOpen = () => setShowSetup(true);
     window.addEventListener("orggui:openSetup", onOpen);
     return () => window.removeEventListener("orggui:openSetup", onOpen);
-  }, [checkEmacs, loadFile]);
+  }, [checkEmacs, restoreSession]);
 
   const pickFile = async () => {
     if (!IN_TAURI) {

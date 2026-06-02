@@ -203,6 +203,12 @@ export const pingEmacs = () =>
     ? orgCall<EmacsPing>("org-gui-ping")
     : Promise.resolve<EmacsPing>({ ok: true, bridge: "demo", org: "—", emacs: "browser preview" });
 
+/** Does an absolute path still exist on disk? Used by session restore to
+ *  drop tabs whose .org file was moved/deleted. Always true in the browser
+ *  preview (no real filesystem). */
+export const pathExists = (path: string): Promise<boolean> =>
+  IN_TAURI ? invoke<boolean>("path_exists", { path }) : Promise.resolve(true);
+
 export const parseOrg = (file: string) =>
   IN_TAURI
     ? orgCall<OrgDoc>("org-gui-parse", [file])

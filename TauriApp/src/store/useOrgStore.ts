@@ -25,6 +25,7 @@ import {
   wouldCreateCycle,
   parseOrg,
   pingEmacs,
+  pathExists,
   IN_TAURI,
 } from "../api/org";
 
@@ -415,6 +416,10 @@ interface OrgState {
 
   checkEmacs: () => Promise<void>;
   loadFile: (file: string) => Promise<void>;
+  /** Restore the previous session on launch: re-populate the tab strip with
+   *  every previously-open file that still exists on disk, then load the
+   *  last-active one. */
+  restoreSession: () => Promise<void>;
   reload: () => Promise<void>;
   refreshDoc: () => Promise<void>;
   toggleCheckbox: (node: OrgNode, index: number) => Promise<void>;
@@ -571,6 +576,46 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         set({ error: String(e), loading: false, loadingFile: null });
       }
     }
+  },
+
+  restoreSession: async () => {
+    // The persisted open-tab list (read into the store at init) plus the
+    // single "last active" file. We re-validate each tab against the disk —
+    // a file the user moved or deleted since last launch is silently
+    // dropped rather than left as a dead tab that errors on click.
+    const persisted = get().openTabs;
+    const last = lastOpenedFile();
+    // Legacy / single-file fallback: older builds (pre-multi-tab) only ever
+    // recorded `lastFile`, never `openTabs`. Seed the candidate list from it
+    // so upgrading users still get their last file back.
+    const candidates = persisted.length > 0 ? persisted : last ? [last] : [];
+    if (candidates.length === 0) return;
+
+    const alive: string[] = [];
+    for (const f of candidates) {
+      try {
+        if (await pathExists(f)) alive.push(f);
+      } catch {
+        // If the existence check itself fails, keep the tab — better to
+        // show a tab that errors on click than to silently drop a file
+        // that's actually there.
+        alive.push(f);
+      }
+    }
+    if (alive.length === 0) {
+      // Every remembered file is gone — clear the stale list so we don't
+      // keep re-checking dead paths every launch.
+      saveOpenTabs([]);
+      set({ openTabs: [] });
+      return;
+    }
+    // Persist the pruned list and reflect it immediately so the whole strip
+    // is visible before any parse completes.
+    saveOpenTabs(alive);
+    set({ openTabs: alive });
+    // Activate the previous active tab if it survived, else the last one.
+    const active = last && alive.includes(last) ? last : alive[alive.length - 1];
+    await get().loadFile(active);
   },
 
   closeTab: async (file: string) => {

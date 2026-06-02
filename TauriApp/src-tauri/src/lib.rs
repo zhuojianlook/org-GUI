@@ -847,6 +847,14 @@ fn restart_app(app: tauri::AppHandle) {
     app.restart();
 }
 
+/// Does this absolute path exist on disk? Used by session restore to drop
+/// tabs whose .org file was moved/deleted since last launch, so dead tabs
+/// don't accumulate in the strip.
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    !path.is_empty() && std::path::Path::new(&path).exists()
+}
+
 /// Open a terminal Emacs frame (emacsclient -t) on FILE inside a PTY. Streams
 /// the terminal output to the frontend via `emacs-term-data` events and returns
 /// a session id used by the write/resize/close commands.
@@ -999,6 +1007,7 @@ pub fn run() {
             download_and_install_update,
             restart_app,
             restart_emacs_daemon,
+            path_exists,
             emacs_term_open,
             emacs_term_write,
             emacs_term_resize,
