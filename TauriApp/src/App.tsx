@@ -82,7 +82,14 @@ export default function App() {
           <div style={{ flex: 1, position: "relative", minWidth: 0 }}>
           {doc ? (
             <>
-              <ReactFlowProvider>
+              {/* Key the graph on the active file so switching tabs fully
+                  remounts React Flow. Node ids are buffer-position based
+                  (`n<begin>`), so two different files routinely share ids
+                  like "n1" — without a remount React Flow keeps the stale
+                  node objects keyed by those colliding ids and the canvas
+                  appears not to change when you switch tabs. A fresh mount
+                  guarantees the new file's graph (and a clean fitView). */}
+              <ReactFlowProvider key={file ?? "none"}>
                 <TimelineGraph />
               </ReactFlowProvider>
               {doc.nodes.length === 0 && (
