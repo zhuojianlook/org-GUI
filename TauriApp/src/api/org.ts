@@ -736,6 +736,20 @@ export const setTimestampRange = (
     ? orgCall<OrgDoc>("org-gui-set-timestamp-range", [file, String(begin), start, end])
     : Promise.resolve(structuredClone(ensureMock()));
 
+/** Set a node's SPAN (duration), routing to the right org representation:
+ *  same-day → a SCHEDULED time-range (the scheduled task's own block),
+ *  multi-day → a plain timestamp range. START/END are "YYYY-MM-DD" or
+ *  "YYYY-MM-DD HH:MM"; empty START clears the span. */
+export const setSpan = (
+  file: string,
+  begin: number,
+  start: string,
+  end: string,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>("org-gui-set-span", [file, String(begin), start, end])
+    : Promise.resolve(structuredClone(ensureMock()));
+
 // ── Google Calendar (org-gcal) ──────────────────────────────────────────
 export interface GcalStatus {
   available: boolean; // org-gcal installed + loadable

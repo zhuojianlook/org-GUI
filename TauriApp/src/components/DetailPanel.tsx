@@ -25,7 +25,7 @@ export default function DetailPanel() {
   const removeNode = useOrgStore((s) => s.removeNode);
   const start = useOrgStore((s) => s.start);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
-  const setNodeRange = useOrgStore((s) => s.setNodeRange);
+  const setNodeSpan = useOrgStore((s) => s.setNodeSpan);
 
   const node = doc?.nodes.find((n) => n.id === selectedId);
 
@@ -179,13 +179,15 @@ export default function DetailPanel() {
         onChange={(v) => edit(setDeadline, node, v)}
         onClear={() => edit(setDeadline, node, "")}
       />
-      {/* Span / duration — a plain active-timestamp range. Same-day with
-          times → vertical bar on the timeline; multi-day → horizontal bar. */}
+      {/* Span / duration. The start mirrors the SCHEDULED date when the node
+          is scheduled (a same-day span IS the scheduled block); otherwise it
+          reads from a plain timestamp range. The bridge routes the write:
+          same-day → SCHEDULED time-range, multi-day → timestamp range. */}
       <SpanField
-        startIso={node.timestamp}
-        endIso={node.timestampEnd}
-        onCommit={(s, e) => setNodeRange(node, s, e)}
-        onClear={() => setNodeRange(node, "", "")}
+        startIso={node.scheduled ?? node.timestamp}
+        endIso={node.scheduledEnd ?? node.timestampEnd}
+        onCommit={(s, e) => setNodeSpan(node, s, e)}
+        onClear={() => setNodeSpan(node, "", "")}
       />
 
       {/* Tags */}
@@ -367,15 +369,13 @@ function SpanField({
             }}
             style={{ ...input, flex: 1 }}
           />
-          <input
-            type="time"
+          <TimeInput
             value={sTime}
-            onChange={(e) => {
-              setSTime(e.target.value);
-              commit(sDate, e.target.value, eDate, eTime);
-            }}
-            style={{ ...input, width: 92 }}
             disabled={!sDate}
+            onCommit={(v) => {
+              setSTime(v);
+              commit(sDate, v, eDate, eTime);
+            }}
           />
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -389,16 +389,15 @@ function SpanField({
             }}
             style={{ ...input, flex: 1 }}
             disabled={!sDate}
+            min={sDate || undefined}
           />
-          <input
-            type="time"
+          <TimeInput
             value={eTime}
-            onChange={(e) => {
-              setETime(e.target.value);
-              commit(sDate, sTime, eDate, e.target.value);
-            }}
-            style={{ ...input, width: 92 }}
             disabled={!eDate}
+            onCommit={(v) => {
+              setETime(v);
+              commit(sDate, sTime, eDate, v);
+            }}
           />
           {has && (
             <button onClick={onClear} style={clearBtn} title="Clear span">
@@ -408,6 +407,74 @@ function SpanField({
         </div>
       </div>
     </div>
+  );
+}
+
+/** Robust time entry: a plain text field that accepts loose input and
+ *  normalizes it to HH:MM on blur / Enter. Native <input type="time"> is
+ *  flaky in WKWebView; this lets you type "9", "930", "9:5", "1430", etc.
+ *  Empty stays empty (no time). */
+function normalizeTime(raw: string): string {
+  const t = raw.trim();
+  if (!t) return "";
+  // "14:30", "9:5", "9.30", "9 30"
+  let m = t.match(/^(\d{1,2})[:.\s]?(\d{1,2})$/);
+  if (m) {
+    const h = Math.min(23, parseInt(m[1], 10));
+    const min = Math.min(59, parseInt(m[2], 10));
+    return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+  }
+  // "1430" / "930" / "9"
+  m = t.match(/^(\d{1,4})$/);
+  if (m) {
+    const digits = m[1];
+    let h: number;
+    let min: number;
+    if (digits.length <= 2) {
+      h = parseInt(digits, 10);
+      min = 0;
+    } else {
+      const split = digits.length === 3 ? 1 : 2;
+      h = parseInt(digits.slice(0, split), 10);
+      min = parseInt(digits.slice(split), 10);
+    }
+    if (h > 23 || min > 59) return "";
+    return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+  }
+  return "";
+}
+
+function TimeInput({
+  value,
+  disabled,
+  onCommit,
+}: {
+  value: string;
+  disabled?: boolean;
+  onCommit: (v: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const flush = () => {
+    const norm = normalizeTime(draft);
+    setDraft(norm);
+    if (norm !== value) onCommit(norm);
+  };
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={draft}
+      placeholder="HH:MM"
+      disabled={disabled}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={flush}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+      style={{ ...input, width: 78, textAlign: "center", fontVariantNumeric: "tabular-nums" }}
+      title="Type a time (e.g. 9, 930, 14:30) — blank for none"
+    />
   );
 }
 

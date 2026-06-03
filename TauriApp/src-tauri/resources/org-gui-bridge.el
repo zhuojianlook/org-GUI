@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.49")
+(defconst org-gui-bridge-version "0.2.50")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -370,6 +370,76 @@ untouched. The app builds START/END from the start/end pickers."
          (insert (if efmt
                      (format "<%s>--<%s>\n" sfmt efmt)
                    (format "<%s>\n" sfmt))))))))
+
+(defun org-gui--set-body-timestamp (start end)
+  "At the current heading, replace the entry-body active timestamp with
+\"<START>--<END>\" (or \"<START>\"); empty START removes it. START/END are
+canonical inner-timestamp bodies as produced by `org-gui--fmt-inner-ts'."
+  (org-back-to-heading t)
+  (let* ((hp (point))
+         (next (save-excursion
+                 (goto-char hp)
+                 (if (outline-next-heading) (point) (point-max)))))
+    (save-excursion
+      (goto-char (save-excursion (org-end-of-meta-data t) (point)))
+      (while (and (< (point) next) (re-search-forward org-ts-regexp next t))
+        (delete-region (line-beginning-position)
+                       (min (1+ (line-end-position)) (point-max)))
+        (setq next (save-excursion
+                     (goto-char hp)
+                     (if (outline-next-heading) (point) (point-max))))))
+    (when (and start (> (length start) 0))
+      (goto-char (save-excursion (org-end-of-meta-data t) (point)))
+      (insert (if (and end (> (length end) 0))
+                  (format "<%s>--<%s>\n" start end)
+                (format "<%s>\n" start))))))
+
+(defun org-gui-set-span (file begin start end)
+  "Set a node's SPAN (duration) from START to END. START/END are
+\"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM\" (END may be empty). The org
+representation is chosen to match the user's mental model and org's own
+limits, and the OTHER representation is cleared so the node carries
+exactly one span:
+  - empty START          → clear SCHEDULED time-range AND any body span
+  - same calendar day    → SCHEDULED (a <date hh:mm-hh:mm> time-range when
+                           both ends carry a time, else a single date/time),
+                           because a same-day duration is naturally the
+                           scheduled task's own block; clears the body span
+  - different days        → a plain active <start>--<end> body timestamp
+                           (org's SCHEDULED can't hold a multi-day range);
+                           clears SCHEDULED so there's no duplicate point
+Returns the freshly parsed doc."
+  (org-gui--with-heading
+   file begin
+   (lambda ()
+     (let* ((s (string-trim (or start "")))
+            (e (string-trim (or end ""))))
+       (cond
+        ((string-empty-p s)
+         (ignore-errors (org-schedule '(4)))
+         (org-gui--set-body-timestamp nil nil))
+        (t
+         (let* ((s-date (substring s 0 (min 10 (length s))))
+                (e-date (when (>= (length e) 10) (substring e 0 10)))
+                (multi (and e-date (not (string= s-date e-date))))
+                (s-time (when (string-match "\\([0-9]\\{1,2\\}:[0-9]\\{2\\}\\)" s)
+                          (match-string 1 s)))
+                (e-time (when (and (> (length e) 0)
+                                   (string-match "\\([0-9]\\{1,2\\}:[0-9]\\{2\\}\\)" e))
+                          (match-string 1 e))))
+           (if multi
+               (progn
+                 ;; multi-day → body timestamp range; drop the SCHEDULED point.
+                 (ignore-errors (org-schedule '(4)))
+                 (org-gui--set-body-timestamp (org-gui--fmt-inner-ts s)
+                                              (org-gui--fmt-inner-ts e)))
+             ;; same day (or no end) → SCHEDULED; clear any body span.
+             (org-gui--set-body-timestamp nil nil)
+             (let ((sched (cond
+                           ((and s-time e-time) (format "%s %s-%s" s-date s-time e-time))
+                           (s-time (format "%s %s" s-date s-time))
+                           (t s-date))))
+               (org-schedule nil sched))))))))))
 
 (defun org-gui-set-priority (file begin prio)
   "Set priority to PRIO (\"A\"/\"B\"/...), or remove it when PRIO is empty."

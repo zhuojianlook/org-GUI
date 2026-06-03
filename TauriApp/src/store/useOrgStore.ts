@@ -21,6 +21,7 @@ import {
   setScheduled as apiSetScheduled,
   setDeadline as apiSetDeadline,
   setTimestampRange as apiSetTimestampRange,
+  setSpan as apiSetSpan,
   incompleteDeps,
   validateScheduleAgainstDeps,
   wouldCreateCycle,
@@ -467,6 +468,9 @@ interface OrgState {
   /** Set (or clear) a node's plain active-timestamp span — a duration.
    *  start/end are "YYYY-MM-DD" or "YYYY-MM-DD HH:MM"; both empty removes it. */
   setNodeRange: (node: OrgNode, start: string, end: string) => Promise<void>;
+  /** Set a node's span/duration, routed by the bridge to a SCHEDULED
+   *  time-range (same-day) or a plain timestamp range (multi-day). */
+  setNodeSpan: (node: OrgNode, start: string, end: string) => Promise<void>;
   setBody: (node: OrgNode, body: string) => Promise<void>;
   addTableChild: (parentNode: OrgNode | null) => Promise<void>;
   clearError: () => void;
@@ -1073,6 +1077,21 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiSetTimestampRange(file, node.begin, start, end);
+      const tracked = idx >= 0 ? (newDoc.nodes[idx]?.id ?? null) : null;
+      const newSel = prevSel === node.id ? tracked : prevSel;
+      set({ doc: newDoc, selectedId: newSel, saving: false });
+    } catch (e) {
+      set({ error: String(e), saving: false });
+    }
+  },
+
+  setNodeSpan: async (node, start, end) => {
+    const { file, doc, selectedId: prevSel } = get();
+    if (!file || !doc) return;
+    const idx = doc.nodes.findIndex((n) => n.id === node.id);
+    set({ saving: true, error: null });
+    try {
+      const newDoc = await apiSetSpan(file, node.begin, start, end);
       const tracked = idx >= 0 ? (newDoc.nodes[idx]?.id ?? null) : null;
       const newSel = prevSel === node.id ? tracked : prevSel;
       set({ doc: newDoc, selectedId: newSel, saving: false });
