@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.42")
+(defconst org-gui-bridge-version "0.2.43")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -32,6 +32,33 @@ Keeps date-only vs date+time distinction based on RAW."
       (let* ((time (org-time-string-to-time raw))
              (has-time (string-match-p "[0-9]\\{1,2\\}:[0-9]\\{2\\}" raw)))
         (format-time-string (if has-time "%Y-%m-%dT%H:%M" "%Y-%m-%d") time))
+    :null))
+
+(defun org-gui--ts-end-iso (raw)
+  "When org timestamp RAW carries a duration/range, return its END as an
+ISO string; otherwise :null. Handles both same-day time ranges
+\(\"<2026-06-06 Sat 10:00-11:30>\" → end 11:30 on the same day) and
+multi-day date ranges (\"<2026-06-06>--<2026-06-08>\" → end 2026-06-08).
+A plain single timestamp has no duration and yields :null."
+  (if (and raw (stringp raw) (> (length raw) 0))
+      (or (ignore-errors
+            (with-temp-buffer
+              (insert raw)
+              (goto-char (point-min))
+              (let ((ts (org-element-timestamp-parser)))
+                (when (and ts (memq (org-element-property :type ts)
+                                    '(active-range inactive-range)))
+                  (let* ((ye (org-element-property :year-end ts))
+                         (me (org-element-property :month-end ts))
+                         (de (org-element-property :day-end ts))
+                         (he (org-element-property :hour-end ts))
+                         (mine (org-element-property :minute-end ts))
+                         (has-time (and he mine)))
+                    (when (and ye me de)
+                      (format-time-string
+                       (if has-time "%Y-%m-%dT%H:%M" "%Y-%m-%d")
+                       (encode-time 0 (or mine 0) (or he 0) de me ye))))))))
+          :null)
     :null))
 
 ;;;; ---- Reading ------------------------------------------------------------
@@ -67,6 +94,12 @@ planning lines and property drawers."
          (deadline (org-gui--ts-iso raw-dead))
          (closed (org-gui--ts-iso raw-closed))
          (timestamp (org-gui--ts-iso raw-ts))
+         ;; End of a duration/range, when the timestamp carries one. Drives
+         ;; the timeline's duration bars (a meeting 10:00-11:30, or a
+         ;; multi-day <a>--<b> event).
+         (scheduled-end (org-gui--ts-end-iso raw-sched))
+         (deadline-end (org-gui--ts-end-iso raw-dead))
+         (timestamp-end (org-gui--ts-end-iso raw-ts))
          (raw (save-excursion
                 (org-back-to-heading t)
                 (buffer-substring-no-properties
@@ -90,6 +123,9 @@ planning lines and property drawers."
      (cons 'deadline deadline)
      (cons 'closed closed)
      (cons 'timestamp timestamp)
+     (cons 'scheduledEnd scheduled-end)
+     (cons 'deadlineEnd deadline-end)
+     (cons 'timestampEnd timestamp-end)
      (cons 'rawScheduled (org-gui--s raw-sched))
      (cons 'rawDeadline (org-gui--s raw-dead))
      (cons 'rawClosed (org-gui--s raw-closed))

@@ -290,12 +290,19 @@ export default function TimelineBand() {
       tagsAll: string[]; // for chip-background computation (tag → colour map)
       timeOfDay: string | null;
       iso: string;
+      // Duration end (from an org timestamp range). msEnd is the start-of-day
+      // of the end date (for multi-day spans); timeOfDayEnd is the end time
+      // (for same-day time blocks). Both null when the timestamp is a single
+      // point — those render as the usual chips, not bars.
+      msEnd: number | null;
+      timeOfDayEnd: string | null;
     }[] = [];
     for (const n of doc?.nodes ?? []) {
       if (n.done) continue;
       const tags = n.tagsAll ?? [];
       const s = parseOrgDate(n.scheduled);
-      if (s)
+      if (s) {
+        const e = parseOrgDate(n.scheduledEnd);
         out.push({
           ms: startOfDay(s).getTime(),
           deadline: false,
@@ -305,9 +312,13 @@ export default function TimelineBand() {
           tagsAll: tags,
           timeOfDay: timeOfDayFromIso(n.scheduled),
           iso: n.scheduled ?? "",
+          msEnd: e ? startOfDay(e).getTime() : null,
+          timeOfDayEnd: timeOfDayFromIso(n.scheduledEnd),
         });
+      }
       const d = parseOrgDate(n.deadline);
-      if (d)
+      if (d) {
+        const e = parseOrgDate(n.deadlineEnd);
         out.push({
           ms: startOfDay(d).getTime(),
           deadline: true,
@@ -317,10 +328,42 @@ export default function TimelineBand() {
           tagsAll: tags,
           timeOfDay: timeOfDayFromIso(n.deadline),
           iso: n.deadline ?? "",
+          msEnd: e ? startOfDay(e).getTime() : null,
+          timeOfDayEnd: timeOfDayFromIso(n.deadlineEnd),
         });
+      }
+      // Plain active TIMESTAMP, but ONLY when it carries a duration (a range).
+      // Multi-day events (<a>--<b>) live here because org's SCHEDULED keeps
+      // only the start of a `--` range. Single-point timestamps are skipped
+      // so date-only notes don't flood the band.
+      const tsEnd = parseOrgDate(n.timestampEnd);
+      const ts = parseOrgDate(n.timestamp);
+      if (ts && tsEnd) {
+        out.push({
+          ms: startOfDay(ts).getTime(),
+          deadline: false,
+          nodeId: n.id,
+          title: n.title ?? "(untitled)",
+          color: "#5fb3a1",
+          tagsAll: tags,
+          timeOfDay: timeOfDayFromIso(n.timestamp),
+          iso: n.timestamp ?? "",
+          msEnd: startOfDay(tsEnd).getTime(),
+          timeOfDayEnd: timeOfDayFromIso(n.timestampEnd),
+        });
+      }
     }
     return out;
   }, [doc]);
+
+  // A nodeDate carries a real duration when it spans multiple days OR has an
+  // end time-of-day later than its start on the same day. These render as
+  // bars; everything else renders as the usual point chips.
+  const hasDuration = (d: (typeof nodeDates)[number]): boolean => {
+    if (d.msEnd != null && d.msEnd > d.ms) return true;
+    if (d.timeOfDayEnd && d.timeOfDay && d.timeOfDayEnd > d.timeOfDay) return true;
+    return false;
+  };
 
   // Visible window: either "Fit" (auto-range over all dates) or a fixed-span
   // window centered on timelineView.centerMs.
@@ -971,6 +1014,141 @@ export default function TimelineBand() {
         });
       })()}
 
+      {/* Duration bars: org timestamps that carry a range render as a span
+          rather than a point. A same-day time block (SCHEDULED
+          <… 10:00-11:30>) is a VERTICAL bar between its start- and end-time
+          rows; a multi-day event (TIMESTAMP <a>--<b>) is a HORIZONTAL bar
+          across its day columns. Click to select + focus the node (then the
+          usual arrow-key nudge moves the start). */}
+      {(() => {
+        const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
+        const out: React.ReactNode[] = [];
+        for (let i = 0; i < nodeDates.length; i++) {
+          const d = nodeDates[i];
+          if (!hasDuration(d)) continue;
+          const left = pct(d.ms);
+          const rightMs = d.msEnd != null && d.msEnd > d.ms ? d.msEnd : d.ms;
+          const right = pct(rightMs);
+          if (right < -5 || left > 105) continue;
+
+          const multiDay = d.msEnd != null && d.msEnd > d.ms;
+          const isSelected =
+            timelineSelectedChip != null &&
+            timelineSelectedChip.nodeId === d.nodeId &&
+            timelineSelectedChip.isDeadline === d.deadline;
+          const bg = chipBackground(d.tagsAll, tagColors, 0.42);
+          // Border must be a SOLID colour (chipBackground may return a
+          // linear-gradient for multi-tag nodes, which is invalid for
+          // `border`). Use the first coloured tag, else the kind's default.
+          const firstTagColor = d.tagsAll.map((t) => tagColors[t]).find(Boolean);
+          const border = hexToRgba(firstTagColor ?? d.color, 0.85);
+          const truncated = d.title.length > 30 ? d.title.slice(0, 29) + "…" : d.title;
+          const rangeLabel = `${d.timeOfDay ?? ""}${d.timeOfDayEnd ? "–" + d.timeOfDayEnd : ""}`.trim();
+
+          // Focus-only: jump to the node in the graph. We deliberately do
+          // NOT set timelineSelectedChip here — the arrow-key nudge it
+          // enables rewrites SCHEDULED to a single point, which would
+          // silently collapse the duration. Editing durations is a future
+          // step; for now bars are a read representation.
+          const onBarClick = (e: React.MouseEvent) => {
+            e.stopPropagation();
+            window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: d.nodeId } }));
+          };
+
+          if (multiDay) {
+            // Horizontal span across day columns, anchored at the start
+            // time's row (or mid-band when undated).
+            const top = yForTimeOfDay(d.timeOfDay, bandH, workHoursMode);
+            const leftClamped = Math.max(0, left);
+            const rightClamped = Math.min(100, right);
+            const widthPct = Math.max(0.5, rightClamped - leftClamped);
+            out.push(
+              <button
+                key={`dur${i}`}
+                data-pin
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={onBarClick}
+                title={`${d.title}\n${d.iso}${d.timeOfDayEnd ? " → " + d.timeOfDayEnd : ""} (duration)`}
+                style={{
+                  position: "absolute",
+                  left: `${leftClamped}%`,
+                  top: top - 9,
+                  width: `${widthPct}%`,
+                  height: 18,
+                  borderRadius: 5,
+                  background: bg,
+                  border: isSelected ? "2px solid #ffd166" : `1px solid ${border}`,
+                  color: "var(--c-text)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  padding: "0 7px",
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  cursor: "pointer",
+                  boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
+                }}
+              >
+                <span aria-hidden style={{ flexShrink: 0, opacity: 0.8 }}>↔</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{truncated}</span>
+              </button>,
+            );
+          } else {
+            // Same-day time block → vertical bar between start/end rows.
+            const yStart = yForTimeOfDay(d.timeOfDay, bandH, workHoursMode);
+            const yEnd = yForTimeOfDay(d.timeOfDayEnd, bandH, workHoursMode);
+            const top = Math.min(yStart, yEnd);
+            const height = Math.max(14, Math.abs(yEnd - yStart));
+            const w = Math.max(34, Math.min(160, pxPerDay - 6));
+            out.push(
+              <button
+                key={`dur${i}`}
+                data-pin
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={onBarClick}
+                title={`${d.title}\n${rangeLabel} (duration)`}
+                style={{
+                  position: "absolute",
+                  left: `${left}%`,
+                  top,
+                  height,
+                  width: w,
+                  transform: "translateX(-50%)",
+                  borderRadius: 5,
+                  background: bg,
+                  border: isSelected ? "2px solid #ffd166" : `1px solid ${border}`,
+                  color: "var(--c-text)",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "flex-start",
+                  justifyContent: "flex-start",
+                  gap: 1,
+                  padding: "2px 6px",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  overflow: "hidden",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
+                }}
+              >
+                <span style={{ width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {truncated}
+                </span>
+                {rangeLabel && (
+                  <span style={{ opacity: 0.7, fontVariantNumeric: "tabular-nums", fontWeight: 500 }}>
+                    {rangeLabel}
+                  </span>
+                )}
+              </button>,
+            );
+          }
+        }
+        return out;
+      })()}
+
       {/* Task chips with pixel-proximity clustering. Two chips whose on-
           screen positions are within CLUSTER_PX of each other (and share
           the deadline-vs-scheduled flag) collapse into a single stack
@@ -1002,6 +1180,9 @@ export default function TimelineBand() {
 
         const visible: Anchor[] = [];
         for (const d of nodeDates) {
+          // Duration items render as bars in their own layer below — skip
+          // them here so they don't also appear as point chips.
+          if (hasDuration(d)) continue;
           const leftPct = pct(d.ms);
           if (leftPct < -5 || leftPct > 105) continue;
           visible.push({

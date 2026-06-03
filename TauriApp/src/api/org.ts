@@ -21,6 +21,12 @@ export interface OrgNode {
   deadline: string | null;
   closed: string | null;
   timestamp: string | null;
+  /** End of a duration/range, when the corresponding timestamp carries one
+   *  (e.g. SCHEDULED `<… 10:00-11:30>` or a multi-day TIMESTAMP `<a>--<b>`).
+   *  Null for single-point timestamps. Drives the timeline's duration bars. */
+  scheduledEnd: string | null;
+  deadlineEnd: string | null;
+  timestampEnd: string | null;
   rawScheduled: string | null;
   rawDeadline: string | null;
   rawClosed: string | null;
@@ -417,6 +423,7 @@ function emptyNode(begin: number, level: number, parent: string | null, title: s
     id: `n${begin}`, begin, level, parent, title,
     todo: null, done: false, priority: null, tags: [], tagsAll: [],
     scheduled: null, deadline: null, closed: null, timestamp: null,
+    scheduledEnd: null, deadlineEnd: null, timestampEnd: null,
     rawScheduled: null, rawDeadline: null, rawClosed: null,
     raw: `${"*".repeat(level)} ${title}`,
     category: "Demo", orgId: null, dependsOn: [], deadlineColor: null, body: null,
