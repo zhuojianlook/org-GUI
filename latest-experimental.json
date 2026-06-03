@@ -1,15 +1,15 @@
 {
-  "version": "0.2.45",
-  "notes": "Update to exp-0.2.45",
-  "pub_date": "2026-06-03T03:26:19Z",
+  "version": "0.2.46",
+  "notes": "Update to exp-0.2.46",
+  "pub_date": "2026-06-03T03:51:21Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrSzhHSUJHN25HWjhMOVlTU0taUXYyZ2xWQmJJWjNOL1ppM3M4Vi8wZ2pOYUJKTHdobXZiOXJOeVlXRUZjd0t5bzJGSUJYVzRGUHNrSmRGT1AzTlcxQWd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNDU3MTYzCWZpbGU6b3JnLUdVSV8wLjIuNDVfeDY0LXNldHVwLmV4ZQpYYXBoc1JpRjVWWUtJWUtkVFRORVJEMFNkQlJnY0ZnaWVSMXNRS003K2Z6dC92Z1l2ZmYxemlLb3A4eXB4QWZrazdCNldGamMrTmdBMlBGdXJQMmhEUT09Cg==",
-      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/exp-0.2.45/org-GUI_0.2.45_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrS3dNQzhKMUVwRUpkQ3VPVzVIc0x0Zm1lVHRUZHNwckVTbThJV0xwZE5lRStQbnROcVRoMlU1Rm1IYnhMNDdCbFNTNzVwL0h4TjFNaXVXVld2TkZ2WGc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNDU4NjY4CWZpbGU6b3JnLUdVSV8wLjIuNDZfeDY0LXNldHVwLmV4ZQphNVFlZURDRUdDN1p6TmU1VTAvR2ptbzN4OW83RUxTUmxWS0FucTFqOGp2WE5PK2JvVUhrZUtZejd4V0U3Q1ZlTEN1V0pmd3pvYjRTRFB0aGp0dUtBZz09Cg==",
+      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/exp-0.2.46/org-GUI_0.2.46_x64-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrS3d6clo4NUlSQThDam9LcGlmM3U0eno1TE5KZWVnSmF3UitvQjl0RjhWaXIwcDFKSWhySFpSNHI4OVFYSEN4RmxTc2tCSkJKckFRTE0vSGxVWUp6VndZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNDU2OTAwCWZpbGU6b3JnLUdVSS5hcHAudGFyLmd6CjRpaVVjTFJ1enlVeDdCY0JJUWtoU3g5ZWVSOFRJY01ON1NWNjVoZS9uVTlqU2ZCUG1ZY1YzZTRYNVNKS0pyR1cveE5sbnV2Ulo3c01OVjdXV1ZaVkRRPT0K",
-      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/exp-0.2.45/org-GUI.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrSzNUeXp0WS95R0VCeGtoMVkrNG55Tm5iTGtWaGN3MWE4VkduM0J0aTc1cEFRTEtVMDV1YVoxL0VJZ05yR2J6VGExakQ5ZlFLTUJ3OHRVUFU5UXZQRnc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNDU4NDA3CWZpbGU6b3JnLUdVSS5hcHAudGFyLmd6CjBtSTBKeGZyTklFYS85VjB0TkZiRE9NaHJnMXpUclJodGZoWC9RdUpNSTNUdzlwOGJUa0duM3JXTDJWbGJzcXVxS0x4aWlIa1JJMzhjMGpGRDRHYUNBPT0K",
+      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/exp-0.2.46/org-GUI.app.tar.gz"
     }
   }
 }
