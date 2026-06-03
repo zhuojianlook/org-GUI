@@ -722,6 +722,19 @@ export const startTask = (file: string, begin: number) =>
     ? orgCall<OrgDoc>("org-gui-start", [file, String(begin)])
     : Promise.resolve(mockStart(begin));
 
+/** Set the entry's plain active-timestamp span (a date/time range, i.e. a
+ *  duration). START + END are "YYYY-MM-DD" or "YYYY-MM-DD HH:MM"; pass both
+ *  empty to remove the span. */
+export const setTimestampRange = (
+  file: string,
+  begin: number,
+  start: string,
+  end: string,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>("org-gui-set-timestamp-range", [file, String(begin), start, end])
+    : Promise.resolve(structuredClone(ensureMock()));
+
 export const archiveNode = (file: string, begin: number) =>
   IN_TAURI
     ? orgCall<OrgDoc>("org-gui-archive", [file, String(begin)])

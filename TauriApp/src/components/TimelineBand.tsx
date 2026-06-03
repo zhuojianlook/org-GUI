@@ -216,6 +216,7 @@ export default function TimelineBand() {
   const timelineView = useOrgStore((s) => s.timelineView);
   const setTimelineView = useOrgStore((s) => s.setTimelineView);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
+  const setNodeRange = useOrgStore((s) => s.setNodeRange);
   const timelineSelectedChip = useOrgStore((s) => s.timelineSelectedChip);
   const setTimelineSelectedChip = useOrgStore((s) => s.setTimelineSelectedChip);
   const tagColors = useOrgStore((s) => s.tagColors);
@@ -296,6 +297,9 @@ export default function TimelineBand() {
       // point — those render as the usual chips, not bars.
       msEnd: number | null;
       timeOfDayEnd: string | null;
+      // Which org field this came from — drives how a duration-bar move is
+      // written back (SCHEDULED time-range vs plain timestamp range).
+      kind: "scheduled" | "deadline" | "timestamp";
     }[] = [];
     for (const n of doc?.nodes ?? []) {
       if (n.done) continue;
@@ -314,6 +318,7 @@ export default function TimelineBand() {
           iso: n.scheduled ?? "",
           msEnd: e ? startOfDay(e).getTime() : null,
           timeOfDayEnd: timeOfDayFromIso(n.scheduledEnd),
+          kind: "scheduled",
         });
       }
       const d = parseOrgDate(n.deadline);
@@ -330,6 +335,7 @@ export default function TimelineBand() {
           iso: n.deadline ?? "",
           msEnd: e ? startOfDay(e).getTime() : null,
           timeOfDayEnd: timeOfDayFromIso(n.deadlineEnd),
+          kind: "deadline",
         });
       }
       // Plain active TIMESTAMP, but ONLY when it carries a duration (a range).
@@ -350,6 +356,7 @@ export default function TimelineBand() {
           iso: n.timestamp ?? "",
           msEnd: startOfDay(tsEnd).getTime(),
           timeOfDayEnd: timeOfDayFromIso(n.timestampEnd),
+          kind: "timestamp",
         });
       }
     }
@@ -751,6 +758,95 @@ export default function TimelineBand() {
     window.addEventListener("pointerup", up);
   };
 
+  /** Drag a DURATION BAR to move the whole span. The cursor's date+time
+   *  becomes the new START; the END shifts by the same delta so the span
+   *  keeps its length. Sub-threshold = a click that focuses the node.
+   *  Writes back through the right org field for the bar's kind. */
+  const onBarDown = (
+    e: React.PointerEvent,
+    d: (typeof nodeDates)[number],
+  ) => {
+    e.stopPropagation();
+    // Deadlines with ranges are rare and have no clean range-write path —
+    // leave those bars click-only.
+    if (d.kind === "deadline") return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+    const hasStartTime = !!d.timeOfDay;
+    const hasEndTime = !!d.timeOfDayEnd;
+    const minOf = (t: string | null) => {
+      if (!t) return 0;
+      const [h, m] = t.split(":").map((s) => parseInt(s, 10));
+      return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+    };
+    const oldStart = d.ms + minOf(d.timeOfDay) * 60000;
+    const oldEnd = (d.msEnd ?? d.ms) + minOf(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
+    const fmt = (ms: number, withTime: boolean) => {
+      const dt = new Date(ms);
+      const date = isoOf(dt);
+      if (!withTime) return date;
+      const hh = String(dt.getHours()).padStart(2, "0");
+      const mm = String(dt.getMinutes()).padStart(2, "0");
+      return `${date} ${hh}:${mm}`;
+    };
+    const move = (ev: PointerEvent) => {
+      if (!dragging) {
+        if (Math.abs(ev.clientX - startX) < 4 && Math.abs(ev.clientY - startY) < 4) return;
+        dragging = true;
+      }
+      const r = railRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const dt = dateAtClientX(ev.clientX);
+      const time = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
+      setChipGhost({
+        nodeId: d.nodeId,
+        deadline: d.deadline,
+        title: d.title,
+        color: d.color,
+        x: ev.clientX,
+        y: ev.clientY,
+        iso: `${isoOf(dt)} ${time}`,
+        time,
+      });
+    };
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      setChipGhost(null);
+      const node = doc?.nodes.find((n) => n.id === d.nodeId);
+      if (!node) return;
+      if (!dragging) {
+        // Click → focus the node in the graph.
+        window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: d.nodeId } }));
+        return;
+      }
+      const r = railRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const ndate = dateAtClientX(ev.clientX);
+      const ntimeStr = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
+      const newStartMs = startOfDay(ndate).getTime() + minOf(ntimeStr) * 60000;
+      const delta = newStartMs - oldStart;
+      const newEndMs = oldEnd + delta;
+      const sStr = fmt(newStartMs, hasStartTime);
+      const eStr = fmt(newEndMs, hasEndTime || hasStartTime);
+      if (d.kind === "timestamp") {
+        Promise.resolve(setNodeRange(node, sStr, eStr)).catch(() => {});
+      } else {
+        // scheduled: same-day time block → SCHEDULED <date HH:MM-HH:MM>.
+        const sd = new Date(newStartMs);
+        const ed = new Date(newEndMs);
+        const sDate = isoOf(sd);
+        const sT = `${String(sd.getHours()).padStart(2, "0")}:${String(sd.getMinutes()).padStart(2, "0")}`;
+        const eT = `${String(ed.getHours()).padStart(2, "0")}:${String(ed.getMinutes()).padStart(2, "0")}`;
+        const rangeStr = isoOf(sd) === isoOf(ed) ? `${sDate} ${sT}-${eT}` : `${sDate} ${sT}`;
+        Promise.resolve(scheduleNode(node, rangeStr, "scheduled")).catch(() => {});
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   const onPinDown = (e: React.PointerEvent, id: string) => {
     e.stopPropagation();
     if (editing) return;
@@ -1141,13 +1237,8 @@ export default function TimelineBand() {
           // Focus-only: jump to the node in the graph. We deliberately do
           // NOT set timelineSelectedChip here — the arrow-key nudge it
           // enables rewrites SCHEDULED to a single point, which would
-          // silently collapse the duration. Editing durations is a future
-          // step; for now bars are a read representation.
-          const onBarClick = (e: React.MouseEvent) => {
-            e.stopPropagation();
-            window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: d.nodeId } }));
-          };
-
+          // Drag the bar to move the whole span (onBarDown handles click-vs-
+          // drag); a plain click focuses the node. Deadlines stay click-only.
           if (multiDay) {
             // Horizontal span across day columns, anchored at the start
             // time's row (or mid-band when undated).
@@ -1159,8 +1250,7 @@ export default function TimelineBand() {
               <button
                 key={`dur${i}`}
                 data-pin
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={onBarClick}
+                onPointerDown={(e) => onBarDown(e, d)}
                 title={`${d.title}\n${d.iso}${d.timeOfDayEnd ? " → " + d.timeOfDayEnd : ""} (duration)`}
                 style={{
                   position: "absolute",
@@ -1199,8 +1289,7 @@ export default function TimelineBand() {
               <button
                 key={`dur${i}`}
                 data-pin
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={onBarClick}
+                onPointerDown={(e) => onBarDown(e, d)}
                 title={`${d.title}\n${rangeLabel} (duration)`}
                 style={{
                   position: "absolute",

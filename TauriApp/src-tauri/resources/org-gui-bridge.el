@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.45")
+(defconst org-gui-bridge-version "0.2.46")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -152,19 +152,26 @@ hang every parse. Each heading's processing is wrapped in
   (let ((nodes '())
         (stack '())) ; list of (level . id), nearest ancestor first
     (org-with-wide-buffer
-     (goto-char (point-min))
-     (while (outline-next-heading)
-       (ignore-errors
-         (let ((level (org-current-level)))
-           (when level
-             ;; Pop ancestors that are not shallower than this heading.
-             (while (and stack (>= (caar stack) level))
-               (setq stack (cdr stack)))
-             (let* ((parent-id (cdar stack))
-                    (node (org-gui--node-at-point parent-id))
-                    (id (cdr (assoc 'id node))))
-               (push node nodes)
-               (push (cons level id) stack)))))))
+     (let ((process
+            (lambda ()
+              (ignore-errors
+                (let ((level (org-current-level)))
+                  (when level
+                    ;; Pop ancestors that are not shallower than this heading.
+                    (while (and stack (>= (caar stack) level))
+                      (setq stack (cdr stack)))
+                    (let* ((parent-id (cdar stack))
+                           (node (org-gui--node-at-point parent-id))
+                           (id (cdr (assoc 'id node))))
+                      (push node nodes)
+                      (push (cons level id) stack))))))))
+       (goto-char (point-min))
+       ;; `outline-next-heading' moves to the NEXT heading after point, so if
+       ;; the buffer starts DIRECTLY with a heading (no #+TITLE/preamble) it
+       ;; would skip that first one. Handle the at-point heading explicitly,
+       ;; then iterate the rest.
+       (when (org-at-heading-p) (funcall process))
+       (while (outline-next-heading) (funcall process))))
     (nreverse nodes)))
 
 (defun org-gui-ping ()
@@ -317,6 +324,52 @@ or remove it when DATE is empty."
      (if (string-empty-p date)
          (org-deadline '(4))
        (org-deadline nil date)))))
+
+(defun org-gui--fmt-inner-ts (s)
+  "Format a date string S (e.g. \"2026-06-10\" or \"2026-06-10 09:00\")
+into a canonical org INNER timestamp body \"2026-06-10 Wed\" /
+\"2026-06-10 Wed 09:00\". Returns nil for empty S."
+  (when (and s (stringp s) (> (length (string-trim s)) 0))
+    (let* ((s (string-trim s))
+           (time (org-time-string-to-time s))
+           (has-time (string-match-p "[0-9]\\{1,2\\}:[0-9]\\{2\\}" s)))
+      (format-time-string (if has-time "%Y-%m-%d %a %H:%M" "%Y-%m-%d %a") time))))
+
+(defun org-gui-set-timestamp-range (file begin start end)
+  "Set the entry at BEGIN to carry a plain active timestamp spanning START
+to END (a date range / duration), as the first line of the entry body.
+  - START + END  → \"<start>--<end>\" (multi-day, or a same-day timed block)
+  - START only   → \"<start>\" (single active timestamp)
+  - both empty   → removes the entry's existing active timestamp
+Any pre-existing active timestamp in THIS entry's body is replaced;
+planning lines (SCHEDULED/DEADLINE/CLOSED) and child entries are left
+untouched. The app builds START/END from the start/end pickers."
+  (org-gui--with-heading
+   file begin
+   (lambda ()
+     (org-back-to-heading t)
+     (let* ((hp (point))
+            (sfmt (org-gui--fmt-inner-ts start))
+            (efmt (org-gui--fmt-inner-ts end))
+            ;; The direct entry body ends at the next heading (child or
+            ;; sibling); recomputed inside the loop because deletions move it.
+            (next (save-excursion
+                    (goto-char hp)
+                    (if (outline-next-heading) (point) (point-max)))))
+       ;; Strip existing active timestamp(s) from the body region only.
+       (save-excursion
+         (goto-char (save-excursion (org-end-of-meta-data t) (point)))
+         (while (and (< (point) next) (re-search-forward org-ts-regexp next t))
+           (delete-region (line-beginning-position)
+                          (min (1+ (line-end-position)) (point-max)))
+           (setq next (save-excursion
+                        (goto-char hp)
+                        (if (outline-next-heading) (point) (point-max))))))
+       (when sfmt
+         (goto-char (save-excursion (org-end-of-meta-data t) (point)))
+         (insert (if efmt
+                     (format "<%s>--<%s>\n" sfmt efmt)
+                   (format "<%s>\n" sfmt))))))))
 
 (defun org-gui-set-priority (file begin prio)
   "Set priority to PRIO (\"A\"/\"B\"/...), or remove it when PRIO is empty."

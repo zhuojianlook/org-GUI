@@ -25,6 +25,7 @@ export default function DetailPanel() {
   const removeNode = useOrgStore((s) => s.removeNode);
   const start = useOrgStore((s) => s.start);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
+  const setNodeRange = useOrgStore((s) => s.setNodeRange);
 
   const node = doc?.nodes.find((n) => n.id === selectedId);
 
@@ -178,6 +179,14 @@ export default function DetailPanel() {
         onChange={(v) => edit(setDeadline, node, v)}
         onClear={() => edit(setDeadline, node, "")}
       />
+      {/* Span / duration — a plain active-timestamp range. Same-day with
+          times → vertical bar on the timeline; multi-day → horizontal bar. */}
+      <SpanField
+        startIso={node.timestamp}
+        endIso={node.timestampEnd}
+        onCommit={(s, e) => setNodeRange(node, s, e)}
+        onClear={() => setNodeRange(node, "", "")}
+      />
 
       {/* Tags */}
       <div>
@@ -291,6 +300,112 @@ function DateField({
             ✕
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** Editor for a node's duration/span (a plain active-timestamp range).
+ *  Start + end, each a date and an optional time. Leaving the end blank
+ *  makes it a single timestamp; clearing the start removes the span. */
+function SpanField({
+  startIso,
+  endIso,
+  onCommit,
+  onClear,
+}: {
+  startIso: string | null;
+  endIso: string | null;
+  onCommit: (start: string, end: string) => void;
+  onClear: () => void;
+}) {
+  const isoDate = (s: string | null) => (s ? s.slice(0, 10) : "");
+  const isoTime = (s: string | null) => (s && s.includes("T") ? s.slice(11, 16) : "");
+
+  const [sDate, setSDate] = useState(isoDate(startIso));
+  const [sTime, setSTime] = useState(isoTime(startIso));
+  const [eDate, setEDate] = useState(isoDate(endIso));
+  const [eTime, setETime] = useState(isoTime(endIso));
+
+  // Resync the inputs whenever the underlying node values change (e.g. after
+  // an edit round-trips, or a different node is selected).
+  useEffect(() => {
+    setSDate(isoDate(startIso));
+    setSTime(isoTime(startIso));
+    setEDate(isoDate(endIso));
+    setETime(isoTime(endIso));
+  }, [startIso, endIso]);
+
+  const commit = (
+    sd: string,
+    st: string,
+    ed: string,
+    et: string,
+  ) => {
+    if (!sd) {
+      onClear();
+      return;
+    }
+    const startStr = st ? `${sd} ${st}` : sd;
+    const endStr = ed ? (et ? `${ed} ${et}` : ed) : "";
+    onCommit(startStr, endStr);
+  };
+
+  const has = !!startIso;
+  return (
+    <div>
+      <Lbl>Span (start → end)</Lbl>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ width: 30, fontSize: 11, color: "var(--c-text-dim)" }}>From</span>
+          <input
+            type="date"
+            value={sDate}
+            onChange={(e) => {
+              setSDate(e.target.value);
+              commit(e.target.value, sTime, eDate, eTime);
+            }}
+            style={{ ...input, flex: 1 }}
+          />
+          <input
+            type="time"
+            value={sTime}
+            onChange={(e) => {
+              setSTime(e.target.value);
+              commit(sDate, e.target.value, eDate, eTime);
+            }}
+            style={{ ...input, width: 92 }}
+            disabled={!sDate}
+          />
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ width: 30, fontSize: 11, color: "var(--c-text-dim)" }}>To</span>
+          <input
+            type="date"
+            value={eDate}
+            onChange={(e) => {
+              setEDate(e.target.value);
+              commit(sDate, sTime, e.target.value, eTime);
+            }}
+            style={{ ...input, flex: 1 }}
+            disabled={!sDate}
+          />
+          <input
+            type="time"
+            value={eTime}
+            onChange={(e) => {
+              setETime(e.target.value);
+              commit(sDate, sTime, eDate, e.target.value);
+            }}
+            style={{ ...input, width: 92 }}
+            disabled={!eDate}
+          />
+          {has && (
+            <button onClick={onClear} style={clearBtn} title="Clear span">
+              ✕
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
