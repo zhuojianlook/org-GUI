@@ -274,6 +274,18 @@ function saveGcalGhosts(file: string | null, g: Record<string, GcalGhost>) {
     /* non-fatal */
   }
 }
+/** Load FILE's ghosts, dropping any whose node no longer exists in DOC (e.g.
+ *  the event was deleted, or already reconciled by a real sync). Without this,
+ *  a phantom ghost would inflate the "Sync (N)" count forever with nothing the
+ *  user can click. Persists the pruned set so the GC is durable. */
+function pruneGcalGhosts(file: string | null, doc: OrgDoc): Record<string, GcalGhost> {
+  const all = loadGcalGhosts(file);
+  const ids = new Set(doc.nodes.map((n) => n.orgId).filter((x): x is string => !!x));
+  const kept: Record<string, GcalGhost> = {};
+  for (const [orgId, g] of Object.entries(all)) if (ids.has(orgId)) kept[orgId] = g;
+  if (Object.keys(kept).length !== Object.keys(all).length) saveGcalGhosts(file, kept);
+  return kept;
+}
 
 /** Tag names that are DERIVED from a Google calendar (a calendar's summary).
  *  These are auto-applied to imported events and must NOT be user-removable. */
@@ -703,7 +715,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         highlightDepth: new Map<string, number>(),
         highlightDone: new Set<string>(),
         timelineSelectedChip: null,
-        gcalGhosts: loadGcalGhosts(file),
+        gcalGhosts: pruneGcalGhosts(file, doc),
+        // A failed-sync badge belongs to the file it failed on; don't let it
+        // ghost onto another file's Sync button.
+        gcalSyncError: null,
+        gcalSyncing: false,
       });
       rememberLastFile(file);
     } catch (e) {
@@ -1100,7 +1116,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     const clientId = (usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_ID : cfg.clientId ?? "").trim();
     const clientSecret = (usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_SECRET : cfg.clientSecret ?? "").trim();
     const account = (cfg.account ?? "").trim();
-    const syncFile = (cfg.file ?? file ?? "").trim();
+    // Push the file the ghosts actually belong to — the ACTIVE file (where the
+    // moved events physically live). Using cfg.file here would, when the two
+    // diverge, clear the wrong file's ghosts and yank the tab. Normally they're
+    // the same file anyway.
+    const syncFile = (file ?? cfg.file ?? "").trim();
     const cals = cfg.selectedCalendars?.length ? cfg.selectedCalendars : account ? [account] : [];
     if (!clientId || !clientSecret || !account || !syncFile || cals.length === 0) {
       set({
@@ -1355,7 +1375,29 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ loading: true, error: null, file, openTabs: nextTabs });
     try {
       const doc = await apiCreateOrg(file, title);
-      set({ doc, loading: false, selectedId: null });
+      // Reset ALL per-file state for the new file, the same way loadFile does —
+      // otherwise the previous tab's positions / milestones / tag colours /
+      // ghosts bleed onto the new canvas until a reload.
+      set({
+        doc: reapplyGcalTags(doc),
+        loading: false,
+        selectedId: null,
+        expanded: loadExpanded(file) ?? new Set<string>(),
+        rootPositions: loadPositions(file),
+        milestones: loadMilestones(file),
+        timelineView: loadTimelineView(file),
+        tableCollapsed: loadTableCollapsed(file),
+        tagColors: applyGcalCalendarTags(doc, loadTagColors(file)),
+        tagFilter: null,
+        multiSelected: new Set<string>(),
+        editBegin: 0,
+        highlightDepth: new Map<string, number>(),
+        highlightDone: new Set<string>(),
+        timelineSelectedChip: null,
+        gcalGhosts: pruneGcalGhosts(file, doc),
+        gcalSyncError: null,
+        gcalSyncing: false,
+      });
       rememberLastFile(file);
     } catch (e) {
       set({ error: String(e), loading: false });

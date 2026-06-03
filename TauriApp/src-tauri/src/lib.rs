@@ -788,6 +788,10 @@ async fn org_call(
     .await
     .map_err(|e| format!("Join error: {e}"))?;
 
+    // Clean up the per-call temp result file on EVERY path. The success path
+    // already removed it inline; this catches read-failure and non-success
+    // exits so tiny JSON files can't accumulate under repeated failures.
+    let _ = std::fs::remove_file(&tmp);
     result
 }
 
@@ -1080,8 +1084,14 @@ async fn emacs_term_resize(
 
 #[tauri::command]
 async fn emacs_term_close(terms: tauri::State<'_, Terminals>, id: u64) -> Result<(), String> {
-    if let Some(mut s) = terms.0.lock().unwrap().remove(&id) {
+    // Take the session out of the map first so the lock isn't held across the
+    // (brief) blocking wait. kill() THEN wait() so the emacsclient child is
+    // reaped instead of left as a zombie until app exit (matches the
+    // kill+wait pattern used everywhere else).
+    let session = terms.0.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+    if let Some(mut s) = session {
         let _ = s.child.kill();
+        let _ = s.child.wait();
     }
     Ok(())
 }

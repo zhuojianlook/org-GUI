@@ -11,7 +11,35 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.63")
+(defconst org-gui-bridge-version "0.2.64")
+
+;;;; ---- Safe file visiting --------------------------------------------------
+;; All reading/editing goes through one entry point so we can (a) refuse to run
+;; a file's `Local Variables: eval:' block or auto-evaluate babel — closing a
+;; code-execution channel via crafted .org content (e.g. a malicious calendar
+;; event org-gcal writes verbatim into the file the daemon re-parses), and (b)
+;; refresh the buffer when the file changed on disk underneath us (the user's
+;; own Emacs, org-gcal in another process, git, or Dropbox sync) so a stale
+;; buffer never silently clobbers external edits on the next save.
+
+(defun org-gui--visit (file)
+  "Return FILE's buffer for reading/editing, defensively.
+Visits with `enable-local-variables' = :safe (apply only safe-listed locals,
+never an `eval:' block), dir-locals off, and babel auto-eval disabled. If the
+file changed on disk and our buffer has no unsaved edits, reload it first so we
+do not overwrite the external change."
+  (let ((enable-local-variables :safe)
+        (enable-dir-local-variables nil)
+        (org-confirm-babel-evaluate t))
+    (let ((buf (find-file-noselect file)))
+      (with-current-buffer buf
+        (when (and (buffer-file-name)
+                   (file-exists-p (buffer-file-name))
+                   (not (buffer-modified-p))
+                   (not (verify-visited-file-modtime buf)))
+          (let ((inhibit-message t))
+            (revert-buffer t t t))))
+      buf)))
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -200,7 +228,7 @@ hang every parse. Each heading's processing is wrapped in
 (defun org-gui-parse (file)
   "Parse FILE and return JSON {file, title, nodes:[...]}.
 Opens (or reuses) the file buffer in this Emacs so edits round-trip."
-  (with-current-buffer (find-file-noselect file)
+  (with-current-buffer (org-gui--visit file)
     (org-gui--doc-json file)))
 
 ;;;; ---- Editing ------------------------------------------------------------
@@ -266,7 +294,7 @@ buffer is never touched (so we don't spuriously mark it modified)."
 (defun org-gui--with-heading (file begin body-fn)
   "In FILE's buffer, move to the heading at BEGIN, run BODY-FN, save, reparse."
   (let ((begin (org-gui--num begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -286,7 +314,7 @@ so silently, leaving the state unchanged. From the GUI that looks like
 the click did nothing. Signal a diagnostic error instead so the frontend
 can surface a toast explaining what's blocking the change."
   (let ((begin (org-gui--num begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -339,64 +367,94 @@ into a canonical org INNER timestamp body \"2026-06-10 Wed\" /
            (has-time (string-match-p "[0-9]\\{1,2\\}:[0-9]\\{2\\}" s)))
       (format-time-string (if has-time "%Y-%m-%d %a %H:%M" "%Y-%m-%d %a") time))))
 
+(defconst org-gui--standalone-ts-re
+  "\\`[ \t]*<[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}[^>\n]*>\\(?:--<[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}[^>\n]*>\\)?[ \t]*\\'"
+  "Matches a buffer line whose ENTIRE content is one active timestamp, or an
+active timestamp range (e.g. \"<2026-06-10 Wed 14:00-15:30>\" or \"<a>--<b>\").
+Used to find the span line we may rewrite WITHOUT matching prose that merely
+mentions a date or a <<radio target>>.")
+
+(defun org-gui--strip-body-active-timestamps ()
+  "Delete standalone active-timestamp LINES from the current entry's body,
+leaving drawers (:org-gcal:, :LOGBOOK:, …) and prose lines that merely contain
+an inline timestamp untouched. Point may be anywhere in the entry. This is the
+DATA-SAFE replacement for the old \"delete every line matching org-ts-regexp
+between the metadata and the next heading\" loop, which silently destroyed the
+user's notes and the org-gcal description drawer on a routine timeline drag."
+  (org-back-to-heading t)
+  (let* ((hp (point))
+         (limit-fn (lambda () (save-excursion
+                                (goto-char hp)
+                                (if (outline-next-heading) (point) (point-max))))))
+    (save-excursion
+      ;; Start scanning right after planning + the property drawer (NOT `t',
+      ;; which would also skip the :org-gcal: content drawer and hide the
+      ;; standalone timestamp that sits before it).
+      (goto-char (save-excursion (org-end-of-meta-data) (point)))
+      (let ((in-drawer nil)
+            (limit (funcall limit-fn)))
+        (while (< (point) limit)
+          (let ((line (buffer-substring-no-properties
+                       (line-beginning-position) (line-end-position))))
+            (cond
+             ;; Closing a drawer we are inside.
+             ((and in-drawer (string-match-p "\\`[ \t]*:END:[ \t]*\\'" line))
+              (setq in-drawer nil) (forward-line 1))
+             ;; Anywhere inside a drawer — never touch its contents.
+             (in-drawer (forward-line 1))
+             ;; A drawer opener (:NAME:) — step in, preserve everything within.
+             ((and (string-match-p "\\`[ \t]*:[A-Za-z][A-Za-z0-9_@#%-]*:[ \t]*\\'" line)
+                   (not (string-match-p "\\`[ \t]*:END:[ \t]*\\'" line)))
+              (setq in-drawer t) (forward-line 1))
+             ;; A line that is ONLY an active timestamp — the one thing we remove.
+             ((string-match-p org-gui--standalone-ts-re line)
+              (delete-region (line-beginning-position)
+                             (min (1+ (line-end-position)) (point-max)))
+              (setq limit (funcall limit-fn)))
+             (t (forward-line 1)))))))))
+
+(defun org-gui--write-body-timestamp (ts)
+  "Replace the current entry's standalone body active-timestamp line(s) with
+TS (a fully-formed \"<...>\" / \"<...>--<...>\" string), or just remove them
+when TS is nil/empty. Drawers and prose are preserved (see
+`org-gui--strip-body-active-timestamps'). The new stamp is inserted at the top
+of the body, right after the metadata — matching org-gcal's own layout."
+  (org-back-to-heading t)
+  (org-gui--strip-body-active-timestamps)
+  (when (and ts (> (length ts) 0))
+    ;; Insert right after the property drawer / planning, BEFORE any content
+    ;; drawer (:org-gcal:) — org-gcal's own layout, so it parses the event time
+    ;; from this stamp rather than a date inside the description.
+    (goto-char (save-excursion (org-end-of-meta-data) (point)))
+    (insert ts "\n")))
+
 (defun org-gui-set-timestamp-range (file begin start end)
   "Set the entry at BEGIN to carry a plain active timestamp spanning START
 to END (a date range / duration), as the first line of the entry body.
   - START + END  → \"<start>--<end>\" (multi-day, or a same-day timed block)
   - START only   → \"<start>\" (single active timestamp)
   - both empty   → removes the entry's existing active timestamp
-Any pre-existing active timestamp in THIS entry's body is replaced;
-planning lines (SCHEDULED/DEADLINE/CLOSED) and child entries are left
-untouched. The app builds START/END from the start/end pickers."
+Only standalone active-timestamp lines are replaced; planning lines, drawers
+and the user's prose are left untouched. The app builds START/END from the
+start/end pickers."
   (org-gui--with-heading
    file begin
    (lambda ()
-     (org-back-to-heading t)
-     (let* ((hp (point))
-            (sfmt (org-gui--fmt-inner-ts start))
-            (efmt (org-gui--fmt-inner-ts end))
-            ;; The direct entry body ends at the next heading (child or
-            ;; sibling); recomputed inside the loop because deletions move it.
-            (next (save-excursion
-                    (goto-char hp)
-                    (if (outline-next-heading) (point) (point-max)))))
-       ;; Strip existing active timestamp(s) from the body region only.
-       (save-excursion
-         (goto-char (save-excursion (org-end-of-meta-data t) (point)))
-         (while (and (< (point) next) (re-search-forward org-ts-regexp next t))
-           (delete-region (line-beginning-position)
-                          (min (1+ (line-end-position)) (point-max)))
-           (setq next (save-excursion
-                        (goto-char hp)
-                        (if (outline-next-heading) (point) (point-max))))))
-       (when sfmt
-         (goto-char (save-excursion (org-end-of-meta-data t) (point)))
-         (insert (if efmt
-                     (format "<%s>--<%s>\n" sfmt efmt)
-                   (format "<%s>\n" sfmt))))))))
+     (let ((sfmt (org-gui--fmt-inner-ts start))
+           (efmt (org-gui--fmt-inner-ts end)))
+       (org-gui--write-body-timestamp
+        (and sfmt (if efmt (format "<%s>--<%s>" sfmt efmt) (format "<%s>" sfmt))))))))
 
 (defun org-gui--set-body-timestamp (start end)
   "At the current heading, replace the entry-body active timestamp with
 \"<START>--<END>\" (or \"<START>\"); empty START removes it. START/END are
-canonical inner-timestamp bodies as produced by `org-gui--fmt-inner-ts'."
-  (org-back-to-heading t)
-  (let* ((hp (point))
-         (next (save-excursion
-                 (goto-char hp)
-                 (if (outline-next-heading) (point) (point-max)))))
-    (save-excursion
-      (goto-char (save-excursion (org-end-of-meta-data t) (point)))
-      (while (and (< (point) next) (re-search-forward org-ts-regexp next t))
-        (delete-region (line-beginning-position)
-                       (min (1+ (line-end-position)) (point-max)))
-        (setq next (save-excursion
-                     (goto-char hp)
-                     (if (outline-next-heading) (point) (point-max))))))
-    (when (and start (> (length start) 0))
-      (goto-char (save-excursion (org-end-of-meta-data t) (point)))
-      (insert (if (and end (> (length end) 0))
-                  (format "<%s>--<%s>\n" start end)
-                (format "<%s>\n" start))))))
+canonical inner-timestamp bodies as produced by `org-gui--fmt-inner-ts'.
+Drawers and prose are preserved."
+  (org-gui--write-body-timestamp
+   (and start (> (length start) 0)
+        (if (and end (> (length end) 0))
+            (format "<%s>--<%s>" start end)
+          (format "<%s>" start)))))
 
 (defun org-gui-set-span (file begin start end)
   "Set a node's SPAN (duration) from START to END. START/END are
@@ -478,23 +536,10 @@ description drawers and any SCHEDULED/DEADLINE planning are left intact."
                  ((and e-date (not same-day))
                   (format "<%s>--<%s>"
                           (org-gui--fmt-inner-ts s) (org-gui--fmt-inner-ts e)))
-                 (t (format "<%s>" (org-gui--fmt-inner-ts s)))))
-            (hp (point))
-            (next (save-excursion
-                    (goto-char hp)
-                    (if (outline-next-heading) (point) (point-max)))))
-       ;; Strip existing body active timestamp line(s) only.
-       (save-excursion
-         (goto-char (save-excursion (org-end-of-meta-data t) (point)))
-         (while (and (< (point) next) (re-search-forward org-ts-regexp next t))
-           (delete-region (line-beginning-position)
-                          (min (1+ (line-end-position)) (point-max)))
-           (setq next (save-excursion
-                        (goto-char hp)
-                        (if (outline-next-heading) (point) (point-max))))))
-       (when ts
-         (goto-char (save-excursion (org-end-of-meta-data t) (point)))
-         (insert ts "\n"))))))
+                 (t (format "<%s>" (org-gui--fmt-inner-ts s))))))
+       ;; Rewrite only the standalone body timestamp line — the :org-gcal:
+       ;; description drawer and the user's notes are left intact.
+       (org-gui--write-body-timestamp ts)))))
 
 (defun org-gui-set-priority (file begin prio)
   "Set priority to PRIO (\"A\"/\"B\"/...), or remove it when PRIO is empty."
@@ -518,24 +563,39 @@ matching tick on the milestone timeline."
 
 (defun org-gui-archive (file begin)
   "Archive the subtree at BEGIN by moving it to FILE_archive (org's default
-archive location), then return the parsed (remaining) document."
+archive location), then return the parsed (remaining) document.
+The archive copy is written and saved to disk FIRST; the source subtree is
+deleted only after that succeeds — so if the archive write fails (unwritable
+path, permission denied, disk full) the subtree is never lost. Belt-and-braces,
+the deletion is wrapped so any later error re-inserts the text."
   (let ((begin (org-gui--num begin))
         (archive-file (concat file "_archive")))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
        (let* ((start (point))
               (end (save-excursion (org-end-of-subtree t t) (point)))
               (text (buffer-substring-no-properties start end)))
-         (delete-region start end)
-         (org-gui--refresh-cookies) ; recount the (now smaller) parent's cookie
+         ;; 1. Persist the archive copy and confirm it landed before touching
+         ;;    the source.
          (let ((coding-system-for-write 'utf-8))
            (with-current-buffer (find-file-noselect archive-file)
              (goto-char (point-max))
              (unless (bolp) (insert "\n"))
              (insert (string-trim-right text) "\n")
-             (save-buffer)))))
+             (save-buffer)))
+         ;; 2. Now remove the source subtree; restore it if anything throws
+         ;;    before we leave a consistent buffer.
+         (let ((done nil))
+           (unwind-protect
+               (progn
+                 (delete-region start end)
+                 (org-gui--refresh-cookies) ; recount the parent's cookie
+                 (setq done t))
+             (unless done
+               (goto-char start)
+               (insert text))))))
       (save-buffer)
       (org-gui--doc-json file))))
 
@@ -564,7 +624,7 @@ multi-select 'apply tag' action doesn't blow up the wire for big selections."
         (tag (string-trim tag)))
     (when (string-empty-p tag)
       (error "Tag must not be empty"))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (dolist (b begin-list)
          (ignore-errors
@@ -583,7 +643,7 @@ Lets the user type `TODO [#A] Title :tag:' directly; org re-parses it on save.
 If LINE has no leading stars, the original level's stars are prepended so the
 heading isn't accidentally demoted into body text."
   (let ((begin (org-gui--num begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -613,7 +673,7 @@ heading isn't accidentally demoted into body text."
 Uses org-refile so levels are adjusted automatically. Returns the doc."
   (let ((begin (org-gui--num begin))
         (target-begin (org-gui--num target-begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min target-begin (point-max)))
        (org-back-to-heading t)
@@ -631,7 +691,7 @@ Uses org-refile so levels are adjusted automatically. Returns the doc."
 Positive DELTA moves down, negative up. Returns the parsed document."
   (let ((begin (org-gui--num begin))
         (delta (org-gui--num delta)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -651,13 +711,13 @@ Positive DELTA moves down, negative up. Returns the parsed document."
 
 (defun org-gui-get-file (file)
   "Return JSON {text} with the entire buffer text of FILE."
-  (with-current-buffer (find-file-noselect file)
+  (with-current-buffer (org-gui--visit file)
     (json-serialize
      (list (cons 'text (buffer-substring-no-properties (point-min) (point-max)))))))
 
 (defun org-gui-set-file (file text)
   "Replace the entire buffer of FILE with TEXT, save, and return the doc."
-  (with-current-buffer (find-file-noselect file)
+  (with-current-buffer (org-gui--visit file)
     (erase-buffer)
     (insert text)
     (unless (bolp) (insert "\n"))
@@ -741,7 +801,7 @@ frame fully interactive (evil etc.)."
         (if (> begin 0)
             (ignore-errors (org-gui-edit-node file begin))
           (ignore-errors
-            (let ((buf (find-file-noselect file)))
+            (let ((buf (org-gui--visit file)))
               (with-current-buffer buf (widen))
               (org-gui--manage-buffer buf) ; live + on-save cookie refresh
               (switch-to-buffer buf))))))))
@@ -757,7 +817,7 @@ to it. Because it's a real (indirect) buffer, full org editing of the subtree
 works and the user's own view of the file isn't disturbed. `C-x C-s' saves the
 underlying file (indirect buffers have no file of their own)."
   (let* ((begin (org-gui--num begin))
-         (base (find-file-noselect file))
+         (base (org-gui--visit file))
          (name "*org-node*"))
     (with-current-buffer base (widen)) ; undo any prior narrowing of the base
     (when (get-buffer name) (kill-buffer name))
@@ -806,7 +866,7 @@ Uses markers so that creating FROM's :ID: drawer (which shifts buffer
 positions) doesn't invalidate TO's location."
   (let ((from-begin (org-gui--num from-begin))
         (to-begin (org-gui--num to-begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (let ((from-m (copy-marker (min from-begin (point-max))))
              (to-m (copy-marker (min to-begin (point-max)))))
@@ -832,7 +892,7 @@ positions) doesn't invalidate TO's location."
 When the list becomes empty the property is deleted. Returns the document."
   (let ((from-begin (org-gui--num from-begin))
         (to-begin (org-gui--num to-begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min from-begin (point-max)))
        (org-back-to-heading t)
@@ -857,7 +917,7 @@ heading, matching what the GUI shows on the node. Refreshes cookies, saves,
 and returns the parsed document."
   (let ((begin (org-gui--num begin))
         (index (org-gui--num index)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -876,7 +936,7 @@ and returns the parsed document."
 (defun org-gui-get-subtree (file begin)
   "Return JSON {text} with the exact org text of the subtree at BEGIN."
   (let ((begin (org-gui--num begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -889,7 +949,7 @@ and returns the parsed document."
   "Replace the whole subtree at BEGIN with TEXT, save, and return the doc.
 A trailing newline is ensured so following content isn't merged in."
   (let ((begin (org-gui--num begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -908,7 +968,7 @@ A trailing newline is ensured so following content isn't merged in."
 (defun org-gui-create (file title)
   "Create FILE (if it doesn't exist / is empty) with an optional #+TITLE,
 save it, and return the parsed (empty) document."
-  (with-current-buffer (find-file-noselect file)
+  (with-current-buffer (org-gui--visit file)
     (when (= (buffer-size) 0)
       (insert "#+TITLE: " (if (string-empty-p title) "Untitled" title) "\n\n"))
     (save-buffer)
@@ -920,7 +980,7 @@ child of the heading at that position; otherwise append a top-level heading.
 Returns the freshly parsed document."
   (let ((parent-begin (org-gui--num parent-begin))
         (title (if (string-empty-p title) "New heading" title)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (if (> parent-begin 0)
            (let (lvl parent-line)
@@ -948,7 +1008,7 @@ Returns the freshly parsed document."
 (defun org-gui-delete (file begin)
   "Delete the subtree of the heading at BEGIN. Returns the parsed document."
   (let ((begin (org-gui--num begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -962,7 +1022,7 @@ Returns the freshly parsed document."
 planning lines, and property drawer intact. Used by the inline table editor
 to round-trip cell edits back to the org file without disturbing children."
   (let ((begin (org-gui--num begin)))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (goto-char (min begin (point-max)))
        (org-back-to-heading t)
@@ -985,7 +1045,7 @@ org-mode table. When PARENT-BEGIN is 0, the heading goes at top level. The
 table syntax is minimally valid; Emacs aligns it on first TAB inside it."
   (let ((parent-begin (org-gui--num parent-begin))
         (table "| Col 1 | Col 2 | Col 3 |\n|-------+-------+-------|\n|       |       |       |\n|       |       |       |\n"))
-    (with-current-buffer (find-file-noselect file)
+    (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
        (if (> parent-begin 0)
            (let (lvl parent-line)
@@ -1018,6 +1078,17 @@ table syntax is minimally valid; Emacs aligns it on first TAB inside it."
 (defconst org-gui--gcal-dir (expand-file-name "~/.org-gui/elpa")
   "Self-contained package dir for org-gcal and its dependencies.")
 
+(defun org-gui--scrub-secrets (s)
+  "Mask OAuth token/secret values inside string S so an error message can be
+shown (or screenshotted) without exposing credentials. Truncates long output."
+  (let ((s (or s "")))
+    (dolist (re '("\\(\"\\(?:access\\|refresh\\|id\\)_token\"[ \t]*:[ \t]*\"\\)[^\"]*"
+                  "\\(\"client_secret\"[ \t]*:[ \t]*\"\\)[^\"]*"
+                  "\\(client_secret=\\)[^&\"' \t\n]*"
+                  "\\(\\(?:access\\|refresh\\)_token=\\)[^&\"' \t\n]*"))
+      (setq s (replace-regexp-in-string re "\\1<redacted>" s t)))
+    (truncate-string-to-width s 300 nil nil "…")))
+
 (defun org-gui--gcal-curl-post (url data)
   "POST form-encoded DATA to URL with curl, returning parsed JSON (alist).
 This replaces oauth2-auto's `url-retrieve-synchronously' for the OAuth
@@ -1041,7 +1112,7 @@ it doesn't touch Emacs's network event loop — so it just works."
                       (error nil))))
         (or parsed
             (error "OAuth token request failed (curl status %s): %s"
-                   status (buffer-string)))))))
+                   status (org-gui--scrub-secrets (buffer-string))))))))
 
 (defun org-gui--install-oauth2-curl-request ()
   "Redefine `oauth2-auto--request' to POST via curl (see
@@ -1061,8 +1132,14 @@ deadlocking `url-retrieve-synchronously'. Idempotent; no-op without curl."
                (response (org-gui--gcal-curl-post url data)))
           (cond
            ((assoc 'error response)
-            (error "OAuth error.  Request: %s.  Response: %s"
-                   (pp-to-string data-alist) (pp-to-string response)))
+            ;; Surface ONLY Google's error/error_description — never the
+            ;; request alist (client_secret) or the response (refresh_token),
+            ;; which would otherwise be painted onto the GUI error toast and
+            ;; any screenshot of it.
+            (error "Google OAuth error: %s"
+                   (or (cdr (assoc 'error_description response))
+                       (cdr (assoc 'error response))
+                       "the token request was rejected")))
            (t response))))
      t)
     t))
@@ -1082,6 +1159,16 @@ app-private + owner-only, this is an acceptable tradeoff for a working sync.")
         (goto-char (point-min))
         (read (current-buffer))))))
 
+(defun org-gui--save-token-db (db)
+  "Persist token DB to `org-gui--gcal-token-file', CREATED owner-only (0600)
+from the start. `with-file-modes' sets the creation mask so there is no
+world-readable window between create and chmod (the previous TOCTOU)."
+  (with-file-modes #o600
+    (with-temp-file org-gui--gcal-token-file
+      (let ((print-level nil) (print-length nil))
+        (prin1 db (current-buffer)))))
+  (ignore-errors (set-file-modes org-gui--gcal-token-file #o600)))
+
 (defun org-gui--install-token-store-override ()
   "Replace oauth2-auto's plstore read/write with a plaintext Lisp file so the
 token actually PERSISTS (the encrypted plstore write deadlocks the daemon on
@@ -1094,10 +1181,7 @@ a GPG prompt). Idempotent."
                (db (seq-remove (lambda (e) (equal (car e) id))
                                (org-gui--gcal-token-db))))
           (push (cons id plist) db)
-          (with-temp-file org-gui--gcal-token-file
-            (let ((print-level nil) (print-length nil))
-              (prin1 db (current-buffer))))
-          (ignore-errors (set-file-modes org-gui--gcal-token-file #o600))
+          (org-gui--save-token-db db)
           plist)))
     (defalias 'oauth2-auto--plstore-read
       (lambda (username provider)
@@ -1210,10 +1294,7 @@ in CALENDAR-IDS so every selected calendar reuses the single sign-in."
           (let ((id (oauth2-auto--compute-id cid 'org-gcal)))
             (setq db (cons (cons id acct)
                            (seq-remove (lambda (e) (equal (car e) id)) db)))))
-        (with-temp-file org-gui--gcal-token-file
-          (let ((print-level nil) (print-length nil))
-            (prin1 db (current-buffer))))
-        (ignore-errors (set-file-modes org-gui--gcal-token-file #o600))))))
+        (org-gui--save-token-db db)))))
 
 (defun org-gui--gcal-browse-with-chooser (orig-fn url &rest args)
   "Append `prompt=select_account' to Google OAuth authorize URLs so the
@@ -1231,7 +1312,7 @@ Non-Google URLs pass through untouched. Installed as :around advice on
                       "prompt=select_account%20consent")))
   (apply orig-fn url args))
 
-(defun org-gui--gcal-wait-deferred (d)
+(defun org-gui--gcal-wait-deferred (d &optional timeout)
   "Block until deferred.el object D settles, polling with `sleep-for'.
 Why not `deferred:sync!': it drives the wait with sit-for +
 accept-process-output, under which a NESTED `url-retrieve-synchronously'
@@ -1239,14 +1320,24 @@ accept-process-output, under which a NESTED `url-retrieve-synchronously'
 fetch) DEADLOCKS in our headless daemon, hanging at \"Contacting host:
 oauth2.googleapis.com\". Polling with `sleep-for' lets the nested
 synchronous request complete (verified). Resignals errors like
-`deferred:sync!'."
-  (let ((result 'org-gui--pending) (uncaught nil))
+`deferred:sync!'.
+
+Gives up after TIMEOUT seconds (default 240) and signals an error, so an
+abandoned browser consent flow or a never-settling request can't pin the
+daemon's main loop indefinitely (the Rust side only reaps the emacsclient
+child, not the elisp running inside the daemon)."
+  (let ((result 'org-gui--pending) (uncaught nil)
+        (deadline (+ (float-time) (or timeout 240))))
     (deferred:try
       (deferred:nextc d (lambda (x) (setq result x)))
       :catch (lambda (e) (setq uncaught e)))
-    (while (and (eq result 'org-gui--pending) (null uncaught))
+    (while (and (eq result 'org-gui--pending) (null uncaught)
+                (< (float-time) deadline))
       (sleep-for 0.2))
     (when uncaught (deferred:resignal uncaught))
+    (when (eq result 'org-gui--pending)
+      (error "Google Calendar sync timed out after %ds — if a sign-in page is open, finish it and sync again"
+             (round (or timeout 240))))
     result))
 
 (defun org-gui-gcal-sync (client-id client-secret account calendar-ids file two-way)
