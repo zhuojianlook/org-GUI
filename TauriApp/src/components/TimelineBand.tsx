@@ -39,6 +39,27 @@ function isoOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** Minutes-since-midnight for a "HH:MM" string (0 when null/invalid). */
+function minOfTime(t: string | null): number {
+  if (!t) return 0;
+  const [h, m] = t.split(":").map((s) => parseInt(s, 10));
+  return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+}
+
+/** "HH:MM" from an absolute epoch-ms instant (local time). */
+function hhmmOf(ms: number): string {
+  const dt = new Date(ms);
+  return `${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+}
+
+/** Format an absolute instant as an org-span endpoint string for setSpan:
+ *  "YYYY-MM-DD" (date-only) or "YYYY-MM-DD HH:MM" when `withTime`. */
+function fmtSpanStr(ms: number, withTime: boolean): string {
+  const dt = new Date(ms);
+  const date = isoOf(dt);
+  return withTime ? `${date} ${hhmmOf(ms)}` : date;
+}
+
 // Doom-style neutral grey used when a chip's node has no coloured tag —
 // matches `font-lock-comment-face` from doom-one so it sits naturally
 // against the canvas.
@@ -216,7 +237,7 @@ export default function TimelineBand() {
   const timelineView = useOrgStore((s) => s.timelineView);
   const setTimelineView = useOrgStore((s) => s.setTimelineView);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
-  const setNodeRange = useOrgStore((s) => s.setNodeRange);
+  const setNodeSpan = useOrgStore((s) => s.setNodeSpan);
   const timelineSelectedChip = useOrgStore((s) => s.timelineSelectedChip);
   const setTimelineSelectedChip = useOrgStore((s) => s.setTimelineSelectedChip);
   const tagColors = useOrgStore((s) => s.tagColors);
@@ -276,6 +297,26 @@ export default function TimelineBand() {
     iso: string;
     time: string;
   } | null>(null);
+
+  // A duration BAR (span) is selected by clicking it. Distinct from
+  // timelineSelectedChip (which targets point chips and whose arrow-key nudge
+  // rewrites SCHEDULED to a single point — that would destroy a span). Only
+  // one of the two selections is ever non-null at a time.
+  const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  // Optimistic ABSOLUTE preview for span shifts/resizes (mirrors the point
+  // chip's pendingNudge): full start/end instants so the bar sits exactly
+  // where the user put it across the bridge round-trip, with no oscillation.
+  const [spanPreview, setSpanPreview] = useState<{
+    nodeId: string;
+    startMs: number; // absolute instant of the span start
+    endMs: number; // absolute instant of the span end
+    hasStartTime: boolean;
+    hasEndTime: boolean;
+  } | null>(null);
+  const spanPreviewRef = useRef<typeof spanPreview>(null);
+  useEffect(() => {
+    spanPreviewRef.current = spanPreview;
+  }, [spanPreview]);
 
   // All node-date ticks (scheduled / deadline). We carry the node id so a
   // double-click on a tick can focus that node in the graph, and the
@@ -372,6 +413,18 @@ export default function TimelineBand() {
     return false;
   };
 
+  // Live mirrors so the span arrow-key effect / resize drag can read the
+  // latest doc + computed spans without re-subscribing on every doc change
+  // (the effect is keyed on selectedSpanId only).
+  const docRef = useRef(doc);
+  useEffect(() => {
+    docRef.current = doc;
+  }, [doc]);
+  const nodeDatesRef = useRef(nodeDates);
+  useEffect(() => {
+    nodeDatesRef.current = nodeDates;
+  }, [nodeDates]);
+
   // Visible window: either "Fit" (auto-range over all dates) or a fixed-span
   // window centered on timelineView.centerMs.
   const [startMs, endMs] = useMemo(() => {
@@ -422,6 +475,7 @@ export default function TimelineBand() {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("button,input,[data-pin]")) return;
     if (timelineSelectedChip) setTimelineSelectedChip(null);
+    if (selectedSpanId) setSelectedSpanId(null);
     if (timelineView.zoom === "fit") return;
     panRef.current = { startX: e.clientX, startCenterMs: timelineView.centerMs };
     const onMove = (ev: PointerEvent) => {
@@ -703,6 +757,143 @@ export default function TimelineBand() {
     };
   }, [timelineSelectedChip, doc, scheduleNode, setTimelineSelectedChip]);
 
+  // ── Arrow-key SHIFT for a selected span bar ───────────────────────────────
+  // When a duration bar is selected (selectedSpanId), the arrows move the
+  // WHOLE span — both endpoints by the same calendar delta, so the span keeps
+  // its length: ←/→ ±1 day, ↑/↓ ±15 min. Same absolute-preview-on-keyup
+  // pattern as the point-chip nudge: one bridge call per gesture, no bounce.
+  const heldSpanKeys = useRef(new Set<string>());
+  const spanIdleTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!selectedSpanId) {
+      heldSpanKeys.current.clear();
+      if (spanIdleTimer.current) {
+        window.clearTimeout(spanIdleTimer.current);
+        spanIdleTimer.current = null;
+      }
+      return;
+    }
+
+    // Resolve the live base span (start/end instants + which endpoints carry a
+    // time) from the latest computed nodeDates.
+    const baseSpan = () => {
+      const d = nodeDatesRef.current.find(
+        (x) => x.nodeId === selectedSpanId && hasDuration(x),
+      );
+      if (!d) return null;
+      return {
+        startMs: d.ms + minOfTime(d.timeOfDay) * 60000,
+        endMs: (d.msEnd ?? d.ms) + minOfTime(d.timeOfDayEnd ?? d.timeOfDay) * 60000,
+        hasStartTime: !!d.timeOfDay,
+        hasEndTime: !!d.timeOfDayEnd,
+      };
+    };
+
+    const commit = () => {
+      if (spanIdleTimer.current) {
+        window.clearTimeout(spanIdleTimer.current);
+        spanIdleTimer.current = null;
+      }
+      const cur = spanPreviewRef.current;
+      if (!cur || cur.nodeId !== selectedSpanId) return;
+      const node = docRef.current?.nodes.find((n) => n.id === cur.nodeId);
+      if (!node) {
+        setSpanPreview(null);
+        return;
+      }
+      const sStr = fmtSpanStr(cur.startMs, cur.hasStartTime);
+      const eStr = fmtSpanStr(cur.endMs, cur.hasEndTime || cur.hasStartTime);
+      const committedStart = cur.startMs;
+      Promise.resolve(setNodeSpan(node, sStr, eStr))
+        .catch(() => {})
+        .finally(() => {
+          setSpanPreview((p) =>
+            p && p.nodeId === cur.nodeId && p.startMs === committedStart ? null : p,
+          );
+        });
+    };
+
+    const armIdleCommit = () => {
+      if (spanIdleTimer.current) window.clearTimeout(spanIdleTimer.current);
+      spanIdleTimer.current = window.setTimeout(commit, 800);
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable) return;
+      if (e.key === "Escape") {
+        setSpanPreview(null);
+        heldSpanKeys.current.clear();
+        if (spanIdleTimer.current) {
+          window.clearTimeout(spanIdleTimer.current);
+          spanIdleTimer.current = null;
+        }
+        setSelectedSpanId(null);
+        return;
+      }
+      let ddate = 0;
+      let dminutes = 0;
+      if (e.key === "ArrowLeft") ddate = -1;
+      else if (e.key === "ArrowRight") ddate = 1;
+      else if (e.key === "ArrowUp") dminutes = -15;
+      else if (e.key === "ArrowDown") dminutes = 15;
+      else return;
+      e.preventDefault();
+      heldSpanKeys.current.add(e.key);
+      // Shift BOTH endpoints by the same calendar delta (date math handles DST
+      // cleanly vs raw ms). Base from the live preview if present, else the
+      // committed span.
+      const cur = spanPreviewRef.current;
+      const from =
+        cur && cur.nodeId === selectedSpanId
+          ? { startMs: cur.startMs, endMs: cur.endMs, hasStartTime: cur.hasStartTime, hasEndTime: cur.hasEndTime }
+          : baseSpan();
+      if (!from) return;
+      const shift = (ms: number) => {
+        const dt = new Date(ms);
+        if (ddate) dt.setDate(dt.getDate() + ddate);
+        if (dminutes) dt.setMinutes(dt.getMinutes() + dminutes);
+        return dt.getTime();
+      };
+      setSpanPreview({
+        nodeId: selectedSpanId,
+        startMs: shift(from.startMs),
+        endMs: shift(from.endMs),
+        hasStartTime: from.hasStartTime,
+        hasEndTime: from.hasEndTime,
+      });
+      armIdleCommit();
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (
+        e.key !== "ArrowLeft" &&
+        e.key !== "ArrowRight" &&
+        e.key !== "ArrowUp" &&
+        e.key !== "ArrowDown"
+      )
+        return;
+      heldSpanKeys.current.delete(e.key);
+      if (heldSpanKeys.current.size === 0) commit();
+    };
+
+    const onBlur = () => {
+      heldSpanKeys.current.clear();
+      commit();
+    };
+
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+      commit();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSpanId, setNodeSpan]);
+
   /** Drag a task chip on the timeline to reschedule it. X → date,
    *  Y → time of day. Sub-threshold gestures become a click that focuses
    *  the node in the graph; past-threshold gestures commit a new
@@ -740,6 +931,7 @@ export default function TimelineBand() {
         // Sub-threshold gesture = click → select this chip (so the arrow-key
         // nudge handler kicks in) AND focus the node in the graph.
         setTimelineSelectedChip({ nodeId: info.nodeId, isDeadline: info.deadline });
+        if (selectedSpanId) setSelectedSpanId(null);
         window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: info.nodeId } }));
         return;
       }
@@ -758,10 +950,12 @@ export default function TimelineBand() {
     window.addEventListener("pointerup", up);
   };
 
-  /** Drag a DURATION BAR to move the whole span. The cursor's date+time
+  /** Drag a DURATION BAR to move the WHOLE span. The cursor's date+time
    *  becomes the new START; the END shifts by the same delta so the span
-   *  keeps its length. Sub-threshold = a click that focuses the node.
-   *  Writes back through the right org field for the bar's kind. */
+   *  keeps its length. Sub-threshold = a click that SELECTS the bar (gold
+   *  ring) so the arrow-key shift handler takes over, and focuses the node.
+   *  Both kinds commit through the unified setNodeSpan, which routes
+   *  same-day → SCHEDULED time-range and multi-day → plain timestamp range. */
   const onBarDown = (
     e: React.PointerEvent,
     d: (typeof nodeDates)[number],
@@ -775,21 +969,8 @@ export default function TimelineBand() {
     let dragging = false;
     const hasStartTime = !!d.timeOfDay;
     const hasEndTime = !!d.timeOfDayEnd;
-    const minOf = (t: string | null) => {
-      if (!t) return 0;
-      const [h, m] = t.split(":").map((s) => parseInt(s, 10));
-      return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
-    };
-    const oldStart = d.ms + minOf(d.timeOfDay) * 60000;
-    const oldEnd = (d.msEnd ?? d.ms) + minOf(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
-    const fmt = (ms: number, withTime: boolean) => {
-      const dt = new Date(ms);
-      const date = isoOf(dt);
-      if (!withTime) return date;
-      const hh = String(dt.getHours()).padStart(2, "0");
-      const mm = String(dt.getMinutes()).padStart(2, "0");
-      return `${date} ${hh}:${mm}`;
-    };
+    const oldStart = d.ms + minOfTime(d.timeOfDay) * 60000;
+    const oldEnd = (d.msEnd ?? d.ms) + minOfTime(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
     const move = (ev: PointerEvent) => {
       if (!dragging) {
         if (Math.abs(ev.clientX - startX) < 4 && Math.abs(ev.clientY - startY) < 4) return;
@@ -797,51 +978,123 @@ export default function TimelineBand() {
       }
       const r = railRef.current?.getBoundingClientRect();
       if (!r) return;
-      const dt = dateAtClientX(ev.clientX);
-      const time = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
-      setChipGhost({
+      // New start from the cursor; the span shifts rigidly so we also preview
+      // the end. The bar follows under the cursor via spanPreview.
+      const ndate = dateAtClientX(ev.clientX);
+      const ntimeStr = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
+      const newStartMs = startOfDay(ndate).getTime() + minOfTime(ntimeStr) * 60000;
+      const delta = newStartMs - oldStart;
+      setSpanPreview({
         nodeId: d.nodeId,
-        deadline: d.deadline,
-        title: d.title,
-        color: d.color,
-        x: ev.clientX,
-        y: ev.clientY,
-        iso: `${isoOf(dt)} ${time}`,
-        time,
+        startMs: newStartMs,
+        endMs: oldEnd + delta,
+        hasStartTime,
+        hasEndTime,
       });
     };
     const up = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      setChipGhost(null);
-      const node = doc?.nodes.find((n) => n.id === d.nodeId);
-      if (!node) return;
+      const node = docRef.current?.nodes.find((n) => n.id === d.nodeId);
       if (!dragging) {
-        // Click → focus the node in the graph.
+        // Click → select this bar (enables arrow-key shift) + focus the node.
+        setSpanPreview(null);
+        setSelectedSpanId(d.nodeId);
+        if (timelineSelectedChip) setTimelineSelectedChip(null);
         window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: d.nodeId } }));
         return;
       }
+      if (!node) {
+        setSpanPreview(null);
+        return;
+      }
       const r = railRef.current?.getBoundingClientRect();
-      if (!r) return;
+      if (!r) {
+        setSpanPreview(null);
+        return;
+      }
       const ndate = dateAtClientX(ev.clientX);
       const ntimeStr = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
-      const newStartMs = startOfDay(ndate).getTime() + minOf(ntimeStr) * 60000;
+      const newStartMs = startOfDay(ndate).getTime() + minOfTime(ntimeStr) * 60000;
       const delta = newStartMs - oldStart;
       const newEndMs = oldEnd + delta;
-      const sStr = fmt(newStartMs, hasStartTime);
-      const eStr = fmt(newEndMs, hasEndTime || hasStartTime);
-      if (d.kind === "timestamp") {
-        Promise.resolve(setNodeRange(node, sStr, eStr)).catch(() => {});
+      const sStr = fmtSpanStr(newStartMs, hasStartTime);
+      const eStr = fmtSpanStr(newEndMs, hasEndTime || hasStartTime);
+      setSelectedSpanId(d.nodeId);
+      if (timelineSelectedChip) setTimelineSelectedChip(null);
+      // Keep the absolute preview applied across the bridge round-trip so the
+      // bar doesn't bounce, then clear once the commit settles.
+      Promise.resolve(setNodeSpan(node, sStr, eStr))
+        .catch(() => {})
+        .finally(() => setSpanPreview((p) => (p && p.nodeId === d.nodeId ? null : p)));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  /** Drag a RESIZE GRIP on a span bar to change ONE endpoint, keeping the
+   *  other fixed. Multi-day horizontal bars resize by DATE (grips on the
+   *  left/right edges); same-day vertical bars resize by TIME (grips on the
+   *  top/bottom edges). Commits through setNodeSpan. */
+  const onBarResize = (
+    e: React.PointerEvent,
+    d: (typeof nodeDates)[number],
+    edge: "start" | "end",
+  ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (d.kind === "deadline") return;
+    setSelectedSpanId(d.nodeId);
+    if (timelineSelectedChip) setTimelineSelectedChip(null);
+    const multiDay = d.msEnd != null && d.msEnd > d.ms;
+    const hasStartTime = !!d.timeOfDay;
+    const hasEndTime = !!d.timeOfDayEnd;
+    const baseStartMs = d.ms + minOfTime(d.timeOfDay) * 60000;
+    const baseEndMs = (d.msEnd ?? d.ms) + minOfTime(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
+    const MIN_GAP = 15 * 60000; // keep a same-day block at least 15 min long
+    let curStart = baseStartMs;
+    let curEnd = baseEndMs;
+    const move = (ev: PointerEvent) => {
+      const r = railRef.current?.getBoundingClientRect();
+      if (!r) return;
+      if (multiDay) {
+        // Snap to a day column; preserve the moved endpoint's time-of-day.
+        const dayMs = dateAtClientX(ev.clientX).getTime();
+        if (edge === "start") {
+          const s = dayMs + minOfTime(d.timeOfDay) * 60000;
+          curStart = Math.min(s, curEnd); // start day can't pass end
+        } else {
+          const en = dayMs + minOfTime(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
+          curEnd = Math.max(en, curStart); // end day can't precede start
+        }
       } else {
-        // scheduled: same-day time block → SCHEDULED <date HH:MM-HH:MM>.
-        const sd = new Date(newStartMs);
-        const ed = new Date(newEndMs);
-        const sDate = isoOf(sd);
-        const sT = `${String(sd.getHours()).padStart(2, "0")}:${String(sd.getMinutes()).padStart(2, "0")}`;
-        const eT = `${String(ed.getHours()).padStart(2, "0")}:${String(ed.getMinutes()).padStart(2, "0")}`;
-        const rangeStr = isoOf(sd) === isoOf(ed) ? `${sDate} ${sT}-${eT}` : `${sDate} ${sT}`;
-        Promise.resolve(scheduleNode(node, rangeStr, "scheduled")).catch(() => {});
+        // Same-day block: change just the time of the dragged edge.
+        const time = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
+        const t = d.ms + minOfTime(time) * 60000;
+        if (edge === "start") curStart = Math.min(t, curEnd - MIN_GAP);
+        else curEnd = Math.max(t, curStart + MIN_GAP);
       }
+      setSpanPreview({
+        nodeId: d.nodeId,
+        startMs: curStart,
+        endMs: curEnd,
+        hasStartTime,
+        hasEndTime,
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const node = docRef.current?.nodes.find((n) => n.id === d.nodeId);
+      if (!node) {
+        setSpanPreview(null);
+        return;
+      }
+      const sStr = fmtSpanStr(curStart, hasStartTime);
+      const eStr = fmtSpanStr(curEnd, hasEndTime || hasStartTime);
+      Promise.resolve(setNodeSpan(node, sStr, eStr))
+        .catch(() => {})
+        .finally(() => setSpanPreview((p) => (p && p.nodeId === d.nodeId ? null : p)));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -1215,16 +1468,31 @@ export default function TimelineBand() {
         for (let i = 0; i < nodeDates.length; i++) {
           const d = nodeDates[i];
           if (!hasDuration(d)) continue;
-          const left = pct(d.ms);
-          const rightMs = d.msEnd != null && d.msEnd > d.ms ? d.msEnd : d.ms;
+
+          // Effective span geometry: follow the optimistic preview while a
+          // shift/resize gesture is live, else the committed doc values.
+          const prev = spanPreview && spanPreview.nodeId === d.nodeId ? spanPreview : null;
+          const effStartFull = prev ? prev.startMs : d.ms + minOfTime(d.timeOfDay) * 60000;
+          const effEndFull = prev
+            ? prev.endMs
+            : (d.msEnd ?? d.ms) + minOfTime(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
+          const effStartDay = startOfDay(new Date(effStartFull)).getTime();
+          const effEndDay = startOfDay(new Date(effEndFull)).getTime();
+          const effStartTime = (prev ? prev.hasStartTime : !!d.timeOfDay)
+            ? hhmmOf(effStartFull)
+            : null;
+          const effEndTime = (prev ? prev.hasEndTime : !!d.timeOfDayEnd)
+            ? hhmmOf(effEndFull)
+            : null;
+          const multiDay = effEndDay > effStartDay;
+
+          const left = pct(effStartDay);
+          const rightMs = multiDay ? effEndDay : effStartDay;
           const right = pct(rightMs);
           if (right < -5 || left > 105) continue;
 
-          const multiDay = d.msEnd != null && d.msEnd > d.ms;
-          const isSelected =
-            timelineSelectedChip != null &&
-            timelineSelectedChip.nodeId === d.nodeId &&
-            timelineSelectedChip.isDeadline === d.deadline;
+          const isSelected = selectedSpanId === d.nodeId;
+          const resizable = d.kind !== "deadline";
           const bg = chipBackground(d.tagsAll, tagColors, 0.42);
           // Border must be a SOLID colour (chipBackground may return a
           // linear-gradient for multi-tag nodes, which is invalid for
@@ -1232,17 +1500,59 @@ export default function TimelineBand() {
           const firstTagColor = d.tagsAll.map((t) => tagColors[t]).find(Boolean);
           const border = hexToRgba(firstTagColor ?? d.color, 0.85);
           const truncated = d.title.length > 30 ? d.title.slice(0, 29) + "…" : d.title;
-          const rangeLabel = `${d.timeOfDay ?? ""}${d.timeOfDayEnd ? "–" + d.timeOfDayEnd : ""}`.trim();
+          const rangeLabel = `${effStartTime ?? ""}${effEndTime ? "–" + effEndTime : ""}`.trim();
 
-          // Focus-only: jump to the node in the graph. We deliberately do
-          // NOT set timelineSelectedChip here — the arrow-key nudge it
-          // enables rewrites SCHEDULED to a single point, which would
-          // Drag the bar to move the whole span (onBarDown handles click-vs-
-          // drag); a plain click focuses the node. Deadlines stay click-only.
+          // Resize grip at one edge of the bar. Drags ONE endpoint via
+          // onBarResize; stops propagation so the bar's move-drag doesn't
+          // also fire. Horizontal grips (multi-day) sit on the left/right
+          // edges and change the date; vertical grips (same-day) sit on the
+          // top/bottom edges and change the time.
+          const gripEl = (which: "start" | "end", horizontal: boolean) => {
+            const accent = isSelected ? "rgba(255,209,102,0.95)" : "rgba(255,255,255,0.3)";
+            const style: React.CSSProperties = horizontal
+              ? {
+                  position: "absolute",
+                  top: 1,
+                  bottom: 1,
+                  width: 7,
+                  left: which === "start" ? 0 : undefined,
+                  right: which === "end" ? 0 : undefined,
+                  cursor: "ew-resize",
+                  background: accent,
+                  borderRadius: 4,
+                  touchAction: "none",
+                }
+              : {
+                  position: "absolute",
+                  left: 1,
+                  right: 1,
+                  height: 5,
+                  top: which === "start" ? 0 : undefined,
+                  bottom: which === "end" ? 0 : undefined,
+                  cursor: "ns-resize",
+                  background: accent,
+                  borderRadius: 4,
+                  touchAction: "none",
+                };
+            return (
+              <span
+                key={which}
+                data-pin
+                onPointerDown={(e) => onBarResize(e, d, which)}
+                style={style}
+                title={which === "start" ? "Drag to change start" : "Drag to change end"}
+              />
+            );
+          };
+
+          // Drag the bar body to move the whole span (onBarDown handles
+          // click-to-select-vs-drag); the grips resize an endpoint; a plain
+          // click selects the bar so the arrow keys shift it. Deadlines are
+          // click-only (no clean range-write path).
           if (multiDay) {
             // Horizontal span across day columns, anchored at the start
             // time's row (or mid-band when undated).
-            const top = yForTimeOfDay(d.timeOfDay, bandH, workHoursMode);
+            const top = yForTimeOfDay(effStartTime, bandH, workHoursMode);
             const leftClamped = Math.max(0, left);
             const rightClamped = Math.min(100, right);
             const widthPct = Math.max(0.5, rightClamped - leftClamped);
@@ -1251,7 +1561,7 @@ export default function TimelineBand() {
                 key={`dur${i}`}
                 data-pin
                 onPointerDown={(e) => onBarDown(e, d)}
-                title={`${d.title}\n${d.iso}${d.timeOfDayEnd ? " → " + d.timeOfDayEnd : ""} (duration)`}
+                title={`${d.title}\n${d.iso}${d.timeOfDayEnd ? " → " + d.timeOfDayEnd : ""} (duration — drag to move, edges to resize)`}
                 style={{
                   position: "absolute",
                   left: `${leftClamped}%`,
@@ -1265,32 +1575,34 @@ export default function TimelineBand() {
                   display: "flex",
                   alignItems: "center",
                   gap: 5,
-                  padding: "0 7px",
+                  padding: "0 9px",
                   fontSize: 10.5,
                   fontWeight: 600,
                   whiteSpace: "nowrap",
                   overflow: "hidden",
-                  cursor: "pointer",
+                  cursor: "grab",
                   boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
                 }}
               >
                 <span aria-hidden style={{ flexShrink: 0, opacity: 0.8 }}>↔</span>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{truncated}</span>
+                {resizable && gripEl("start", true)}
+                {resizable && gripEl("end", true)}
               </button>,
             );
           } else {
             // Same-day time block → vertical bar between start/end rows.
-            const yStart = yForTimeOfDay(d.timeOfDay, bandH, workHoursMode);
-            const yEnd = yForTimeOfDay(d.timeOfDayEnd, bandH, workHoursMode);
+            const yStart = yForTimeOfDay(effStartTime, bandH, workHoursMode);
+            const yEnd = yForTimeOfDay(effEndTime, bandH, workHoursMode);
             const top = Math.min(yStart, yEnd);
-            const height = Math.max(14, Math.abs(yEnd - yStart));
+            const height = Math.max(24, Math.abs(yEnd - yStart));
             const w = Math.max(34, Math.min(160, pxPerDay - 6));
             out.push(
               <button
                 key={`dur${i}`}
                 data-pin
                 onPointerDown={(e) => onBarDown(e, d)}
-                title={`${d.title}\n${rangeLabel} (duration)`}
+                title={`${d.title}\n${rangeLabel} (duration — drag to move, edges to resize)`}
                 style={{
                   position: "absolute",
                   left: `${left}%`,
@@ -1305,13 +1617,13 @@ export default function TimelineBand() {
                   display: "flex",
                   flexDirection: "column",
                   alignItems: "flex-start",
-                  justifyContent: "flex-start",
+                  justifyContent: "center",
                   gap: 1,
-                  padding: "2px 6px",
+                  padding: "4px 6px",
                   fontSize: 10,
                   fontWeight: 600,
                   overflow: "hidden",
-                  cursor: "pointer",
+                  cursor: "grab",
                   textAlign: "left",
                   boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
                 }}
@@ -1324,6 +1636,8 @@ export default function TimelineBand() {
                     {rangeLabel}
                   </span>
                 )}
+                {resizable && gripEl("start", false)}
+                {resizable && gripEl("end", false)}
               </button>,
             );
           }
@@ -1777,6 +2091,7 @@ export default function TimelineBand() {
                 onClick={(e) => {
                   e.stopPropagation();
                   setTimelineSelectedChip({ nodeId: d.nodeId, isDeadline: d.deadline });
+                  if (selectedSpanId) setSelectedSpanId(null);
                   window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id: d.nodeId } }));
                   setStackPopover(null);
                 }}
