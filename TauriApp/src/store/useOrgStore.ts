@@ -23,7 +23,7 @@ import {
   setTimestampRange as apiSetTimestampRange,
   setSpan as apiSetSpan,
   gcalMove as apiGcalMove,
-  gcalSync as apiGcalSync,
+  gcalPush as apiGcalPush,
   incompleteDeps,
   validateScheduleAgainstDeps,
   wouldCreateCycle,
@@ -1129,20 +1129,28 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     // diverge, clear the wrong file's ghosts and yank the tab. Normally they're
     // the same file anyway.
     const syncFile = (file ?? cfg.file ?? "").trim();
-    const cals = cfg.selectedCalendars?.length ? cfg.selectedCalendars : account ? [account] : [];
-    if (!clientId || !clientSecret || !account || !syncFile || cals.length === 0) {
+    // The pending moves to push = the current ghosts, keyed by org-gcal
+    // entry-id (== ghost orgId).
+    const entryIds = Object.keys(get().gcalGhosts);
+    if (!clientId || !clientSecret || !account || !syncFile) {
       set({
         gcalSyncError:
-          "Google Calendar isn't fully set up — open the 🗓 panel and sign in / pick calendars first.",
+          "Google Calendar isn't fully set up — open the 🗓 panel and sign in first.",
       });
+      return;
+    }
+    if (entryIds.length === 0) {
+      set({ gcalSyncing: false });
       return;
     }
     set({ gcalSyncing: true, gcalSyncError: null });
     try {
-      // Force two-way so the local moves actually push to Google.
-      await apiGcalSync(clientId, clientSecret, account, cals, syncFile, true);
-      // Reconciled with Google → ghosts are resolved. Clear them, then reload
-      // the file so the timeline reflects whatever Google returned.
+      // Push the moved events DIRECTLY (org-gcal-post-at-point per entry).
+      // org-gcal-sync's export path skips gcal-managed events (filter-managed),
+      // so a normal sync never uploads a calendar move — this does.
+      await apiGcalPush(clientId, clientSecret, account, entryIds, syncFile);
+      // Pushed → ghosts resolved. Clear, then reload so the file reflects the
+      // pushed state (fresh ETags etc.).
       saveGcalGhosts(syncFile, {});
       set({ gcalGhosts: {}, gcalSyncing: false });
       await get().loadFile(syncFile);

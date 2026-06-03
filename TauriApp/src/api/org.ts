@@ -828,6 +828,24 @@ export const gcalSync = (
       )
     : Promise.reject(new Error("Desktop only"));
 
+/** Push specific moved events to Google by their org-gcal entry-id, via
+ *  org-gcal-post-at-point (deterministic — org-gcal-sync's export skips
+ *  gcal-managed events). ENTRYIDS are the move-ghost ids. Returns the doc. */
+export const gcalPush = (
+  clientId: string,
+  clientSecret: string,
+  account: string,
+  entryIds: string[],
+  file: string,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>(
+        "org-gui-gcal-push",
+        [file, clientId, clientSecret, account, entryIds.join(",")],
+        300, // a PATCH per moved event
+      )
+    : Promise.reject(new Error("Desktop only"));
+
 export const archiveNode = (file: string, begin: number) =>
   IN_TAURI
     ? orgCall<OrgDoc>("org-gui-archive", [file, String(begin)])

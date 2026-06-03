@@ -5,6 +5,7 @@ import {
   gcalInstall,
   gcalStatus,
   gcalSync,
+  gcalPush,
   gcalCalendars,
   type GcalStatus,
   type GcalCalendar,
@@ -216,13 +217,21 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
         : "Syncing… if this is the first time, your browser opens for Google sign-in — approve it, then come back.",
     );
     try {
+      // Push any pending timeline MOVES first (org-gcal-post-at-point per
+      // event) so the subsequent fetch can't revert them — org-gcal-sync's own
+      // export skips gcal-managed events, so this is the only path that uploads
+      // a calendar move.
+      const ghostIds = Object.keys(useOrgStore.getState().gcalGhosts);
+      if (cfg.twoWay && ghostIds.length > 0) {
+        setMsg(`Pushing ${ghostIds.length} moved event(s) to Google…`);
+        await gcalPush(effClientId, effClientSecret, account, ghostIds, cfg.file.trim());
+        useOrgStore.getState().clearGcalGhosts();
+      }
+      setMsg("Syncing…");
       await gcalSync(effClientId, effClientSecret, account, calsToSync, cfg.file.trim(), cfg.twoWay);
       setMsg("Synced. Opening the calendar file…");
       await loadFile(cfg.file.trim());
-      // A sync reconciles local moves with Google (a two-way push lands them;
-      // a one-way fetch reverts them) — either way the move "ghosts" on the
-      // timeline are now resolved. Clear after loadFile so it targets the file
-      // we just synced (now the active file).
+      // Anything left (e.g. a one-way fetch reconciled them) is resolved.
       useOrgStore.getState().clearGcalGhosts();
       await refreshStatus();
       // Refresh the picker (also captures any newly-created calendars).

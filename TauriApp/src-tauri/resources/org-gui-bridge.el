@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.66")
+(defconst org-gui-bridge-version "0.2.67")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1377,6 +1377,98 @@ browser consent; later calls reuse the stored token."
        ((and (fboundp 'aio-promise-p) (aio-promise-p res) (fboundp 'oauth2-auto-poll-promise))
         (oauth2-auto-poll-promise res))
        (t res)))
+    (org-gui--doc-json f)))
+
+(defun org-gui--gcal-time-field (iso)
+  "Build a Google event time object alist for ISO: `dateTime' for a timed value
+\(contains \"T\"), else `date' for an all-day value."
+  (if (string-match-p "T" iso)
+      (list (cons 'dateTime iso))
+    (list (cons 'date iso))))
+
+(defun org-gui--gcal-patch-event (token cal-id event-id start end)
+  "Move a Google event by PATCHing its start/end via curl. Returns the parsed
+JSON response alist (with an `error' key on failure)."
+  (let ((url (format "https://www.googleapis.com/calendar/v3/calendars/%s/events/%s"
+                     (url-hexify-string cal-id) (url-hexify-string event-id)))
+        (body (json-serialize
+               (list (cons 'start (org-gui--gcal-time-field start))
+                     (cons 'end (org-gui--gcal-time-field end))))))
+    (with-temp-buffer
+      (call-process "curl" nil t nil "-sS" "--max-time" "30"
+                    "-X" "PATCH"
+                    "-H" (concat "Authorization: Bearer " token)
+                    "-H" "Content-Type: application/json"
+                    "--data" body url)
+      (goto-char (point-min))
+      (condition-case _
+          (json-parse-buffer :object-type 'alist :null-object nil :false-object nil)
+        (error nil)))))
+
+(defun org-gui-gcal-push (file client-id client-secret account entry-ids)
+  "PUSH moved events to Google via a DIRECT Google Calendar events.patch call
+per event. ENTRY-IDS is a comma-separated list of org-gcal `entry-id' property
+values (the timeline's move-ghost ids).
+
+Why a direct PATCH rather than `org-gcal-sync'/`org-gcal-post-at-point':
+  1. `org-gcal-sync's export only pushes entries managed \"org\" (it calls
+     `org-gcal-sync-buffer' with `filter-managed'); events fetched from Google
+     are managed \"gcal\", so a calendar move is never uploaded.
+  2. `org-gcal-post-at-point' bumps the ETag but does NOT move a single
+     occurrence of a RECURRING event (verified live against the API).
+A direct events.patch with the new start/end moves BOTH ordinary events and
+single recurring occurrences (Google auto-creates the instance exception —
+verified live). Returns the reparsed doc; signals an error listing failures
+only when NOTHING pushed."
+  (unless (org-gui--gcal-load)
+    (error "org-gcal is not installed yet — install it from the Google Calendar panel"))
+  (let* ((ids (split-string (or entry-ids "") "," t "[ \t]*"))
+         (f (expand-file-name file))
+         (pushed 0) (errs '()))
+    (setq org-gcal-client-id client-id org-gcal-client-secret client-secret)
+    (setq oauth2-auto-additional-providers-alist
+          (assq-delete-all 'org-gcal oauth2-auto-additional-providers-alist))
+    (when (fboundp 'org-gcal-reload-client-id-secret)
+      (org-gcal-reload-client-id-secret))
+    (let ((token (and account (fboundp 'oauth2-auto-access-token-sync)
+                      (oauth2-auto-access-token-sync account 'org-gcal))))
+      (unless (and token (stringp token))
+        (error "Not signed in to Google — open the calendar panel and sign in first"))
+      (with-current-buffer (org-gui--visit f)
+        (org-with-wide-buffer
+         (dolist (eid ids)
+           (condition-case e
+               (progn
+                 (goto-char (point-min))
+                 (if (not (re-search-forward
+                           (concat "^[ \t]*:"
+                                   (regexp-quote
+                                    (or (bound-and-true-p org-gcal-entry-id-property)
+                                        "entry-id"))
+                                   ":[ \t]*" (regexp-quote eid) "[ \t]*$")
+                           nil t))
+                     (push (format "%s: not found in file" eid) errs)
+                   (org-back-to-heading t)
+                   (let* ((cal (or (org-entry-get nil "calendar-id")
+                                   (cadr (split-string eid "/"))))
+                          ;; Google event id = the entry-id up to the "/calendar".
+                          (event-id (car (split-string eid "/")))
+                          (td (org-gcal--get-time-and-desc))
+                          (start (plist-get td :start))
+                          (end (plist-get td :end)))
+                     (if (not (and cal event-id start))
+                         (push (format "%s: missing time or calendar" eid) errs)
+                       (let ((resp (org-gui--gcal-patch-event
+                                    token cal event-id start (or end start))))
+                         (if (alist-get 'error resp)
+                             (push (format "%s: %s" eid
+                                           (or (alist-get 'message (alist-get 'error resp))
+                                               "Google API error"))
+                                   errs)
+                           (setq pushed (1+ pushed))))))))
+             (error (push (format "%s: %s" eid (error-message-string e)) errs)))))))
+    (when (and (= pushed 0) errs)
+      (error "Calendar push failed — %s" (mapconcat #'identity (nreverse errs) "; ")))
     (org-gui--doc-json f)))
 
 (defun org-gui--gcal-valid-token (account)
