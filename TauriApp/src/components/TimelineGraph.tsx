@@ -248,9 +248,24 @@ export default function TimelineGraph() {
       e.preventDefault();
       e.stopPropagation();
       setScheduleDragNode(nodeId);
+      // Make the node visually follow the cursor on the CANVAS during the
+      // drag (like a normal node move), then snap it back to its layout
+      // position on release — scheduling changes the org date, not where the
+      // node lives on the graph. We track the cursor→node-origin offset so
+      // the node doesn't jump under the pointer when the drag begins.
+      const orig = rf.getNode(nodeId)?.position;
+      const startFlow = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      const grabDx = orig ? startFlow.x - orig.x : 0;
+      const grabDy = orig ? startFlow.y - orig.y : 0;
       let moved = false;
       const move = (ev: PointerEvent) => {
         moved = true;
+        const fp = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
+        setNodes((nds) =>
+          nds.map((n) =>
+            n.id === nodeId ? { ...n, position: { x: fp.x - grabDx, y: fp.y - grabDy } } : n,
+          ),
+        );
         window.dispatchEvent(
           new CustomEvent("orggui:scheduleDragMove", {
             detail: { nodeId, x: ev.clientX, y: ev.clientY },
@@ -261,6 +276,12 @@ export default function TimelineGraph() {
         window.removeEventListener("pointermove", move);
         window.removeEventListener("pointerup", up);
         setScheduleDragNode(null);
+        // Snap the node back to where it started on the canvas.
+        if (orig) {
+          setNodes((nds) =>
+            nds.map((n) => (n.id === nodeId ? { ...n, position: orig } : n)),
+          );
+        }
         // A no-move click shouldn't schedule (and the TimelineBand ignores
         // drops outside the rail anyway).
         if (moved) {
@@ -287,7 +308,7 @@ export default function TimelineGraph() {
       el.removeEventListener("pointerdown", onDown, true);
       el.removeEventListener("click", onClickCap, true);
     };
-  }, [scheduleMode, setScheduleDragNode]);
+  }, [scheduleMode, setScheduleDragNode, rf, setNodes]);
 
   // Cross-component focus: the TimelineBand dispatches "orggui:focusNode" when
   // a date tick is double-clicked. Pan the React Flow viewport to that node and
