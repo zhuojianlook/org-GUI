@@ -326,6 +326,13 @@ export default function TimelineBand() {
     spanPreviewRef.current = spanPreview;
   }, [spanPreview]);
 
+  // Live preview while dragging the "set duration" handle off a single-time
+  // point chip to turn it into a range. startMs is the chip's fixed start; endMs
+  // follows the cursor.
+  const [stretch, setStretch] = useState<{ nodeId: string; startMs: number; endMs: number } | null>(
+    null,
+  );
+
   // All node-date ticks (scheduled / deadline). We carry the node id so a
   // double-click on a tick can focus that node in the graph, and the
   // per-deadline color override (`:DEADLINE_COLOR:`) so the band stays in
@@ -484,6 +491,37 @@ export default function TimelineBand() {
       if (orig) return Promise.resolve(moveGcalEvent(node, iso, "", orig));
     }
     return Promise.resolve(scheduleNode(node, iso, kind));
+  };
+
+  /** Drag the "set duration" handle below a single-time point chip downward to
+   *  give the task an END time — turning it into a range/bar. Commits through
+   *  commitSpanMove, so a calendar event also records a ghost + shows Sync. */
+  const onPointStretch = (e: React.PointerEvent, d: (typeof nodeDates)[number]) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!d.timeOfDay) return; // need a start time to extend from
+    setSelectedSpanId(null);
+    const startMs = d.ms + minOfTime(d.timeOfDay) * 60000;
+    const dayStart = startOfDay(new Date(startMs)).getTime();
+    const MIN = 15 * 60000;
+    let endMs = startMs + 60 * 60000; // default 1h until the cursor moves
+    const move = (ev: PointerEvent) => {
+      const r = railRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const mins = minOfTime(timeAtRailY(ev.clientY - r.top, r.height, workHoursMode));
+      endMs = Math.max(dayStart + mins * 60000, startMs + MIN);
+      setStretch({ nodeId: d.nodeId, startMs, endMs });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const node = docRef.current?.nodes.find((n) => n.id === d.nodeId);
+      setStretch(null);
+      if (!node) return;
+      void commitSpanMove(node, fmtSpanStr(startMs, true), fmtSpanStr(endMs, true));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   };
 
   // Live mirrors so the span arrow-key effect / resize drag can read the
@@ -2328,6 +2366,69 @@ export default function TimelineBand() {
                 )}
               </button>,
             );
+            // "Set duration" affordance: a selected, timed, non-deadline chip
+            // gets a handle below it; drag it down to give the task an end time
+            // (turn the single point into a range). Deadlines have no duration.
+            if (isSelected && !d.deadline && !!d.timeOfDay && tier !== "dot") {
+              if (stretch?.nodeId === d.nodeId) {
+                const endY = yForTimeOfDay(hhmmOf(stretch.endMs), bandH, workHoursMode);
+                out.push(
+                  <div
+                    key={`stretch${key}`}
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      left: `${left}%`,
+                      top: Math.min(top, endY),
+                      width: Math.max(34, Math.min(120, pxPerDay - 6)),
+                      height: Math.max(6, Math.abs(endY - top)),
+                      background: chipBackground(d.tagsAll, tagColors, 0.4),
+                      border: "1px dashed #ffd166",
+                      borderRadius: 5,
+                      pointerEvents: "none",
+                      zIndex: 2,
+                    }}
+                  >
+                    <span
+                      style={{
+                        position: "absolute",
+                        bottom: 0,
+                        left: 3,
+                        fontSize: 9,
+                        fontWeight: 700,
+                        color: "#ffd166",
+                        background: "var(--c-bg)",
+                        padding: "0 3px",
+                        borderRadius: 3,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {hhmmOf(stretch.endMs)}
+                    </span>
+                  </div>,
+                );
+              }
+              out.push(
+                <div
+                  key={`grip${key}`}
+                  data-pin
+                  onPointerDown={(e) => onPointStretch(e, d)}
+                  title="Drag down to set a duration (end time)"
+                  style={{
+                    position: "absolute",
+                    left: `${left}%`,
+                    top: top + 8,
+                    width: 18,
+                    height: 6,
+                    background: "#ffd166",
+                    borderRadius: 3,
+                    cursor: "ns-resize",
+                    zIndex: 7,
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
+                  }}
+                />,
+              );
+            }
             // In dot mode the chip itself carries only an icon — surface the
             // task title as a small floating label to the right of the dot so
             // the user can still read what each indicator is for. pointer-
