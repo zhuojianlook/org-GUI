@@ -5,5 +5,8 @@ src-tauri/target/
 src-tauri/gen/
 *.DS_Store
 .env
+.env.local
+.env.*.local
+!.env.example
 *.log
 .claude/

@@ -2,26 +2,44 @@ import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useOrgStore } from "../store/useOrgStore";
 import { gcalInstall, gcalStatus, gcalSync, type GcalStatus, IN_TAURI } from "../api/org";
+import {
+  HAS_DEFAULT_GOOGLE_CLIENT,
+  DEFAULT_GOOGLE_CLIENT_ID,
+  DEFAULT_GOOGLE_CLIENT_SECRET,
+} from "../config/google";
 
 // Persisted, non-secret-aware: the client secret lives in localStorage. It's
 // the user's OWN Google OAuth client secret for a desktop app, on their own
 // machine — acceptable for a personal-use integration, and never leaves the
-// device except to Google during auth.
+// device except to Google during auth. (When the build ships a first-party
+// Google client, the user usually doesn't enter any of this — see
+// `useOwnClient`.)
 const CFG_KEY = "org-gui:gcal:config";
 interface GcalConfig {
   clientId: string;
   clientSecret: string;
   calendarId: string;
   file: string;
+  // Opt out of the built-in "Sign in with Google" client and use your own
+  // OAuth credentials instead (advanced). Ignored when the build has no
+  // first-party client baked in — then the fields are the only option.
+  useOwnClient: boolean;
 }
 function loadCfg(): GcalConfig {
+  const base: GcalConfig = {
+    clientId: "",
+    clientSecret: "",
+    calendarId: "primary",
+    file: "",
+    useOwnClient: false,
+  };
   try {
     const raw = localStorage.getItem(CFG_KEY);
-    if (raw) return { calendarId: "primary", ...JSON.parse(raw) };
+    if (raw) return { ...base, ...JSON.parse(raw) };
   } catch {
     /* ignore */
   }
-  return { clientId: "", clientSecret: "", calendarId: "primary", file: "" };
+  return base;
 }
 function saveCfg(c: GcalConfig) {
   try {
@@ -101,8 +119,15 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const canSync =
-    !!cfg.clientId.trim() && !!cfg.clientSecret.trim() && !!cfg.calendarId.trim() && !!cfg.file.trim();
+  // Which OAuth client this sync will use. When the build ships a first-party
+  // client and the user hasn't opted into their own, we use the built-in one
+  // and the user never sees a client id/secret field.
+  const usingBuiltIn = HAS_DEFAULT_GOOGLE_CLIENT && !cfg.useOwnClient;
+  const effClientId = usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_ID : cfg.clientId.trim();
+  const effClientSecret = usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_SECRET : cfg.clientSecret.trim();
+  const effCalendarId = cfg.calendarId.trim() || "primary";
+
+  const canSync = !!effClientId && !!effClientSecret && !!effCalendarId && !!cfg.file.trim();
 
   const onSync = async () => {
     setBusy("sync");
@@ -111,7 +136,7 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
       "Syncing… if this is the first time, your browser will open for Google sign-in — approve it, then come back.",
     );
     try {
-      await gcalSync(cfg.clientId.trim(), cfg.clientSecret.trim(), cfg.calendarId.trim(), cfg.file.trim());
+      await gcalSync(effClientId, effClientSecret, effCalendarId, cfg.file.trim());
       setMsg("Synced. Opening the calendar file…");
       await loadFile(cfg.file.trim());
       await refreshStatus();
@@ -161,7 +186,10 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
         {/* Status line */}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14, fontSize: 12 }}>
           <Pill ok={status?.available} label={status?.available ? "Installed" : "Not installed"} />
-          <Pill ok={status?.configured} label={status?.configured ? "Configured" : "Not configured"} />
+          <Pill
+            ok={status?.configured || usingBuiltIn}
+            label={status?.configured || usingBuiltIn ? "Configured" : "Not configured"}
+          />
           <Pill ok={status?.authorized} label={status?.authorized ? "Authorized" : "Not authorized"} />
           {busy === "status" && <span style={{ color: "var(--c-text-dim)" }}>checking…</span>}
         </div>
@@ -179,48 +207,72 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        {/* Setup help */}
-        <details style={{ marginBottom: 14, fontSize: 12.5, color: "var(--c-text-dim)" }}>
-          <summary style={{ cursor: "pointer", color: "var(--c-text)" }}>
-            One-time Google setup (click for steps)
-          </summary>
-          <ol style={{ paddingLeft: 18, lineHeight: 1.6 }}>
-            <li>
-              In{" "}
-              <a href="https://console.cloud.google.com/" target="_blank" rel="noreferrer" style={link}>
-                Google Cloud Console
-              </a>
-              , create a project and enable the <b>Google Calendar API</b>.
-            </li>
-            <li>
-              Configure the OAuth consent screen (External, add yourself as a test user).
-            </li>
-            <li>
-              Create an OAuth <b>Client ID</b> of type <b>Desktop app</b> — copy the Client ID and
-              Client secret below.
-            </li>
-            <li>Your Calendar ID is usually your email, or <code>primary</code> for the main one.</li>
-          </ol>
-        </details>
+        {usingBuiltIn ? (
+          /* Built-in client → one-click sign in. The user only picks which
+             calendar and where to write it; no credentials to enter. */
+          <div
+            style={{
+              marginBottom: 14,
+              fontSize: 12.5,
+              color: "var(--c-text-dim)",
+              lineHeight: 1.55,
+            }}
+          >
+            <p style={{ marginTop: 0 }}>
+              Click <b>Sign in with Google</b> below — your browser opens Google's consent page,
+              you approve access to <b>your own</b> calendar, and events flow into the file you
+              choose. Nothing to configure.
+            </p>
+          </div>
+        ) : (
+          /* Own-client (advanced / community builds) → full credentials form. */
+          <details
+            open={!HAS_DEFAULT_GOOGLE_CLIENT}
+            style={{ marginBottom: 14, fontSize: 12.5, color: "var(--c-text-dim)" }}
+          >
+            <summary style={{ cursor: "pointer", color: "var(--c-text)" }}>
+              One-time Google setup (click for steps)
+            </summary>
+            <ol style={{ paddingLeft: 18, lineHeight: 1.6 }}>
+              <li>
+                In{" "}
+                <a href="https://console.cloud.google.com/" target="_blank" rel="noreferrer" style={link}>
+                  Google Cloud Console
+                </a>
+                , create a project and enable the <b>Google Calendar API</b>.
+              </li>
+              <li>Configure the OAuth consent screen (External, add yourself as a test user).</li>
+              <li>
+                Create an OAuth <b>Client ID</b> of type <b>Desktop app</b> — copy the Client ID and
+                Client secret below.
+              </li>
+              <li>Your Calendar ID is usually your email, or <code>primary</code> for the main one.</li>
+            </ol>
+          </details>
+        )}
 
-        {/* Config form */}
-        <Field label="Client ID">
-          <input
-            value={cfg.clientId}
-            onChange={(e) => set({ clientId: e.target.value })}
-            placeholder="…apps.googleusercontent.com"
-            style={input}
-          />
-        </Field>
-        <Field label="Client secret">
-          <input
-            type="password"
-            value={cfg.clientSecret}
-            onChange={(e) => set({ clientSecret: e.target.value })}
-            placeholder="GOCSPX-…"
-            style={input}
-          />
-        </Field>
+        {/* Credentials — only when NOT using the built-in client. */}
+        {!usingBuiltIn && (
+          <>
+            <Field label="Client ID">
+              <input
+                value={cfg.clientId}
+                onChange={(e) => set({ clientId: e.target.value })}
+                placeholder="…apps.googleusercontent.com"
+                style={input}
+              />
+            </Field>
+            <Field label="Client secret">
+              <input
+                type="password"
+                value={cfg.clientSecret}
+                onChange={(e) => set({ clientSecret: e.target.value })}
+                placeholder="GOCSPX-…"
+                style={input}
+              />
+            </Field>
+          </>
+        )}
         <Field label="Calendar ID">
           <input
             value={cfg.calendarId}
@@ -252,16 +304,45 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
               !status?.available
                 ? "Install org-gcal first"
                 : !canSync
-                  ? "Fill in all fields above"
+                  ? usingBuiltIn
+                    ? "Choose a target .org file first"
+                    : "Fill in all fields above"
                   : "Pull events from Google into the target file"
             }
           >
-            {busy === "sync" ? "Syncing…" : "Sync now (Google → org)"}
+            {busy === "sync"
+              ? "Syncing…"
+              : usingBuiltIn && !status?.authorized
+                ? "Sign in with Google"
+                : usingBuiltIn
+                  ? "Sync now"
+                  : "Sync now (Google → org)"}
           </button>
           <button onClick={refreshStatus} disabled={busy != null} style={secondaryBtn}>
             Refresh status
           </button>
         </div>
+
+        {/* Toggle between the built-in client and your own OAuth credentials.
+            Only shown when this build actually ships a first-party client. */}
+        {HAS_DEFAULT_GOOGLE_CLIENT && (
+          <button
+            onClick={() => set({ useOwnClient: !cfg.useOwnClient })}
+            style={{
+              background: "none",
+              border: "none",
+              color: "var(--c-accent)",
+              fontSize: 11.5,
+              cursor: "pointer",
+              padding: 0,
+              marginTop: 10,
+            }}
+          >
+            {cfg.useOwnClient
+              ? "← Use the built-in Google sign-in"
+              : "Advanced: use my own Google OAuth client →"}
+          </button>
+        )}
 
         {msg && <p style={{ fontSize: 12.5, color: "var(--c-text-dim)", marginBottom: 0 }}>{msg}</p>}
         {err && (

@@ -37,6 +37,13 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # First-party Google OAuth client baked into the bundle so users get
+          # one-click "Sign in with Google" (see src/config/google.ts). Vite
+          # exposes these VITE_-prefixed vars to import.meta.env at build time.
+          # Empty if the secrets aren't set → app falls back to the bring-your-
+          # own-credentials form.
+          VITE_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          VITE_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: npx tauri build
 
       # No Apple Developer ID here — Tauri ad-hoc signs the macOS app by
