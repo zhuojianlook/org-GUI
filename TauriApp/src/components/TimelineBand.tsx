@@ -1661,45 +1661,89 @@ export default function TimelineBand() {
                 </button>,
               );
             }
-            out.push(<div key={`dur${i}`}>{segs}</div>);
+            // Faint full-period wash behind the segments so the day columns
+            // read as ONE continuous multi-day event, not separate bars.
+            const washLeft = Math.max(0, left);
+            const washWidth = Math.max(0.5, Math.min(100, right) - washLeft);
+            const wash = (
+              <div
+                key={`dur${i}-wash`}
+                style={{
+                  position: "absolute",
+                  left: `${washLeft}%`,
+                  width: `${washWidth}%`,
+                  top: topY,
+                  height: Math.max(8, botY - topY),
+                  background: bg,
+                  opacity: isSelected ? 0.28 : 0.16,
+                  borderRadius: 6,
+                  pointerEvents: "none",
+                }}
+              />
+            );
+            out.push(
+              <div key={`dur${i}`}>
+                {wash}
+                {segs}
+              </div>,
+            );
           } else if (multiDay) {
-            // All-day (or partially-timed) multi-day span → horizontal bar
-            // across day columns, anchored at the start row (mid-band if
-            // undated). Edges resize the start/end DATE.
-            const top = yForTimeOfDay(effStartTime, bandH, workHoursMode);
+            // All-day multi-day span → a TALL translucent block that occupies
+            // the whole day columns it covers (not a thin strip), so the span
+            // reads as "these days are taken". A solid header carries the
+            // title; the see-through body lets point chips on those days show
+            // through. Edges resize the start/end DATE.
+            const topY = yForTimeOfDay("00:00", bandH, workHoursMode);
+            const botY = yForTimeOfDay("23:59", bandH, workHoursMode);
             const leftClamped = Math.max(0, left);
             const rightClamped = Math.min(100, right);
             const widthPct = Math.max(0.5, rightClamped - leftClamped);
+            const blockH = Math.max(28, botY - topY);
             out.push(
               <button
                 key={`dur${i}`}
                 data-pin
                 onPointerDown={(e) => onBarDown(e, d)}
-                title={`${d.title}\n${d.iso}${d.timeOfDayEnd ? " → " + d.timeOfDayEnd : ""} (duration — drag to move, edges to resize)`}
+                title={`${d.title}\n${d.iso}${d.timeOfDayEnd ? " → " + d.timeOfDayEnd : ""} (${dayCount}-day event — drag to move, edges to resize)`}
                 style={{
                   position: "absolute",
                   left: `${leftClamped}%`,
-                  top: top - 9,
+                  top: topY,
                   width: `${widthPct}%`,
-                  height: 18,
-                  borderRadius: 5,
-                  background: bg,
+                  height: blockH,
+                  borderRadius: 6,
+                  background: chipBackground(d.tagsAll, tagColors, isSelected ? 0.34 : 0.2),
                   border: isSelected ? "2px solid #ffd166" : `1px solid ${border}`,
                   color: "var(--c-text)",
                   display: "flex",
-                  alignItems: "center",
-                  gap: 5,
-                  padding: "0 9px",
-                  fontSize: 10.5,
-                  fontWeight: 600,
-                  whiteSpace: "nowrap",
+                  flexDirection: "column",
+                  alignItems: "stretch",
+                  justifyContent: "flex-start",
+                  padding: 0,
                   overflow: "hidden",
                   cursor: "grab",
                   boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
                 }}
               >
-                <span aria-hidden style={{ flexShrink: 0, opacity: 0.8 }}>↔</span>
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{truncated}</span>
+                <span
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                    padding: "2px 8px",
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    background: hexToRgba(firstTagColor ?? d.color, 0.5),
+                    borderTopLeftRadius: 5,
+                    borderTopRightRadius: 5,
+                  }}
+                >
+                  <span aria-hidden style={{ flexShrink: 0, opacity: 0.85 }}>▦</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{truncated}</span>
+                </span>
                 {resizable && gripEl("startDate", "left")}
                 {resizable && gripEl("endDate", "right")}
               </button>,
