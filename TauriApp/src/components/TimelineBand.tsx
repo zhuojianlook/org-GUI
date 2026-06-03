@@ -1512,17 +1512,16 @@ export default function TimelineBand() {
                 <span aria-hidden style={{ fontSize: 11, flexShrink: 0 }}>
                   {d.deadline ? "⚑" : "⏱"}
                 </span>
-                {showTitle && (
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {truncated}
-                  </span>
-                )}
+                {/* Time FIRST (flexShrink:0) so it stays visible even when a
+                    long title is clipped — important because arrow-key
+                    nudging changes this value and the user needs to see it. */}
                 {showTime && (
                   <span
                     style={{
-                      opacity: 0.75,
+                      opacity: 0.85,
                       fontVariantNumeric: "tabular-nums",
                       flexShrink: 0,
+                      fontWeight: 700,
                       fontSize: tier === "compact" ? 10 : 10.5,
                     }}
                   >
@@ -1538,6 +1537,11 @@ export default function TimelineBand() {
                         })()}
                       </span>
                     )}
+                  </span>
+                )}
+                {showTitle && (
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", opacity: 0.92 }}>
+                    {truncated}
                   </span>
                 )}
               </button>,

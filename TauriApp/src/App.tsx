@@ -13,7 +13,7 @@ import ErrorToast from "./components/ErrorToast";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
 import GcalPanel from "./components/GcalPanel";
 import { useOrgStore } from "./store/useOrgStore";
-import { IN_TAURI } from "./api/org";
+import { IN_TAURI, gcalStatus, gcalInstall } from "./api/org";
 
 export default function App() {
   const doc = useOrgStore((s) => s.doc);
@@ -50,6 +50,21 @@ export default function App() {
       const s = await fetchPrereqStatus();
       if (s && (!s.emacs_installed || !s.doom_installed)) setShowSetup(true);
     })();
+    // Ensure org-gcal (Google Calendar) is installed — once, in the
+    // background. The install runs in a throwaway `emacs --batch`, so it
+    // doesn't block the daemon or the UI; the status check is cheap and
+    // skips entirely once it's installed. Delayed so it doesn't compete
+    // with the initial file load on the daemon.
+    const gcalTimer = window.setTimeout(() => {
+      (async () => {
+        try {
+          const st = await gcalStatus();
+          if (!st.available) gcalInstall().catch(() => {});
+        } catch {
+          /* daemon not ready / offline — retried next launch */
+        }
+      })();
+    }, 6000);
     // Toolbar's Setup button asks us to open the modal on demand.
     const onOpen = () => setShowSetup(true);
     const onGcal = () => setShowGcal(true);
@@ -58,6 +73,7 @@ export default function App() {
     return () => {
       window.removeEventListener("orggui:openSetup", onOpen);
       window.removeEventListener("orggui:openGcal", onGcal);
+      window.clearTimeout(gcalTimer);
     };
   }, [checkEmacs, restoreSession]);
 
