@@ -212,11 +212,24 @@ function applyGcalCalendarTags(
   for (const n of doc.nodes) {
     const cal = n.calendarId ? cals[n.calendarId] : undefined;
     if (!cal || !cal.summary) continue;
+    // tagsAll ONLY (drives colour/filter) — NOT n.tags. n.tags are the node's
+    // own, editable/removable tags; the calendar tag is a derived, locked one
+    // and must not leak into the file (or into `setTags` writes).
     if (!n.tagsAll.includes(cal.summary)) n.tagsAll = [...n.tagsAll, cal.summary];
-    if (!n.tags.includes(cal.summary)) n.tags = [...n.tags, cal.summary];
     if (cal.color && !merged[cal.summary]) merged[cal.summary] = cal.color;
   }
   return merged;
+}
+
+/** Tag names that are DERIVED from a Google calendar (a calendar's summary).
+ *  These are auto-applied to imported events and must NOT be user-removable. */
+export function gcalCalendarTagSet(): Set<string> {
+  const cals = loadGcalCalMap();
+  const s = new Set<string>();
+  for (const id of Object.keys(cals)) {
+    if (cals[id]?.summary) s.add(cals[id].summary);
+  }
+  return s;
 }
 
 // Per-file set of collapsed table keys (`${nodeId}:${tableStartLine}`).

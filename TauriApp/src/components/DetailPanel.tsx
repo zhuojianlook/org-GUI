@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useOrgStore } from "../store/useOrgStore";
+import { useOrgStore, gcalCalendarTagSet } from "../store/useOrgStore";
 import {
   demote,
   moveDown,
@@ -26,6 +26,7 @@ export default function DetailPanel() {
   const start = useOrgStore((s) => s.start);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const setNodeSpan = useOrgStore((s) => s.setNodeSpan);
+  const tagColors = useOrgStore((s) => s.tagColors);
 
   const node = doc?.nodes.find((n) => n.id === selectedId);
 
@@ -192,7 +193,77 @@ export default function DetailPanel() {
 
       {/* Tags */}
       <div>
-        <Lbl>Tags (space-separated)</Lbl>
+        <Lbl>Tags</Lbl>
+        {/* Chips: × removes your own tags. Calendar tags (from a synced Google
+            calendar) and inherited tags (from a parent heading) are locked. */}
+        {(() => {
+          const calSet = gcalCalendarTagSet();
+          const own = node.tags;
+          const inherited = node.tagsAll.filter((t) => !own.includes(t));
+          if (own.length === 0 && inherited.length === 0) return null;
+          const removeTag = (t: string) =>
+            edit(setTags, node, own.filter((x) => x !== t).join(" "));
+          const chip = (
+            t: string,
+            opts: { removable?: boolean; locked?: "calendar" | "inherited" },
+          ) => {
+            const c = tagColors[t];
+            return (
+              <span
+                key={`${opts.locked ?? "own"}-${t}`}
+                title={
+                  opts.locked === "calendar"
+                    ? "From a Google calendar — can't be removed here"
+                    : opts.locked === "inherited"
+                      ? "Inherited from a parent heading"
+                      : undefined
+                }
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  padding: "1px 4px 1px 7px",
+                  borderRadius: 10,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  background: c ? hexA(c, 0.22) : "var(--c-surface2)",
+                  border: `1px solid ${c ? hexA(c, 0.6) : "var(--c-border)"}`,
+                  color: "var(--c-text)",
+                  opacity: opts.locked === "inherited" ? 0.6 : 1,
+                }}
+              >
+                {opts.locked === "calendar" && <span aria-hidden>📅</span>}
+                {opts.locked === "inherited" && <span aria-hidden>↑</span>}
+                {t}
+                {opts.removable && (
+                  <button
+                    onClick={() => removeTag(t)}
+                    title={`Remove “${t}”`}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      color: "var(--c-text-dim)",
+                      cursor: "pointer",
+                      fontSize: 13,
+                      lineHeight: 1,
+                      padding: "0 1px",
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
+            );
+          };
+          return (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 6 }}>
+              {own.map((t) => chip(t, { removable: true }))}
+              {inherited.map((t) =>
+                chip(t, { locked: calSet.has(t) ? "calendar" : "inherited" }),
+              )}
+            </div>
+          );
+        })()}
         <input
           value={tagsDraft}
           onChange={(e) => setTagsDraft(e.target.value)}
@@ -203,7 +274,7 @@ export default function DetailPanel() {
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
           style={input}
-          placeholder="wetlab urgent"
+          placeholder="add tags (space-separated)…"
         />
       </div>
 
@@ -476,6 +547,14 @@ function TimeInput({
       title="Type a time (e.g. 9, 930, 14:30) — blank for none"
     />
   );
+}
+
+/** hex (#rrggbb) → rgba string at ALPHA; passthrough for non-hex. */
+function hexA(hex: string, alpha: number): string {
+  const m = hex.match(/^#?([0-9a-f]{6})$/i);
+  if (!m) return hex;
+  const v = parseInt(m[1], 16);
+  return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${alpha})`;
 }
 
 function Lbl({ children }: { children: React.ReactNode }) {
