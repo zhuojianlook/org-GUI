@@ -1032,47 +1032,54 @@ export default function TimelineBand() {
     window.addEventListener("pointerup", up);
   };
 
-  /** Drag a RESIZE GRIP on a span bar to change ONE endpoint, keeping the
-   *  other fixed. Multi-day horizontal bars resize by DATE (grips on the
-   *  left/right edges); same-day vertical bars resize by TIME (grips on the
-   *  top/bottom edges). Commits through setNodeSpan. */
+  /** Drag a RESIZE GRIP on a span bar to change ONE edge, keeping the rest
+   *  fixed. Four independent edges so multi-day TIMED events (staircase) can
+   *  adjust the start time (top of day-1 column), start date (left of it),
+   *  end time (bottom of the last column) and end date (right of it). Same-day
+   *  bars use just startTime/endTime; all-day multi-day bars use
+   *  startDate/endDate. Commits through setNodeSpan. */
   const onBarResize = (
     e: React.PointerEvent,
     d: (typeof nodeDates)[number],
-    edge: "start" | "end",
+    edge: "startTime" | "endTime" | "startDate" | "endDate",
   ) => {
     e.stopPropagation();
     e.preventDefault();
     if (d.kind === "deadline") return;
     setSelectedSpanId(d.nodeId);
     if (timelineSelectedChip) setTimelineSelectedChip(null);
-    const multiDay = d.msEnd != null && d.msEnd > d.ms;
     const hasStartTime = !!d.timeOfDay;
     const hasEndTime = !!d.timeOfDayEnd;
-    const baseStartMs = d.ms + minOfTime(d.timeOfDay) * 60000;
-    const baseEndMs = (d.msEnd ?? d.ms) + minOfTime(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
     const MIN_GAP = 15 * 60000; // keep a same-day block at least 15 min long
-    let curStart = baseStartMs;
-    let curEnd = baseEndMs;
+    let curStart = d.ms + minOfTime(d.timeOfDay) * 60000;
+    let curEnd = (d.msEnd ?? d.ms) + minOfTime(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
+    const dayOf = (ms: number) => startOfDay(new Date(ms)).getTime();
     const move = (ev: PointerEvent) => {
       const r = railRef.current?.getBoundingClientRect();
       if (!r) return;
-      if (multiDay) {
-        // Snap to a day column; preserve the moved endpoint's time-of-day.
-        const dayMs = dateAtClientX(ev.clientX).getTime();
-        if (edge === "start") {
-          const s = dayMs + minOfTime(d.timeOfDay) * 60000;
-          curStart = Math.min(s, curEnd); // start day can't pass end
-        } else {
-          const en = dayMs + minOfTime(d.timeOfDayEnd ?? d.timeOfDay) * 60000;
-          curEnd = Math.max(en, curStart); // end day can't precede start
+      switch (edge) {
+        case "startTime": {
+          // Change the time-of-day of the start, keep its date.
+          const mins = minOfTime(timeAtRailY(ev.clientY - r.top, r.height, workHoursMode));
+          curStart = Math.min(dayOf(curStart) + mins * 60000, curEnd - MIN_GAP);
+          break;
         }
-      } else {
-        // Same-day block: change just the time of the dragged edge.
-        const time = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
-        const t = d.ms + minOfTime(time) * 60000;
-        if (edge === "start") curStart = Math.min(t, curEnd - MIN_GAP);
-        else curEnd = Math.max(t, curStart + MIN_GAP);
+        case "endTime": {
+          const mins = minOfTime(timeAtRailY(ev.clientY - r.top, r.height, workHoursMode));
+          curEnd = Math.max(dayOf(curEnd) + mins * 60000, curStart + MIN_GAP);
+          break;
+        }
+        case "startDate": {
+          // Change the start date, keep its time-of-day offset.
+          const offset = curStart - dayOf(curStart);
+          curStart = Math.min(dateAtClientX(ev.clientX).getTime() + offset, curEnd);
+          break;
+        }
+        case "endDate": {
+          const offset = curEnd - dayOf(curEnd);
+          curEnd = Math.max(dateAtClientX(ev.clientX).getTime() + offset, curStart);
+          break;
+        }
       }
       setSpanPreview({
         nodeId: d.nodeId,
@@ -1512,56 +1519,153 @@ export default function TimelineBand() {
           const truncated = d.title.length > 30 ? d.title.slice(0, 29) + "…" : d.title;
           const rangeLabel = `${effStartTime ?? ""}${effEndTime ? "–" + effEndTime : ""}`.trim();
 
-          // Resize grip at one edge of the bar. Drags ONE endpoint via
-          // onBarResize; stops propagation so the bar's move-drag doesn't
-          // also fire. Horizontal grips (multi-day) sit on the left/right
-          // edges and change the date; vertical grips (same-day) sit on the
-          // top/bottom edges and change the time.
-          const gripEl = (which: "start" | "end", horizontal: boolean) => {
+          // Resize grip on one edge. `side` is the physical edge it sits on;
+          // `edge` is what it changes. Drags via onBarResize; stops the bar's
+          // move-drag. Left/right grips (full height, ew-resize) change a date;
+          // top/bottom grips (full width, ns-resize) change a time.
+          const gripEl = (
+            edge: "startTime" | "endTime" | "startDate" | "endDate",
+            side: "top" | "bottom" | "left" | "right",
+          ) => {
             const accent = isSelected ? "rgba(255,209,102,0.95)" : "rgba(255,255,255,0.3)";
-            const style: React.CSSProperties = horizontal
-              ? {
-                  position: "absolute",
-                  top: 1,
-                  bottom: 1,
-                  width: 7,
-                  left: which === "start" ? 0 : undefined,
-                  right: which === "end" ? 0 : undefined,
-                  cursor: "ew-resize",
-                  background: accent,
-                  borderRadius: 4,
-                  touchAction: "none",
-                }
-              : {
-                  position: "absolute",
-                  left: 1,
-                  right: 1,
-                  height: 5,
-                  top: which === "start" ? 0 : undefined,
-                  bottom: which === "end" ? 0 : undefined,
-                  cursor: "ns-resize",
-                  background: accent,
-                  borderRadius: 4,
-                  touchAction: "none",
-                };
+            const horizontal = side === "left" || side === "right";
+            const style: React.CSSProperties = {
+              position: "absolute",
+              background: accent,
+              borderRadius: 4,
+              touchAction: "none",
+              cursor: horizontal ? "ew-resize" : "ns-resize",
+              ...(horizontal
+                ? {
+                    top: 1,
+                    bottom: 1,
+                    width: 7,
+                    left: side === "left" ? 0 : undefined,
+                    right: side === "right" ? 0 : undefined,
+                  }
+                : {
+                    left: 1,
+                    right: 1,
+                    height: 5,
+                    top: side === "top" ? 0 : undefined,
+                    bottom: side === "bottom" ? 0 : undefined,
+                  }),
+            };
             return (
               <span
-                key={which}
+                key={`${edge}-${side}`}
                 data-pin
-                onPointerDown={(e) => onBarResize(e, d, which)}
+                onPointerDown={(e) => onBarResize(e, d, edge)}
                 style={style}
-                title={which === "start" ? "Drag to change start" : "Drag to change end"}
+                title={`Drag to change ${edge.startsWith("start") ? "start" : "end"} ${
+                  edge.endsWith("Time") ? "time" : "date"
+                }`}
               />
             );
           };
 
+          const timed = !!effStartTime && !!effEndTime;
+          const dayCount = multiDay ? Math.round((effEndDay - effStartDay) / MS_DAY) + 1 : 1;
+          // A multi-day TIMED event renders as a per-day "staircase" so the
+          // start time (top of day 1) and end time (bottom of the last day)
+          // are both visible. Very long spans fall back to a flat bar.
+          const useStaircase = multiDay && timed && dayCount <= 62;
+
           // Drag the bar body to move the whole span (onBarDown handles
-          // click-to-select-vs-drag); the grips resize an endpoint; a plain
-          // click selects the bar so the arrow keys shift it. Deadlines are
-          // click-only (no clean range-write path).
-          if (multiDay) {
-            // Horizontal span across day columns, anchored at the start
-            // time's row (or mid-band when undated).
+          // click-to-select-vs-drag); the grips resize an edge; a plain click
+          // selects the bar so arrow keys shift it. Deadlines are click-only.
+          if (useStaircase) {
+            const topY = yForTimeOfDay("00:00", bandH, workHoursMode);
+            const botY = yForTimeOfDay("23:59", bandH, workHoursMode);
+            const segW = Math.max(8, Math.min(46, pxPerDay - 4));
+            const segs: React.ReactNode[] = [];
+            for (let k = 0; k < dayCount; k++) {
+              // +12h before startOfDay keeps day stepping DST-safe.
+              const dayMs = startOfDay(new Date(effStartDay + k * MS_DAY + 12 * 3_600_000)).getTime();
+              const xp = pct(dayMs);
+              if (xp < -6 || xp > 106) continue;
+              const isFirst = k === 0;
+              const isLast = k === dayCount - 1;
+              const segTop = isFirst ? yForTimeOfDay(effStartTime, bandH, workHoursMode) : topY;
+              const segBot = isLast ? yForTimeOfDay(effEndTime, bandH, workHoursMode) : botY;
+              const segH = Math.max(6, segBot - segTop);
+              segs.push(
+                <button
+                  key={`dur${i}-${k}`}
+                  data-pin
+                  onPointerDown={(e) => onBarDown(e, d)}
+                  title={`${d.title}\n${effStartTime} → ${effEndTime} (${dayCount} days — drag to move, edges to resize)`}
+                  style={{
+                    position: "absolute",
+                    left: `${xp}%`,
+                    top: segTop,
+                    width: segW,
+                    height: segH,
+                    transform: "translateX(-50%)",
+                    borderRadius: 4,
+                    background: bg,
+                    border: isSelected ? "2px solid #ffd166" : `1px solid ${border}`,
+                    color: "var(--c-text)",
+                    padding: 0,
+                    cursor: "grab",
+                    overflow: "visible",
+                    boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
+                  }}
+                >
+                  {isFirst && (
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: -1,
+                        left: segW / 2 + 5,
+                        whiteSpace: "nowrap",
+                        fontSize: 10,
+                        fontWeight: 600,
+                        fontVariantNumeric: "tabular-nums",
+                        pointerEvents: "none",
+                        background: "var(--c-bg)",
+                        padding: "0 3px",
+                        borderRadius: 3,
+                        maxWidth: 180,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {effStartTime} {truncated}
+                    </span>
+                  )}
+                  {isLast && (
+                    <span
+                      style={{
+                        position: "absolute",
+                        bottom: -1,
+                        right: segW / 2 + 5,
+                        whiteSpace: "nowrap",
+                        fontSize: 10,
+                        fontWeight: 500,
+                        fontVariantNumeric: "tabular-nums",
+                        opacity: 0.85,
+                        pointerEvents: "none",
+                        background: "var(--c-bg)",
+                        padding: "0 3px",
+                        borderRadius: 3,
+                      }}
+                    >
+                      →{effEndTime}
+                    </span>
+                  )}
+                  {resizable && isFirst && gripEl("startTime", "top")}
+                  {resizable && isFirst && gripEl("startDate", "left")}
+                  {resizable && isLast && gripEl("endTime", "bottom")}
+                  {resizable && isLast && gripEl("endDate", "right")}
+                </button>,
+              );
+            }
+            out.push(<div key={`dur${i}`}>{segs}</div>);
+          } else if (multiDay) {
+            // All-day (or partially-timed) multi-day span → horizontal bar
+            // across day columns, anchored at the start row (mid-band if
+            // undated). Edges resize the start/end DATE.
             const top = yForTimeOfDay(effStartTime, bandH, workHoursMode);
             const leftClamped = Math.max(0, left);
             const rightClamped = Math.min(100, right);
@@ -1596,12 +1700,13 @@ export default function TimelineBand() {
               >
                 <span aria-hidden style={{ flexShrink: 0, opacity: 0.8 }}>↔</span>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{truncated}</span>
-                {resizable && gripEl("start", true)}
-                {resizable && gripEl("end", true)}
+                {resizable && gripEl("startDate", "left")}
+                {resizable && gripEl("endDate", "right")}
               </button>,
             );
           } else {
             // Same-day time block → vertical bar between start/end rows.
+            // Edges resize the start/end TIME.
             const yStart = yForTimeOfDay(effStartTime, bandH, workHoursMode);
             const yEnd = yForTimeOfDay(effEndTime, bandH, workHoursMode);
             const top = Math.min(yStart, yEnd);
@@ -1646,8 +1751,8 @@ export default function TimelineBand() {
                     {rangeLabel}
                   </span>
                 )}
-                {resizable && gripEl("start", false)}
-                {resizable && gripEl("end", false)}
+                {resizable && gripEl("startTime", "top")}
+                {resizable && gripEl("endTime", "bottom")}
               </button>,
             );
           }
