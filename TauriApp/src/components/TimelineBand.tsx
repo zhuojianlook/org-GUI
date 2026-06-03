@@ -527,12 +527,27 @@ export default function TimelineBand() {
    *    edit doesn't sit forever uncommitted
    * One bridge call per gesture, no matter how long you hold the key.
    */
+  // The optimistic preview is stored as an ABSOLUTE position (ms + time +
+  // commit-ready iso), NOT a relative offset. This is what kills the
+  // oscillation: a relative offset has to be re-applied to the doc's base,
+  // and at the instant the commit lands the base jumps to the new value
+  // while the offset is briefly still applied (or cleared too early),
+  // bouncing the chip. With an absolute preview the chip sits at exactly the
+  // same place before AND after the doc updates, so clearing the preview
+  // once the commit lands is visually seamless.
   const [pendingNudge, setPendingNudge] = useState<{
     nodeId: string;
     isDeadline: boolean;
-    ddate: number;
-    dminutes: number;
+    ms: number; // start-of-day of the preview date
+    timeOfDay: string; // "HH:MM"
+    iso: string; // "YYYY-MM-DD HH:MM" handed to scheduleNode
   } | null>(null);
+  // Mirror of pendingNudge so commit() (fired from keyup/blur/idle) can read
+  // the latest value synchronously without going through a state updater.
+  const pendingNudgeRef = useRef<typeof pendingNudge>(null);
+  useEffect(() => {
+    pendingNudgeRef.current = pendingNudge;
+  }, [pendingNudge]);
   const heldArrowKeys = useRef(new Set<string>());
   const idleCommitTimer = useRef<number | null>(null);
   useEffect(() => {
@@ -553,31 +568,31 @@ export default function TimelineBand() {
         window.clearTimeout(idleCommitTimer.current);
         idleCommitTimer.current = null;
       }
-      setPendingNudge((cur) => {
-        if (!cur) return null;
-        if (cur.ddate === 0 && cur.dminutes === 0) return null;
-        const node = doc?.nodes.find((n) => n.id === cur.nodeId);
-        if (!node) return null;
-        const isoNow = cur.isDeadline ? node.deadline : node.scheduled;
-        const parsed = parseOrgDate(isoNow);
-        if (!parsed) return null;
-        const curTime = timeOfDayFromIso(isoNow) ?? "12:00";
-        const [hh, mm] = curTime.split(":").map((s) => parseInt(s, 10));
-        const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
-        const newDate = new Date(parsed);
-        newDate.setHours(0, 0, 0, 0);
-        newDate.setDate(newDate.getDate() + cur.ddate);
-        const wrapped = ((baseMin + cur.dminutes) % 1440 + 1440) % 1440;
-        const newH = Math.floor(wrapped / 60);
-        const newM = wrapped % 60;
-        const dateStr = `${isoOf(newDate)} ${String(newH).padStart(2, "0")}:${String(newM).padStart(2, "0")}`;
-        // Fire the bridge call; on error the store will surface a toast
-        // and the chip snaps back to the doc's real value on next render.
-        Promise.resolve(
-          scheduleNode(node, dateStr, cur.isDeadline ? "deadline" : "scheduled"),
-        ).catch(() => {});
-        return null;
-      });
+      const cur = pendingNudgeRef.current;
+      if (!cur) return;
+      const node = doc?.nodes.find((n) => n.id === cur.nodeId);
+      if (!node) {
+        setPendingNudge(null);
+        return;
+      }
+      const committedIso = cur.iso;
+      // Keep the preview applied across the bridge round-trip. Because the
+      // preview is absolute, the chip stays exactly where the user put it
+      // while scheduleNode runs. We clear it only AFTER the call settles —
+      // by then `doc` already reflects the committed value (or, on a
+      // validation rejection, is unchanged and the chip correctly snaps
+      // back). Either way, no oscillation.
+      Promise.resolve(
+        scheduleNode(node, committedIso, cur.isDeadline ? "deadline" : "scheduled"),
+      )
+        .catch(() => {})
+        .finally(() => {
+          setPendingNudge((p) =>
+            p && p.nodeId === cur.nodeId && p.isDeadline === cur.isDeadline && p.iso === committedIso
+              ? null
+              : p,
+          );
+        });
     };
 
     const armIdleCommit = () => {
@@ -611,10 +626,37 @@ export default function TimelineBand() {
       heldArrowKeys.current.add(e.key);
       const sel = timelineSelectedChip;
       setPendingNudge((cur) => {
+        // Base to shift FROM: the current preview if we already have one for
+        // this chip, else the chip's committed value in the doc.
+        let baseMs: number;
+        let baseTime: string;
         if (cur && cur.nodeId === sel.nodeId && cur.isDeadline === sel.isDeadline) {
-          return { ...cur, ddate: cur.ddate + ddate, dminutes: cur.dminutes + dminutes };
+          baseMs = cur.ms;
+          baseTime = cur.timeOfDay;
+        } else {
+          const node = doc?.nodes.find((n) => n.id === sel.nodeId);
+          const isoNow = node ? (sel.isDeadline ? node.deadline : node.scheduled) : null;
+          const parsed = parseOrgDate(isoNow);
+          if (!parsed) return cur; // nothing to nudge from
+          baseMs = startOfDay(parsed).getTime();
+          baseTime = timeOfDayFromIso(isoNow) ?? "12:00";
         }
-        return { nodeId: sel.nodeId, isDeadline: sel.isDeadline, ddate, dminutes };
+        const [hh, mm] = baseTime.split(":").map((s) => parseInt(s, 10));
+        const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
+        const nd = new Date(baseMs);
+        nd.setHours(0, 0, 0, 0);
+        nd.setDate(nd.getDate() + ddate);
+        const wrapped = ((baseMin + dminutes) % 1440 + 1440) % 1440;
+        const nh = Math.floor(wrapped / 60);
+        const nm = wrapped % 60;
+        const timeOfDay = `${String(nh).padStart(2, "0")}:${String(nm).padStart(2, "0")}`;
+        return {
+          nodeId: sel.nodeId,
+          isDeadline: sel.isDeadline,
+          ms: startOfDay(nd).getTime(),
+          timeOfDay,
+          iso: `${isoOf(nd)} ${timeOfDay}`,
+        };
       });
       armIdleCommit();
     };
@@ -1293,26 +1335,22 @@ export default function TimelineBand() {
             // the motion is immediate, even though the bridge call only
             // fires on keyup. The committed position (after the bridge
             // round-trip) overrides this on next render.
-            const isPreview =
+            const preview =
               pendingNudge != null &&
               pendingNudge.nodeId === d.nodeId &&
-              pendingNudge.isDeadline === d.deadline &&
-              (pendingNudge.ddate !== 0 || pendingNudge.dminutes !== 0);
+              pendingNudge.isDeadline === d.deadline
+                ? pendingNudge
+                : null;
+            const isPreview = preview != null;
             let left = d.leftPct;
             let top = d.topPx;
             let dispTime = d.timeOfDay;
-            if (isPreview && pendingNudge) {
-              const newMs = d.ms + pendingNudge.ddate * MS_DAY;
-              const baseTime = d.timeOfDay ?? "12:00";
-              const [bh, bm] = baseTime.split(":").map((s) => parseInt(s, 10));
-              const baseMin =
-                (Number.isFinite(bh) ? bh : 12) * 60 + (Number.isFinite(bm) ? bm : 0);
-              const wrapped = ((baseMin + pendingNudge.dminutes) % 1440 + 1440) % 1440;
-              const nh = Math.floor(wrapped / 60);
-              const nm = wrapped % 60;
-              dispTime = `${String(nh).padStart(2, "0")}:${String(nm).padStart(2, "0")}`;
-              left = pct(newMs);
-              top = yForTimeOfDay(dispTime, bandH, workHoursMode);
+            if (preview) {
+              // Absolute preview position — no re-derivation from the doc
+              // base, so the chip doesn't bounce when the commit lands.
+              left = pct(preview.ms);
+              dispTime = preview.timeOfDay;
+              top = yForTimeOfDay(preview.timeOfDay, bandH, workHoursMode);
             }
             const isOverdue = d.deadline && d.ms <= todayMs;
             const isSelected =
