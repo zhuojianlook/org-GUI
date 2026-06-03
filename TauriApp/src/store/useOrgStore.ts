@@ -582,6 +582,8 @@ interface OrgState {
   ) => Promise<void>;
   /** Forget a ghost without pushing (the local move stays). */
   clearGcalGhost: (orgId: string) => void;
+  /** Forget ALL ghosts for the current file (e.g. after a sync reconciled them). */
+  clearGcalGhosts: () => void;
   /** Push all pending local moves to Google (two-way sync), then clear ghosts. */
   syncGcalNow: () => Promise<void>;
   toggleMultiSelected: (id: string) => void;
@@ -1092,6 +1094,12 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     delete next[orgId];
     saveGcalGhosts(file, next);
     set({ gcalGhosts: next });
+  },
+
+  clearGcalGhosts: () => {
+    const { file } = get();
+    saveGcalGhosts(file, {});
+    set({ gcalGhosts: {} });
   },
 
   syncGcalNow: async () => {

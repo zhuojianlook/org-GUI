@@ -1957,11 +1957,32 @@ export default function TimelineBand() {
           const curStart = parseOrgDate(node.timestamp);
           if (!curStart) continue;
           const curTime = timeOfDayFromIso(node.timestamp);
-          const gTime = g.hasStartTime ? hhmmOf(g.startMs) : null;
+          const gStartTime = g.hasStartTime ? hhmmOf(g.startMs) : null;
+          const gEndTime = g.hasEndTime && g.endMs != null ? hhmmOf(g.endMs) : null;
           const gx = xPx(g.startMs);
-          const gy = yForTimeOfDay(gTime ?? "12:00", bandH, workHoursMode);
           const cx = xPx(curStart.getTime());
           const cy = yForTimeOfDay(curTime ?? "12:00", bandH, workHoursMode);
+          // Faded "ghost" geometry mirrors the original event: a vertical bar
+          // for a same-day timed event, a small chip otherwise.
+          const sameDayTimed =
+            g.endMs != null &&
+            !!gStartTime &&
+            !!gEndTime &&
+            startOfDay(new Date(g.startMs)).getTime() === startOfDay(new Date(g.endMs)).getTime();
+          const ghostW = Math.max(36, Math.min(120, pxPerDay - 6));
+          let ghostTop: number;
+          let ghostH: number;
+          if (sameDayTimed) {
+            const t1 = yForTimeOfDay(gStartTime as string, bandH, workHoursMode);
+            const t2 = yForTimeOfDay(gEndTime as string, bandH, workHoursMode);
+            ghostTop = Math.min(t1, t2);
+            ghostH = Math.max(18, Math.abs(t2 - t1));
+          } else {
+            ghostTop = yForTimeOfDay(gStartTime ?? "12:00", bandH, workHoursMode) - 10;
+            ghostH = 20;
+          }
+          const ghostCx = gx + ghostW / 2;
+          const ghostCy = ghostTop + ghostH / 2;
           // Both endpoints far off-screen → nothing useful to draw.
           if ((gx < -20 && cx < -20) || (gx > railWidthPx + 20 && cx > railWidthPx + 20)) continue;
           out.push(
@@ -1970,41 +1991,88 @@ export default function TimelineBand() {
               style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}
             >
               <line
-                x1={gx}
-                y1={gy}
+                x1={ghostCx}
+                y1={ghostCy}
                 x2={cx}
                 y2={cy}
-                stroke="rgba(255,209,102,0.7)"
+                stroke="rgba(255,209,102,0.75)"
                 strokeWidth={1.5}
                 strokeDasharray="4 3"
               />
             </svg>,
           );
           out.push(
-            <button
+            <div
               key={`ghost-${g.orgId}`}
               data-pin
               onClick={(e) => {
                 e.stopPropagation();
-                clearGcalGhost(g.orgId);
+                void syncGcalNow();
               }}
-              title={`“${g.title}” is still at this time in Google Calendar${
-                gTime ? ` (${hhmmOf(g.startMs)})` : ""
-              }.\nClick “Sync calendar” to push your change — or click this ghost to forget it.`}
+              title={`“${g.title}” moved here on the timeline, but Google still has it ${
+                gStartTime ? `at ${gStartTime}` : "at the original time"
+              }.\nClick to push your change to Google Calendar (or the × to forget it).`}
               style={{
                 position: "absolute",
-                left: gx - 7,
-                top: gy - 7,
-                width: 14,
-                height: 14,
-                borderRadius: "50%",
-                background: "transparent",
-                border: "2px dashed rgba(255,209,102,0.85)",
-                cursor: "pointer",
-                padding: 0,
+                left: gx,
+                top: ghostTop,
+                width: ghostW,
+                height: ghostH,
+                borderRadius: 4,
+                // Greyed + diagonally hatched ("cross-shaded") so it reads as a
+                // stale copy, with a dashed amber border tying it to the move.
+                background:
+                  "repeating-linear-gradient(45deg, rgba(140,144,156,0.34) 0 5px, rgba(140,144,156,0.10) 5px 10px)",
+                border: "1px dashed rgba(255,209,102,0.85)",
+                cursor: gcalSyncing ? "default" : "pointer",
+                opacity: gcalSyncing ? 0.5 : 1,
                 zIndex: 6,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                overflow: "visible",
               }}
-            />,
+            >
+              <span
+                aria-hidden
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: "rgba(255,209,102,0.95)",
+                  textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+                  pointerEvents: "none",
+                }}
+              >
+                ⟳
+              </span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  clearGcalGhost(g.orgId);
+                }}
+                title="Forget this ghost (don't push to Google)"
+                style={{
+                  position: "absolute",
+                  top: -7,
+                  right: -7,
+                  width: 14,
+                  height: 14,
+                  borderRadius: "50%",
+                  background: "var(--c-bg)",
+                  border: "1px solid var(--c-border)",
+                  color: "var(--c-text-dim)",
+                  cursor: "pointer",
+                  fontSize: 10,
+                  lineHeight: 1,
+                  padding: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                ×
+              </button>
+            </div>,
           );
         }
         return out;

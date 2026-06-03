@@ -219,6 +219,11 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
       await gcalSync(effClientId, effClientSecret, account, calsToSync, cfg.file.trim(), cfg.twoWay);
       setMsg("Synced. Opening the calendar file…");
       await loadFile(cfg.file.trim());
+      // A sync reconciles local moves with Google (a two-way push lands them;
+      // a one-way fetch reverts them) — either way the move "ghosts" on the
+      // timeline are now resolved. Clear after loadFile so it targets the file
+      // we just synced (now the active file).
+      useOrgStore.getState().clearGcalGhosts();
       await refreshStatus();
       // Refresh the picker (also captures any newly-created calendars).
       void fetchCalendars();

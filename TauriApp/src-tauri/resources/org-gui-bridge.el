@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.64")
+(defconst org-gui-bridge-version "0.2.65")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -108,7 +108,11 @@ planning lines and property drawers."
          (priority (nth 3 components))
          (begin (save-excursion (org-back-to-heading t) (point)))
          (id (format "n%d" begin)) ; stable within one parse; positions re-emitted each parse
-         (org-id (org-entry-get nil "ID"))
+         ;; org-gcal events carry no :ID:; their stable id is the org-gcal
+         ;; `entry-id' property. Fall back to it so calendar events get a stable
+         ;; orgId (the timeline keys move-ghosts on this — without it, moving a
+         ;; gcal event records no ghost and shows no Sync button).
+         (org-id (or (org-entry-get nil "ID") (org-entry-get nil "entry-id")))
          (todo (org-get-todo-state))
          (done (org-gui--b (org-entry-is-done-p)))
          (title (org-get-heading t t t t))
@@ -367,66 +371,48 @@ into a canonical org INNER timestamp body \"2026-06-10 Wed\" /
            (has-time (string-match-p "[0-9]\\{1,2\\}:[0-9]\\{2\\}" s)))
       (format-time-string (if has-time "%Y-%m-%d %a %H:%M" "%Y-%m-%d %a") time))))
 
-(defconst org-gui--standalone-ts-re
-  "\\`[ \t]*<[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}[^>\n]*>\\(?:--<[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}[^>\n]*>\\)?[ \t]*\\'"
-  "Matches a buffer line whose ENTIRE content is one active timestamp, or an
-active timestamp range (e.g. \"<2026-06-10 Wed 14:00-15:30>\" or \"<a>--<b>\").
-Used to find the span line we may rewrite WITHOUT matching prose that merely
-mentions a date or a <<radio target>>.")
-
-(defun org-gui--strip-body-active-timestamps ()
-  "Delete standalone active-timestamp LINES from the current entry's body,
-leaving drawers (:org-gcal:, :LOGBOOK:, …) and prose lines that merely contain
-an inline timestamp untouched. Point may be anywhere in the entry. This is the
-DATA-SAFE replacement for the old \"delete every line matching org-ts-regexp
-between the metadata and the next heading\" loop, which silently destroyed the
-user's notes and the org-gcal description drawer on a routine timeline drag."
-  (org-back-to-heading t)
-  (let* ((hp (point))
-         (limit-fn (lambda () (save-excursion
-                                (goto-char hp)
-                                (if (outline-next-heading) (point) (point-max))))))
-    (save-excursion
-      ;; Start scanning right after planning + the property drawer (NOT `t',
-      ;; which would also skip the :org-gcal: content drawer and hide the
-      ;; standalone timestamp that sits before it).
-      (goto-char (save-excursion (org-end-of-meta-data) (point)))
-      (let ((in-drawer nil)
-            (limit (funcall limit-fn)))
-        (while (< (point) limit)
-          (let ((line (buffer-substring-no-properties
-                       (line-beginning-position) (line-end-position))))
-            (cond
-             ;; Closing a drawer we are inside.
-             ((and in-drawer (string-match-p "\\`[ \t]*:END:[ \t]*\\'" line))
-              (setq in-drawer nil) (forward-line 1))
-             ;; Anywhere inside a drawer — never touch its contents.
-             (in-drawer (forward-line 1))
-             ;; A drawer opener (:NAME:) — step in, preserve everything within.
-             ((and (string-match-p "\\`[ \t]*:[A-Za-z][A-Za-z0-9_@#%-]*:[ \t]*\\'" line)
-                   (not (string-match-p "\\`[ \t]*:END:[ \t]*\\'" line)))
-              (setq in-drawer t) (forward-line 1))
-             ;; A line that is ONLY an active timestamp — the one thing we remove.
-             ((string-match-p org-gui--standalone-ts-re line)
-              (delete-region (line-beginning-position)
-                             (min (1+ (line-end-position)) (point-max)))
-              (setq limit (funcall limit-fn)))
-             (t (forward-line 1)))))))))
+(defconst org-gui--ts-token-re
+  "<[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}[^>\n]*>\\(?:--<[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}[^>\n]*>\\)?"
+  "Matches an active timestamp token, or active timestamp RANGE token, anywhere
+on a line — e.g. \"<2026-06-10 Wed 14:00-15:30>\" or \"<a>--<b>\". Used to find
+THE event/span timestamp surgically (org-gcal stores it inside the :org-gcal:
+drawer; app duration nodes store it as a standalone body line).")
 
 (defun org-gui--write-body-timestamp (ts)
-  "Replace the current entry's standalone body active-timestamp line(s) with
-TS (a fully-formed \"<...>\" / \"<...>--<...>\" string), or just remove them
-when TS is nil/empty. Drawers and prose are preserved (see
-`org-gui--strip-body-active-timestamps'). The new stamp is inserted at the top
-of the body, right after the metadata — matching org-gcal's own layout."
+  "Replace the FIRST active timestamp (or range) anywhere in the current entry
+— its body OR a drawer such as :org-gcal:, where org-gcal stores the event time
+— with TS (a fully-formed \"<...>\" / \"<...>--<...>\" string), preserving the
+REST of the entry (the description text, other dates, drawers). If the entry
+has no timestamp, insert TS right after the property drawer. When TS is
+nil/empty, delete the first timestamp's enclosing line.
+
+This is surgical — exactly ONE timestamp token is touched — so it can never
+destroy the user's notes (the data-loss bug) AND it correctly rewrites the
+event time even when org-gcal keeps it inside the :org-gcal: drawer (the
+in-drawer case the previous strip-based version missed, which reintroduced
+duplicate events on a calendar drag)."
   (org-back-to-heading t)
-  (org-gui--strip-body-active-timestamps)
-  (when (and ts (> (length ts) 0))
-    ;; Insert right after the property drawer / planning, BEFORE any content
-    ;; drawer (:org-gcal:) — org-gcal's own layout, so it parses the event time
-    ;; from this stamp rather than a date inside the description.
-    (goto-char (save-excursion (org-end-of-meta-data) (point)))
-    (insert ts "\n")))
+  (let* ((hp (point))
+         (end (save-excursion (goto-char hp)
+                              (if (outline-next-heading) (point) (point-max))))
+         ;; Start AFTER planning + the property drawer, but BEFORE any content
+         ;; drawer — so the search reaches a timestamp inside :org-gcal:.
+         (start (save-excursion (org-end-of-meta-data) (point)))
+         (have (and ts (> (length ts) 0))))
+    (save-excursion
+      (goto-char start)
+      (cond
+       ((re-search-forward org-gui--ts-token-re end t)
+        (if have
+            (replace-match ts t t)
+          ;; Clearing: drop the timestamp; if its line is now blank, remove it.
+          (replace-match "" t t)
+          (when (looking-at "[ \t]*$")
+            (delete-region (line-beginning-position)
+                           (min (1+ (line-end-position)) (point-max))))))
+       (have
+        (goto-char start)
+        (insert ts "\n"))))))
 
 (defun org-gui-set-timestamp-range (file begin start end)
   "Set the entry at BEGIN to carry a plain active timestamp spanning START
