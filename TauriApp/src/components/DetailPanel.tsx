@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useOrgStore, gcalCalendarTagSet } from "../store/useOrgStore";
+import { useOrgStore, gcalCalendarTagSet, gcalCalendarOptions } from "../store/useOrgStore";
 import {
   demote,
   moveDown,
@@ -26,7 +26,9 @@ export default function DetailPanel() {
   const start = useOrgStore((s) => s.start);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const setNodeSpan = useOrgStore((s) => s.setNodeSpan);
+  const addNodeToGcal = useOrgStore((s) => s.addNodeToGcal);
   const tagColors = useOrgStore((s) => s.tagColors);
+  const [gcalTarget, setGcalTarget] = useState("");
 
   const node = doc?.nodes.find((n) => n.id === selectedId);
 
@@ -277,6 +279,50 @@ export default function DetailPanel() {
           placeholder="add tags (space-separated)…"
         />
       </div>
+
+      {/* Add this task to Google Calendar as a new event. Shown only when at
+          least one calendar is configured and the task isn't already a synced
+          calendar event. */}
+      {(() => {
+        const calOpts = gcalCalendarOptions();
+        const isGcal = !!node.calendarId;
+        if (calOpts.length === 0 || isGcal) return null;
+        const hasTime = !!(node.scheduled || node.deadline || node.timestamp);
+        const target = gcalTarget || calOpts[0].id;
+        return (
+          <div>
+            <Lbl>Google Calendar</Lbl>
+            {!hasTime ? (
+              <div style={{ fontSize: 11, color: "var(--c-text-dim)" }}>
+                Give this task a scheduled date/time to add it to a calendar.
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <select
+                  value={target}
+                  onChange={(e) => setGcalTarget(e.target.value)}
+                  style={{ ...input, flex: 1, minWidth: 0 }}
+                  title="Which Google calendar to add this task to"
+                >
+                  {calOpts.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.summary}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => addNodeToGcal(node, target)}
+                  disabled={saving}
+                  style={actionBtn}
+                  title="Create this task as an event on the selected Google calendar"
+                >
+                  📅 Add
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Shift / promote (org M-up/M-down, M-S-left/right) */}
       <div>

@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.67")
+(defconst org-gui-bridge-version "0.2.68")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -594,11 +594,13 @@ the deletion is wrapped so any later error re-inserts the text."
      (org-schedule nil (format-time-string "%Y-%m-%d")))))
 
 (defun org-gui-set-tags (file begin tags)
-  "Set tags from TAGS (space- or colon-separated), or clear when empty."
+  "Set tags from TAGS (space- or colon-separated), or clear when empty.
+Duplicates are removed (case-sensitively, order preserved) so a free-text
+\"add tag\" can never write `:work:work:'."
   (org-gui--with-heading
    file begin
    (lambda ()
-     (let ((lst (split-string tags "[ :]+" t)))
+     (let ((lst (delete-dups (split-string tags "[ :]+" t))))
        (org-set-tags lst)))))
 
 (defun org-gui-add-tag-many (file begins tag)
@@ -1470,6 +1472,64 @@ only when NOTHING pushed."
     (when (and (= pushed 0) errs)
       (error "Calendar push failed — %s" (mapconcat #'identity (nreverse errs) "; ")))
     (org-gui--doc-json f)))
+
+(defun org-gui--insert-gcal-drawer (ts-string)
+  "Insert an :org-gcal: drawer holding TS-STRING (a full <...> timestamp) right
+after the property drawer of the current entry — org-gcal's native layout."
+  (org-back-to-heading t)
+  (goto-char (save-excursion (org-end-of-meta-data) (point)))
+  (insert (format ":%s:\n%s\n:END:\n"
+                  (or (bound-and-true-p org-gcal-drawer-name) "org-gcal")
+                  ts-string)))
+
+(defun org-gui-gcal-create (file begin client-id client-secret account calendar-id)
+  "Add the task at BEGIN to Google Calendar CALENDAR-ID as a NEW event.
+
+Captures the task's time (SCHEDULED, else an active TIMESTAMP, else DEADLINE),
+rewrites the entry into org-gcal's managed shape (:calendar-id: property + an
+:org-gcal: drawer holding the time, no planning line — so future timeline moves
+stay consistent), then `org-gcal-post-at-point' inserts the event on Google and
+stamps :entry-id:/:ETag:. The task becomes a calendar event you can then move
+and sync like any other. Returns the reparsed doc."
+  (unless (org-gui--gcal-load)
+    (error "org-gcal is not installed yet — install it from the Google Calendar panel"))
+  (setq org-gcal-client-id client-id org-gcal-client-secret client-secret
+        org-gcal-managed-create-from-entry-mode "org")
+  (setq oauth2-auto-additional-providers-alist
+        (assq-delete-all 'org-gcal oauth2-auto-additional-providers-alist))
+  (when (fboundp 'org-gcal-reload-client-id-secret)
+    (org-gcal-reload-client-id-secret))
+  (let ((token (and account (fboundp 'oauth2-auto-access-token-sync)
+                    (oauth2-auto-access-token-sync account 'org-gcal))))
+    (unless (and token (stringp token))
+      (error "Not signed in to Google — open the calendar panel and sign in first"))
+    (org-gui--gcal-share-token account (list calendar-id))
+    (let ((b (org-gui--num begin)) (f (expand-file-name file)))
+      (with-current-buffer (org-gui--visit f)
+        (org-with-wide-buffer
+         (goto-char (min b (point-max)))
+         (org-back-to-heading t)
+         (when (org-entry-get nil "entry-id")
+           (error "This entry is already linked to a Google Calendar event"))
+         (let ((raw (or (org-entry-get nil "SCHEDULED")
+                        (org-entry-get nil "TIMESTAMP")
+                        (org-entry-get nil "DEADLINE"))))
+           (unless raw
+             (error "Give the task a scheduled date/time first, then add it to the calendar"))
+           ;; Move the time into the :org-gcal: drawer: clear planning lines and
+           ;; any body timestamp, then write the drawer copy.
+           (ignore-errors (org-schedule '(4)))
+           (ignore-errors (org-deadline '(4)))
+           (org-gui--write-body-timestamp nil)
+           (org-entry-put nil (or (bound-and-true-p org-gcal-calendar-id-property)
+                                  "calendar-id")
+                          calendar-id)
+           (org-gui--insert-gcal-drawer raw)
+           (let ((res (org-gcal-post-at-point nil nil 'always-push)))
+             (when (and (fboundp 'deferred-p) (deferred-p res))
+               (org-gui--gcal-wait-deferred res 120))))
+         (save-buffer)))
+      (org-gui--doc-json f))))
 
 (defun org-gui--gcal-valid-token (account)
   "Return a currently-valid access token for ACCOUNT (the Google email the

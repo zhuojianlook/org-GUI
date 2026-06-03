@@ -828,6 +828,25 @@ export const gcalSync = (
       )
     : Promise.reject(new Error("Desktop only"));
 
+/** Create a NEW Google Calendar event from the task at BEGIN (assigns it to
+ *  CALENDARID, moves its time into the org-gcal drawer, inserts on Google and
+ *  stamps the entry). The task becomes a synced calendar event. */
+export const gcalCreate = (
+  clientId: string,
+  clientSecret: string,
+  account: string,
+  calendarId: string,
+  file: string,
+  begin: number,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>(
+        "org-gui-gcal-create",
+        [file, String(begin), clientId, clientSecret, account, calendarId],
+        120,
+      )
+    : Promise.reject(new Error("Desktop only"));
+
 /** Push specific moved events to Google by their org-gcal entry-id, via
  *  org-gcal-post-at-point (deterministic — org-gcal-sync's export skips
  *  gcal-managed events). ENTRYIDS are the move-ghost ids. Returns the doc. */

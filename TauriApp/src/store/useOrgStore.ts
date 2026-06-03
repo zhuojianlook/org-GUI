@@ -24,6 +24,7 @@ import {
   setSpan as apiSetSpan,
   gcalMove as apiGcalMove,
   gcalPush as apiGcalPush,
+  gcalCreate as apiGcalCreate,
   incompleteDeps,
   validateScheduleAgainstDeps,
   wouldCreateCycle,
@@ -285,6 +286,36 @@ function pruneGcalGhosts(file: string | null, doc: OrgDoc): Record<string, GcalG
   for (const [orgId, g] of Object.entries(all)) if (ids.has(orgId)) kept[orgId] = g;
   if (Object.keys(kept).length !== Object.keys(all).length) saveGcalGhosts(file, kept);
   return kept;
+}
+
+/** The configured Google calendars [{id, summary}], for the "add to calendar"
+ *  picker. Reads the id→{summary} map the GcalPanel stashes after a fetch. */
+export function gcalCalendarOptions(): { id: string; summary: string }[] {
+  const cals = loadGcalCalMap();
+  return Object.entries(cals).map(([id, v]) => ({ id, summary: v?.summary || id }));
+}
+
+/** Read the saved Google OAuth creds (built-in client unless the user opted
+ *  into their own). Shared by sync, push and create. */
+function readGcalCreds(): { clientId: string; clientSecret: string; account: string } {
+  let cfg: {
+    clientId?: string;
+    clientSecret?: string;
+    account?: string;
+    useOwnClient?: boolean;
+  } = {};
+  try {
+    const raw = localStorage.getItem("org-gui:gcal:config");
+    if (raw) cfg = JSON.parse(raw);
+  } catch {
+    /* ignore */
+  }
+  const usingBuiltIn = HAS_DEFAULT_GOOGLE_CLIENT && !cfg.useOwnClient;
+  return {
+    clientId: (usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_ID : cfg.clientId ?? "").trim(),
+    clientSecret: (usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_SECRET : cfg.clientSecret ?? "").trim(),
+    account: (cfg.account ?? "").trim(),
+  };
 }
 
 /** Tag names that are DERIVED from a Google calendar (a calendar's summary).
@@ -586,6 +617,8 @@ interface OrgState {
   clearGcalGhosts: () => void;
   /** Push all pending local moves to Google (two-way sync), then clear ghosts. */
   syncGcalNow: () => Promise<void>;
+  /** Add a (timed/scheduled) task to Google Calendar CALENDARID as a new event. */
+  addNodeToGcal: (node: OrgNode, calendarId: string) => Promise<void>;
   toggleMultiSelected: (id: string) => void;
   clearMultiSelected: () => void;
   applyTagToSelection: (tag: string) => Promise<void>;
@@ -1100,6 +1133,27 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     const { file } = get();
     saveGcalGhosts(file, {});
     set({ gcalGhosts: {} });
+  },
+
+  addNodeToGcal: async (node, calendarId) => {
+    const { file } = get();
+    if (!file) return;
+    const { clientId, clientSecret, account } = readGcalCreds();
+    if (!clientId || !clientSecret || !account) {
+      set({ error: "Sign in to Google Calendar first (open the 🗓 panel)." });
+      return;
+    }
+    if (!calendarId) {
+      set({ error: "Pick a calendar to add the task to." });
+      return;
+    }
+    set({ saving: true, error: null });
+    try {
+      const newDoc = await apiGcalCreate(clientId, clientSecret, account, calendarId, file, node.begin);
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
+    } catch (e) {
+      set({ error: String(e), saving: false });
+    }
   },
 
   syncGcalNow: async () => {
