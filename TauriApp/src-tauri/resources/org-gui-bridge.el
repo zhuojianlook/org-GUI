@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.69")
+(defconst org-gui-bridge-version "0.2.70")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -513,6 +513,7 @@ description drawers and any SCHEDULED/DEADLINE planning are left intact."
             (e-time (when (and (> (length e) 0)
                                (string-match "\\([0-9]\\{1,2\\}:[0-9]\\{2\\}\\)" e))
                       (match-string 1 e)))
+            (multi (and e-date (not (string= s-date e-date))))
             (same-day (and s-date e-date (string= s-date e-date)))
             (ts (cond
                  ((string-empty-p s) nil)
@@ -522,10 +523,24 @@ description drawers and any SCHEDULED/DEADLINE planning are left intact."
                  ((and e-date (not same-day))
                   (format "<%s>--<%s>"
                           (org-gui--fmt-inner-ts s) (org-gui--fmt-inner-ts e)))
-                 (t (format "<%s>" (org-gui--fmt-inner-ts s))))))
-       ;; Rewrite only the standalone body timestamp line — the :org-gcal:
-       ;; description drawer and the user's notes are left intact.
-       (org-gui--write-body-timestamp ts)))))
+                 (t (format "<%s>" (org-gui--fmt-inner-ts s)))))
+            ;; The org-schedule INNER form (no brackets) for the SCHEDULED case.
+            (sched (cond
+                    ((string-empty-p s) nil)
+                    ((and s-time e-time) (format "%s %s-%s" s-date s-time e-time))
+                    (s-time (format "%s %s" s-date s-time))
+                    (t s-date))))
+       ;; Update the time WHERE org-gcal reads it (org-gcal--get-time-and-desc
+       ;; prefers SCHEDULED). Events org-gui created from a scheduled task keep
+       ;; their time in SCHEDULED with an empty :org-gcal: drawer; fetched
+       ;; events keep it in the drawer. A multi-day move can't live in SCHEDULED
+       ;; (org limitation), so it always uses the drawer.
+       (if (and (org-entry-get nil "SCHEDULED") (not multi))
+           (if sched (org-schedule nil sched) (ignore-errors (org-schedule '(4))))
+         (when multi (ignore-errors (org-schedule '(4))))
+         ;; Rewrite only the event timestamp (body OR :org-gcal: drawer); the
+         ;; description and the user's notes are left intact.
+         (org-gui--write-body-timestamp ts))))))
 
 (defun org-gui-set-priority (file begin prio)
   "Set priority to PRIO (\"A\"/\"B\"/...), or remove it when PRIO is empty."

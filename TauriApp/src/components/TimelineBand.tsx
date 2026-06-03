@@ -451,6 +451,41 @@ export default function TimelineBand() {
     return Promise.resolve(setNodeSpan(node, sStr, eStr));
   };
 
+  // Original position of a POINT chip (scheduled/deadline/single timestamp),
+  // for the move-ghost when first shifting a calendar event shown as a chip
+  // (e.g. an event added from a scheduled task keeps its time in SCHEDULED).
+  const gcalOrigPoint = (
+    node: OrgNode,
+    isDeadline: boolean,
+  ): { startMs: number; endMs: number | null; hasStartTime: boolean; hasEndTime: boolean } | null => {
+    const iso = isDeadline ? node.deadline : node.scheduled ?? node.timestamp;
+    const d = parseOrgDate(iso);
+    if (!d) return null;
+    const t = timeOfDayFromIso(iso);
+    return {
+      startMs: startOfDay(d).getTime() + (t ? minOfTime(t) * 60000 : 0),
+      endMs: null,
+      hasStartTime: !!t,
+      hasEndTime: false,
+    };
+  };
+
+  /** Commit a POINT-chip move (arrow nudge / drag). A calendar event rewrites
+   *  its own time (SCHEDULED or :org-gcal: drawer — wherever org-gcal reads it)
+   *  and drops a move-ghost, so an added calendar task behaves exactly like a
+   *  fetched one. Ordinary tasks use the normal scheduler. */
+  const commitPointMove = (
+    node: OrgNode,
+    iso: string,
+    kind: "scheduled" | "deadline",
+  ): Promise<void> => {
+    if (node.calendarId) {
+      const orig = gcalOrigPoint(node, kind === "deadline");
+      if (orig) return Promise.resolve(moveGcalEvent(node, iso, "", orig));
+    }
+    return Promise.resolve(scheduleNode(node, iso, kind));
+  };
+
   // Live mirrors so the span arrow-key effect / resize drag can read the
   // latest doc + computed spans without re-subscribing on every doc change
   // (the effect is keyed on selectedSpanId only).
@@ -682,7 +717,7 @@ export default function TimelineBand() {
       // validation rejection, is unchanged and the chip correctly snaps
       // back). Either way, no oscillation.
       Promise.resolve(
-        scheduleNode(node, committedIso, cur.isDeadline ? "deadline" : "scheduled"),
+        commitPointMove(node, committedIso, cur.isDeadline ? "deadline" : "scheduled"),
       )
         .catch(() => {})
         .finally(() => {
@@ -982,7 +1017,7 @@ export default function TimelineBand() {
       const dt = dateAtClientX(ev.clientX);
       const time = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
       const dateStr = `${isoOf(dt)} ${time}`;
-      scheduleNode(node, dateStr, info.deadline ? "deadline" : "scheduled");
+      void commitPointMove(node, dateStr, info.deadline ? "deadline" : "scheduled");
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
