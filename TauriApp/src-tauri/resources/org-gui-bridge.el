@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.58")
+(defconst org-gui-bridge-version "0.2.59")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -963,6 +963,94 @@ table syntax is minimally valid; Emacs aligns it on first TAB inside it."
 (defconst org-gui--gcal-dir (expand-file-name "~/.org-gui/elpa")
   "Self-contained package dir for org-gcal and its dependencies.")
 
+(defun org-gui--gcal-curl-post (url data)
+  "POST form-encoded DATA to URL with curl, returning parsed JSON (alist).
+This replaces oauth2-auto's `url-retrieve-synchronously' for the OAuth
+token exchange. That call DEADLOCKS in our headless daemon because it runs
+inside the aio continuation resumed from the loopback server's process
+callback, where a nested Emacs-network synchronous wait never completes.
+`call-process' (a real curl subprocess) blocks cleanly in ANY context —
+it doesn't touch Emacs's network event loop — so it just works."
+  (with-temp-buffer
+    (let ((status (call-process "curl" nil t nil
+                                "-sS" "--max-time" "30"
+                                "-X" "POST"
+                                "-H" "Content-Type: application/x-www-form-urlencoded"
+                                "--data" data
+                                url)))
+      (goto-char (point-min))
+      (let ((parsed (condition-case _
+                        ;; Native parser (Emacs 27+), symbol keys.
+                        (json-parse-buffer :object-type 'alist :array-type 'list
+                                           :null-object nil :false-object nil)
+                      (error nil))))
+        (or parsed
+            (error "OAuth token request failed (curl status %s): %s"
+                   status (buffer-string)))))))
+
+(defun org-gui--install-oauth2-curl-request ()
+  "Redefine `oauth2-auto--request' to POST via curl (see
+`org-gui--gcal-curl-post'). Kept as an `aio-defun' so its `aio-await'
+callers are unchanged; the body just runs synchronous curl instead of the
+deadlocking `url-retrieve-synchronously'. Idempotent; no-op without curl."
+  (when (and (fboundp 'oauth2-auto--request)
+             (fboundp 'aio-defun)
+             (executable-find "curl"))
+    (eval
+     '(aio-defun oauth2-auto--request (provider url-key data-keys extra-alist)
+        (let* ((provider-info (oauth2-auto--provider-info provider))
+               (url (cdr (assoc url-key provider-info)))
+               (data-alist (oauth2-auto--craft-request-alist
+                            provider-info data-keys extra-alist))
+               (data (oauth2-auto--urlify-request data-alist))
+               (response (org-gui--gcal-curl-post url data)))
+          (cond
+           ((assoc 'error response)
+            (error "OAuth error.  Request: %s.  Response: %s"
+                   (pp-to-string data-alist) (pp-to-string response)))
+           (t response))))
+     t)
+    t))
+
+(defconst org-gui--gcal-token-file (expand-file-name "~/.org-gui/gcal-tokens.el")
+  "Plaintext (chmod 600) store for OAuth tokens, replacing oauth2-auto's
+encrypted plstore — whose GPG encryption HANGS in our headless daemon
+\(no pinentry to answer the passphrase prompt). On the user's own machine,
+app-private + owner-only, this is an acceptable tradeoff for a working sync.")
+
+(defun org-gui--gcal-token-db ()
+  "Read the token DB (alist of id→plist) from `org-gui--gcal-token-file'."
+  (when (file-exists-p org-gui--gcal-token-file)
+    (ignore-errors
+      (with-temp-buffer
+        (insert-file-contents org-gui--gcal-token-file)
+        (goto-char (point-min))
+        (read (current-buffer))))))
+
+(defun org-gui--install-token-store-override ()
+  "Replace oauth2-auto's plstore read/write with a plaintext Lisp file so the
+token actually PERSISTS (the encrypted plstore write deadlocks the daemon on
+a GPG prompt). Idempotent."
+  (when (and (fboundp 'oauth2-auto--compute-id)
+             (not (get 'oauth2-auto--plstore-write 'org-gui-plain-override)))
+    (defalias 'oauth2-auto--plstore-write
+      (lambda (username provider plist)
+        (let* ((id (oauth2-auto--compute-id username provider))
+               (db (seq-remove (lambda (e) (equal (car e) id))
+                               (org-gui--gcal-token-db))))
+          (push (cons id plist) db)
+          (with-temp-file org-gui--gcal-token-file
+            (let ((print-level nil) (print-length nil))
+              (prin1 db (current-buffer))))
+          (ignore-errors (set-file-modes org-gui--gcal-token-file #o600))
+          plist)))
+    (defalias 'oauth2-auto--plstore-read
+      (lambda (username provider)
+        (cdr (assoc (oauth2-auto--compute-id username provider)
+                    (org-gui--gcal-token-db)))))
+    (put 'oauth2-auto--plstore-write 'org-gui-plain-override t)
+    t))
+
 (defun org-gui--gcal-load ()
   "Load org-gcal from the app-private package dir. Returns t when org-gcal
 is available (installed + required), nil otherwise. Points org-gcal's
@@ -975,6 +1063,8 @@ never collides with the user's own org-gcal setup."
       (when (require 'org-gcal nil t)
         (require 'oauth2-auto nil t)
         (require 'deferred nil t)
+        (require 'aio nil t)
+        (require 'request nil t)
         (when (boundp 'oauth2-auto-plstore)
           (setq oauth2-auto-plstore (expand-file-name "~/.org-gui/oauth2.plist")))
         ;; Use the automatic browser+loopback OAuth flow: open Google's
@@ -983,6 +1073,19 @@ never collides with the user's own org-gcal setup."
         ;; "click → log in → done" login portal.
         (when (boundp 'oauth2-auto-manually-auth)
           (setq oauth2-auto-manually-auth nil))
+        ;; Route ALL of org-gcal's HTTP through curl subprocesses so nothing
+        ;; deadlocks in the headless daemon: the OAuth token exchange via the
+        ;; curl override, and the event fetch via the `request' library's curl
+        ;; backend (both are real subprocesses, immune to the Emacs-network
+        ;; event-loop re-entrancy that hangs url-retrieve in a callback).
+        (when (executable-find "curl")
+          (org-gui--install-oauth2-curl-request)
+          (when (boundp 'request-backend)
+            (setq request-backend 'curl)))
+        ;; Store tokens in a plaintext app-private file, NOT the encrypted
+        ;; plstore (whose GPG write hangs the headless daemon → token never
+        ;; persists → endless re-auth loop).
+        (org-gui--install-token-store-override)
         t))))
 
 (defun org-gui-gcal-status ()
@@ -997,7 +1100,8 @@ authorized}."
                           (stringp (bound-and-true-p org-gcal-client-secret))
                           (> (length org-gcal-client-secret) 0)))
          (authorized (and available
-                          (file-exists-p (expand-file-name "~/.org-gui/oauth2.plist")))))
+                          (or (file-exists-p org-gui--gcal-token-file)
+                              (file-exists-p (expand-file-name "~/.org-gui/oauth2.plist"))))))
     (json-serialize
      (list (cons 'available (org-gui--b available))
            (cons 'configured (org-gui--b configured))
@@ -1038,40 +1142,68 @@ Non-Google URLs pass through untouched. Installed as :around advice on
                       "prompt=select_account%20consent")))
   (apply orig-fn url args))
 
+(defun org-gui--gcal-wait-deferred (d)
+  "Block until deferred.el object D settles, polling with `sleep-for'.
+Why not `deferred:sync!': it drives the wait with sit-for +
+accept-process-output, under which a NESTED `url-retrieve-synchronously'
+\(org-gcal/oauth2-auto use one for the OAuth token exchange and the event
+fetch) DEADLOCKS in our headless daemon, hanging at \"Contacting host:
+oauth2.googleapis.com\". Polling with `sleep-for' lets the nested
+synchronous request complete (verified). Resignals errors like
+`deferred:sync!'."
+  (let ((result 'org-gui--pending) (uncaught nil))
+    (deferred:try
+      (deferred:nextc d (lambda (x) (setq result x)))
+      :catch (lambda (e) (setq uncaught e)))
+    (while (and (eq result 'org-gui--pending) (null uncaught))
+      (sleep-for 0.2))
+    (when uncaught (deferred:resignal uncaught))
+    result))
+
 (defun org-gui-gcal-sync (client-id client-secret calendar-id file)
   "Configure org-gcal then PULL events from CALENDAR-ID into FILE
 \(one-way fetch — Google → org), and return the freshly parsed FILE doc so
 the timeline reflects the imported events. The first call triggers the
 OAuth consent flow in the system browser; subsequent calls reuse the
-stored token. Runs the async fetch to completion."
+stored token."
   (org-gui--gcal-apply-config client-id client-secret calendar-id file)
   ;; Make sure the target file exists so org-gcal can write into it.
   (let ((f (expand-file-name file)))
     (unless (file-exists-p f)
       (with-temp-file f (insert (format "#+TITLE: Google Calendar (%s)\n" calendar-id))))
-    ;; A previously-interrupted fetch can leave `org-gcal--sync-lock' set,
-    ;; which makes the next `org-gcal-fetch' refuse to start. Clear it.
+    ;; A previously-interrupted fetch can leave `org-gcal--sync-lock' set
+    ;; (refuses the next fetch) and leak loopback OAuth listeners — clear both.
     (when (boundp 'org-gcal--sync-lock)
       (setq org-gcal--sync-lock nil))
-    ;; Drive the fetch to completion before reparsing, so the returned doc
-    ;; already contains the new events. Current org-gcal returns a deferred.el
-    ;; object (older releases returned an aio promise) — wait on whichever we
-    ;; actually get. Passing a deferred to `aio-wait-for' was the
-    ;; "Wrong type argument: aio-promise" crash. The first call opens Google's
-    ;; consent page in the browser and blocks here until you approve it.
-    ;; Force the Google account chooser during this sync (multi-account fix).
-    (advice-add 'browse-url :around #'org-gui--gcal-browse-with-chooser)
-    (unwind-protect
-        (let ((res (if (fboundp 'org-gcal-fetch)
-                       (org-gcal-fetch)
-                     (error "org-gcal-fetch is unavailable"))))
-          (cond
-           ((and (fboundp 'deferred-p) (deferred-p res))
-            (deferred:sync! res))
-           ((and (fboundp 'aio-promise-p) (aio-promise-p res) (fboundp 'aio-wait-for))
-            (aio-wait-for res))
-           (t res)))
-      (advice-remove 'browse-url #'org-gui--gcal-browse-with-chooser))
+    (dolist (p (process-list))
+      (when (string-prefix-p "oauth2-auto--httpd" (process-name p))
+        (ignore-errors (delete-process p))))
+    ;; STEP 1 — obtain + persist the OAuth token via oauth2-auto's OWN
+    ;; synchronous entry point (`oauth2-auto-access-token-sync'), which polls
+    ;; with `sleep-for'. Driving the token exchange with aio-wait-for /
+    ;; deferred:sync! deadlocks its nested url-retrieve-synchronously at
+    ;; "Contacting host: oauth2.googleapis.com" in our headless daemon; the
+    ;; sleep-for poll does not (verified). After this the token is cached, so
+    ;; STEP 2's access-token lookup is a cache hit and never re-enters OAuth.
+    ;; NOTE: we deliberately DON'T force `prompt=select_account' on the
+    ;; authorize URL — it triggers a passkey re-auth in some browsers and a
+    ;; post-consent 400 via the copy-to-incognito detour. Sign-in just uses the
+    ;; browser's current Google session (keep the target account signed in).
+    (when (fboundp 'oauth2-auto-access-token-sync)
+      (oauth2-auto-access-token-sync calendar-id 'org-gcal))
+    ;; STEP 2 — fetch with the cached token, driving the deferred with the
+    ;; same sleep-for poll so the event request can't deadlock either. Force
+    ;; the cancelled-event prompt off so the headless daemon can't hang on y/n.
+    (let ((org-gcal-remove-api-cancelled-events nil))
+      (let ((res (if (fboundp 'org-gcal-fetch)
+                     (org-gcal-fetch)
+                   (error "org-gcal-fetch is unavailable"))))
+        (cond
+         ((and (fboundp 'deferred-p) (deferred-p res))
+          (org-gui--gcal-wait-deferred res))
+         ((and (fboundp 'aio-promise-p) (aio-promise-p res) (fboundp 'oauth2-auto-poll-promise))
+          (oauth2-auto-poll-promise res))
+         (t res))))
     (org-gui--doc-json f)))
 
 ;;;; ---- Dispatch -----------------------------------------------------------
