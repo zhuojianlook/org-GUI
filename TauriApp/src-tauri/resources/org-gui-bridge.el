@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.62")
+(defconst org-gui-bridge-version "0.2.63")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -444,6 +444,57 @@ Returns the freshly parsed doc."
                            (s-time (format "%s %s" s-date s-time))
                            (t s-date))))
                (org-schedule nil sched))))))))))
+
+(defun org-gui-gcal-move (file begin start end)
+  "Move a Google-calendar event at BEGIN to START..END by rewriting its BODY
+active timestamp IN PLACE, in org-gcal's own native shape so the next two-way
+sync can push the change (and so there is exactly ONE timeline entry — never a
+SCHEDULED line beside the untouched gcal timestamp, which is what produced the
+duplicate). START/END are \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM\":
+  - same calendar day, both timed → <DATE DOW HH:MM-HH:MM> (org-gcal's form)
+  - different days                → <START>--<END>
+  - START only / all-day          → <START>
+Existing body timestamp line(s) are replaced; the :PROPERTIES: and :org-gcal:
+description drawers and any SCHEDULED/DEADLINE planning are left intact."
+  (org-gui--with-heading
+   file begin
+   (lambda ()
+     (org-back-to-heading t)
+     (let* ((s (string-trim (or start "")))
+            (e (string-trim (or end "")))
+            (s-date (when (>= (length s) 10) (substring s 0 10)))
+            (e-date (when (>= (length e) 10) (substring e 0 10)))
+            (s-time (when (string-match "\\([0-9]\\{1,2\\}:[0-9]\\{2\\}\\)" s)
+                      (match-string 1 s)))
+            (e-time (when (and (> (length e) 0)
+                               (string-match "\\([0-9]\\{1,2\\}:[0-9]\\{2\\}\\)" e))
+                      (match-string 1 e)))
+            (same-day (and s-date e-date (string= s-date e-date)))
+            (ts (cond
+                 ((string-empty-p s) nil)
+                 ((and same-day s-time e-time)
+                  ;; date-only inner (no start time) + the HH:MM-HH:MM range
+                  (format "<%s %s-%s>" (org-gui--fmt-inner-ts s-date) s-time e-time))
+                 ((and e-date (not same-day))
+                  (format "<%s>--<%s>"
+                          (org-gui--fmt-inner-ts s) (org-gui--fmt-inner-ts e)))
+                 (t (format "<%s>" (org-gui--fmt-inner-ts s)))))
+            (hp (point))
+            (next (save-excursion
+                    (goto-char hp)
+                    (if (outline-next-heading) (point) (point-max)))))
+       ;; Strip existing body active timestamp line(s) only.
+       (save-excursion
+         (goto-char (save-excursion (org-end-of-meta-data t) (point)))
+         (while (and (< (point) next) (re-search-forward org-ts-regexp next t))
+           (delete-region (line-beginning-position)
+                          (min (1+ (line-end-position)) (point-max)))
+           (setq next (save-excursion
+                        (goto-char hp)
+                        (if (outline-next-heading) (point) (point-max))))))
+       (when ts
+         (goto-char (save-excursion (org-end-of-meta-data t) (point)))
+         (insert ts "\n"))))))
 
 (defun org-gui-set-priority (file begin prio)
   "Set priority to PRIO (\"A\"/\"B\"/...), or remove it when PRIO is empty."

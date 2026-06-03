@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useOrgStore } from "../store/useOrgStore";
-import { setDeadlineColor } from "../api/org";
+import { useOrgStore, gcalCalendarTagSet } from "../store/useOrgStore";
+import { setDeadlineColor, setTags } from "../api/org";
 
 interface MenuItem {
   label: string;
@@ -203,9 +203,20 @@ export default function ContextMenu() {
     close();
   };
 
+  // Remove one of the node's OWN tags. Calendar-derived tags (📅) aren't real
+  // org tags on the heading, so they never appear here; inherited tags live on
+  // an ancestor and can't be removed from this node.
+  const removeTag = (t: string) => {
+    if (!node) return;
+    const remaining = (node.tags ?? []).filter((x) => x !== t);
+    void edit(setTags, node, remaining.join(" "));
+  };
+  const calTagSet = gcalCalendarTagSet();
+  const ownTags = node.tags ?? [];
+
   // Keep the menu fully on-screen even when triggered near the right/bottom edges.
   const WIDTH = 220;
-  const HEIGHT = mode === "tag" ? 260 : items.length * 30 + 12;
+  const HEIGHT = mode === "tag" ? 320 : items.length * 30 + 12;
   const left = Math.min(menu.x, window.innerWidth - WIDTH - 8);
   const top = Math.min(menu.y, window.innerHeight - HEIGHT - 8);
 
@@ -249,9 +260,63 @@ export default function ContextMenu() {
               ‹
             </button>
             <span style={{ fontSize: 10.5, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--c-text-dim)", fontWeight: 700 }}>
-              Add tag to this node
+              Tags on this node
             </span>
           </div>
+          {/* Current own tags, each removable with ×. (Calendar 📅 tags aren't
+              real heading tags, so they never show up here.) */}
+          {ownTags.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {ownTags.map((t) => {
+                const locked = calTagSet.has(t);
+                const c = tagColors[t];
+                return (
+                  <span
+                    key={`own-${t}`}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 3,
+                      padding: "1px 4px 1px 6px",
+                      borderRadius: 9,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      fontFamily: "ui-monospace, monospace",
+                      background: c ? `${c}33` : "var(--c-surface2)",
+                      border: `1px solid ${c ? `${c}99` : "var(--c-border)"}`,
+                      color: "var(--c-text)",
+                    }}
+                  >
+                    {locked && <span aria-hidden>📅</span>}
+                    {t}
+                    {!locked && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeTag(t);
+                        }}
+                        title={`Remove :${t}:`}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "var(--c-text-dim)",
+                          cursor: "pointer",
+                          fontSize: 13,
+                          lineHeight: 1,
+                          padding: "0 1px",
+                        }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+          <span style={{ fontSize: 10, letterSpacing: 0.4, textTransform: "uppercase", color: "var(--c-text-dim)", fontWeight: 700, marginTop: 2 }}>
+            Add a tag
+          </span>
           <input
             autoFocus
             value={tagDraft}

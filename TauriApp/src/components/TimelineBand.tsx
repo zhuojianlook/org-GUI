@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useOrgStore, type ZoomLevel } from "../store/useOrgStore";
+import type { OrgNode } from "../api/org";
 import { parseOrgDate, startOfDay } from "../utils/time";
 
 // A horizontal calendar band across the top of the canvas. Shows zoom-level
@@ -239,6 +240,12 @@ export default function TimelineBand() {
   const setTimelineView = useOrgStore((s) => s.setTimelineView);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const setNodeSpan = useOrgStore((s) => s.setNodeSpan);
+  const moveGcalEvent = useOrgStore((s) => s.moveGcalEvent);
+  const gcalGhosts = useOrgStore((s) => s.gcalGhosts);
+  const gcalSyncing = useOrgStore((s) => s.gcalSyncing);
+  const gcalSyncError = useOrgStore((s) => s.gcalSyncError);
+  const syncGcalNow = useOrgStore((s) => s.syncGcalNow);
+  const clearGcalGhost = useOrgStore((s) => s.clearGcalGhost);
   const timelineSelectedChip = useOrgStore((s) => s.timelineSelectedChip);
   const setTimelineSelectedChip = useOrgStore((s) => s.setTimelineSelectedChip);
   const tagColors = useOrgStore((s) => s.tagColors);
@@ -412,6 +419,36 @@ export default function TimelineBand() {
     if (d.msEnd != null && d.msEnd > d.ms) return true;
     if (d.timeOfDayEnd && d.timeOfDay && d.timeOfDayEnd > d.timeOfDay) return true;
     return false;
+  };
+
+  // The node's CURRENT body-timestamp position (start/end instants), used as
+  // the "original" Google position when first moving a calendar event (the doc
+  // hasn't been rewritten yet at commit time, so this is where Google has it).
+  const gcalOrigOf = (
+    node: OrgNode,
+  ): { startMs: number; endMs: number | null; hasStartTime: boolean; hasEndTime: boolean } | null => {
+    const ts = parseOrgDate(node.timestamp);
+    if (!ts) return null;
+    const te = parseOrgDate(node.timestampEnd);
+    const sTime = timeOfDayFromIso(node.timestamp);
+    const eTime = timeOfDayFromIso(node.timestampEnd);
+    return {
+      startMs: startOfDay(ts).getTime() + (sTime ? minOfTime(sTime) * 60000 : 0),
+      endMs: te ? startOfDay(te).getTime() + (eTime ? minOfTime(eTime) * 60000 : 0) : null,
+      hasStartTime: !!sTime,
+      hasEndTime: !!eTime,
+    };
+  };
+
+  /** Commit a span move: calendar events rewrite their body timestamp in place
+   *  (no SCHEDULED, no duplicate) and drop a ghost at the original Google
+   *  position; ordinary nodes use the normal span writer. */
+  const commitSpanMove = (node: OrgNode, sStr: string, eStr: string): Promise<void> => {
+    if (node.calendarId) {
+      const orig = gcalOrigOf(node);
+      if (orig) return Promise.resolve(moveGcalEvent(node, sStr, eStr, orig));
+    }
+    return Promise.resolve(setNodeSpan(node, sStr, eStr));
   };
 
   // Live mirrors so the span arrow-key effect / resize drag can read the
@@ -805,7 +842,7 @@ export default function TimelineBand() {
       const sStr = fmtSpanStr(cur.startMs, cur.hasStartTime);
       const eStr = fmtSpanStr(cur.endMs, cur.hasEndTime || cur.hasStartTime);
       const committedStart = cur.startMs;
-      Promise.resolve(setNodeSpan(node, sStr, eStr))
+      Promise.resolve(commitSpanMove(node, sStr, eStr))
         .catch(() => {})
         .finally(() => {
           setSpanPreview((p) =>
@@ -1025,7 +1062,7 @@ export default function TimelineBand() {
       if (timelineSelectedChip) setTimelineSelectedChip(null);
       // Keep the absolute preview applied across the bridge round-trip so the
       // bar doesn't bounce, then clear once the commit settles.
-      Promise.resolve(setNodeSpan(node, sStr, eStr))
+      Promise.resolve(commitSpanMove(node, sStr, eStr))
         .catch(() => {})
         .finally(() => setSpanPreview((p) => (p && p.nodeId === d.nodeId ? null : p)));
     };
@@ -1100,7 +1137,7 @@ export default function TimelineBand() {
       }
       const sStr = fmtSpanStr(curStart, hasStartTime);
       const eStr = fmtSpanStr(curEnd, hasEndTime || hasStartTime);
-      Promise.resolve(setNodeSpan(node, sStr, eStr))
+      Promise.resolve(commitSpanMove(node, sStr, eStr))
         .catch(() => {})
         .finally(() => setSpanPreview((p) => (p && p.nodeId === d.nodeId ? null : p)));
     };
@@ -1239,6 +1276,51 @@ export default function TimelineBand() {
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--c-text-dim)" }}>
           Deadlines &amp; Milestones
         </span>
+        {/* Pending Google-calendar moves → one-click push. Appears only while
+            there are unsynced local moves (ghosts on the band). */}
+        {Object.keys(gcalGhosts).length > 0 && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              void syncGcalNow();
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            disabled={gcalSyncing}
+            title={
+              gcalSyncError
+                ? `Last sync failed: ${gcalSyncError}`
+                : "Push your moved calendar events to Google Calendar, then refresh"
+            }
+            style={{
+              pointerEvents: "auto",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              background: gcalSyncing ? "var(--c-surface2)" : "rgba(255,209,102,0.18)",
+              color: "var(--c-text)",
+              border: "1px solid rgba(255,209,102,0.85)",
+              borderRadius: 6,
+              padding: "2px 9px",
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: gcalSyncing ? "default" : "pointer",
+              animation: gcalSyncing ? undefined : "priority-pulse 2s ease-in-out infinite",
+            }}
+          >
+            <span aria-hidden>{gcalSyncing ? "⟳" : "📅"}</span>
+            {gcalSyncing
+              ? "Syncing…"
+              : `Sync calendar (${Object.keys(gcalGhosts).length})`}
+          </button>
+        )}
+        {gcalSyncError && Object.keys(gcalGhosts).length > 0 && !gcalSyncing && (
+          <span
+            title={gcalSyncError}
+            style={{ pointerEvents: "auto", fontSize: 11, color: "#ff6c6b", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            ⚠ sync failed
+          </span>
+        )}
         <div style={{ display: "flex", gap: 2, pointerEvents: "auto" }}>
           {ZOOMS.map((z) => (
             <button
@@ -1533,26 +1615,30 @@ export default function TimelineBand() {
             edge: "startTime" | "endTime" | "startDate" | "endDate",
             side: "top" | "bottom" | "left" | "right",
           ) => {
-            const accent = isSelected ? "rgba(255,209,102,0.95)" : "rgba(255,255,255,0.3)";
+            // Grips appear ONLY on the selected bar, so an unselected event's
+            // text isn't covered. They're slim — a thin accent rule on the
+            // edge — and centred so they don't crowd the corners.
+            if (!isSelected) return null;
+            const accent = "rgba(255,209,102,0.95)";
             const horizontal = side === "left" || side === "right";
             const style: React.CSSProperties = {
               position: "absolute",
               background: accent,
-              borderRadius: 4,
+              borderRadius: 3,
               touchAction: "none",
               cursor: horizontal ? "ew-resize" : "ns-resize",
               ...(horizontal
                 ? {
-                    top: 1,
-                    bottom: 1,
-                    width: 7,
+                    top: 3,
+                    bottom: 3,
+                    width: 4,
                     left: side === "left" ? 0 : undefined,
                     right: side === "right" ? 0 : undefined,
                   }
                 : {
-                    left: 1,
-                    right: 1,
-                    height: 5,
+                    left: 6,
+                    right: 6,
+                    height: 3,
                     top: side === "top" ? 0 : undefined,
                     bottom: side === "bottom" ? 0 : undefined,
                   }),
@@ -1761,7 +1847,11 @@ export default function TimelineBand() {
             const yEnd = yForTimeOfDay(effEndTime, bandH, workHoursMode);
             const top = Math.min(yStart, yEnd);
             const height = Math.max(24, Math.abs(yEnd - yStart));
-            const w = Math.max(34, Math.min(160, pxPerDay - 6));
+            const w = Math.max(40, Math.min(170, pxPerDay - 6));
+            // Bars are often too narrow to hold the title; let it escape to the
+            // right as a pill so it's always legible (and overflow:visible so
+            // the pill isn't clipped). The time range stays inside the bar.
+            const wideEnough = w >= 104;
             out.push(
               <button
                 key={`dur${i}`}
@@ -1776,7 +1866,7 @@ export default function TimelineBand() {
                   width: w,
                   transform: "translateX(0)",
                   borderRadius: 5,
-                  background: bg,
+                  background: chipBackground(d.tagsAll, tagColors, isSelected ? 0.62 : 0.52),
                   border: isSelected ? "2px solid #ffd166" : `1px solid ${border}`,
                   color: "var(--c-text)",
                   display: "flex",
@@ -1784,21 +1874,60 @@ export default function TimelineBand() {
                   alignItems: "flex-start",
                   justifyContent: "center",
                   gap: 1,
-                  padding: "4px 6px",
-                  fontSize: 10,
+                  padding: "3px 6px",
+                  fontSize: 11,
                   fontWeight: 600,
-                  overflow: "hidden",
+                  overflow: "visible",
                   cursor: "grab",
                   textAlign: "left",
                   boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
                 }}
               >
-                <span style={{ width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {truncated}
-                </span>
+                {wideEnough && (
+                  <span
+                    style={{
+                      width: "100%",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      textShadow: "0 1px 2px rgba(0,0,0,0.55)",
+                    }}
+                  >
+                    {truncated}
+                  </span>
+                )}
                 {rangeLabel && (
-                  <span style={{ opacity: 0.7, fontVariantNumeric: "tabular-nums", fontWeight: 500 }}>
+                  <span
+                    style={{
+                      opacity: 0.95,
+                      fontVariantNumeric: "tabular-nums",
+                      fontWeight: 600,
+                      textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+                    }}
+                  >
                     {rangeLabel}
+                  </span>
+                )}
+                {!wideEnough && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: -1,
+                      left: w + 4,
+                      whiteSpace: "nowrap",
+                      maxWidth: 190,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      background: "var(--c-bg)",
+                      padding: "0 4px",
+                      borderRadius: 3,
+                      pointerEvents: "none",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+                    }}
+                  >
+                    {truncated}
                   </span>
                 )}
                 {resizable && gripEl("startTime", "top")}
@@ -1806,6 +1935,77 @@ export default function TimelineBand() {
               </button>,
             );
           }
+        }
+        return out;
+      })()}
+
+      {/* Google-calendar "ghosts": where Google still has an event the user
+          moved locally. A faded marker sits at the original spot with a dashed
+          line to the new position; the floating "Sync calendar" button (top
+          row) pushes the moves and clears the ghosts. Click a ghost to forget
+          it without syncing. */}
+      {(() => {
+        const ghosts = Object.values(gcalGhosts);
+        if (ghosts.length === 0 || !doc) return null;
+        const railWidthPx = railRef.current?.getBoundingClientRect().width ?? 800;
+        const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
+        const xPx = (ms: number) => (pct(startOfDay(new Date(ms)).getTime()) / 100) * railWidthPx;
+        const out: React.ReactNode[] = [];
+        for (const g of ghosts) {
+          const node = doc.nodes.find((n) => n.orgId === g.orgId);
+          if (!node) continue;
+          const curStart = parseOrgDate(node.timestamp);
+          if (!curStart) continue;
+          const curTime = timeOfDayFromIso(node.timestamp);
+          const gTime = g.hasStartTime ? hhmmOf(g.startMs) : null;
+          const gx = xPx(g.startMs);
+          const gy = yForTimeOfDay(gTime ?? "12:00", bandH, workHoursMode);
+          const cx = xPx(curStart.getTime());
+          const cy = yForTimeOfDay(curTime ?? "12:00", bandH, workHoursMode);
+          // Both endpoints far off-screen → nothing useful to draw.
+          if ((gx < -20 && cx < -20) || (gx > railWidthPx + 20 && cx > railWidthPx + 20)) continue;
+          out.push(
+            <svg
+              key={`ghostline-${g.orgId}`}
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}
+            >
+              <line
+                x1={gx}
+                y1={gy}
+                x2={cx}
+                y2={cy}
+                stroke="rgba(255,209,102,0.7)"
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+              />
+            </svg>,
+          );
+          out.push(
+            <button
+              key={`ghost-${g.orgId}`}
+              data-pin
+              onClick={(e) => {
+                e.stopPropagation();
+                clearGcalGhost(g.orgId);
+              }}
+              title={`“${g.title}” is still at this time in Google Calendar${
+                gTime ? ` (${hhmmOf(g.startMs)})` : ""
+              }.\nClick “Sync calendar” to push your change — or click this ghost to forget it.`}
+              style={{
+                position: "absolute",
+                left: gx - 7,
+                top: gy - 7,
+                width: 14,
+                height: 14,
+                borderRadius: "50%",
+                background: "transparent",
+                border: "2px dashed rgba(255,209,102,0.85)",
+                cursor: "pointer",
+                padding: 0,
+                zIndex: 6,
+              }}
+            />,
+          );
         }
         return out;
       })()}

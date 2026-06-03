@@ -754,6 +754,20 @@ export const setSpan = (
     ? orgCall<OrgDoc>("org-gui-set-span", [file, String(begin), start, end])
     : Promise.resolve(structuredClone(ensureMock()));
 
+/** Move a Google-calendar event by rewriting its BODY active timestamp in
+ *  place, in org-gcal's native shape (same-day timed → <DATE HH:MM-HH:MM>,
+ *  multi-day → <START>--<END>). No SCHEDULED line is written, so there's no
+ *  duplicate and org-gcal can push the change on the next two-way sync. */
+export const gcalMove = (
+  file: string,
+  begin: number,
+  start: string,
+  end: string,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>("org-gui-gcal-move", [file, String(begin), start, end])
+    : Promise.resolve(structuredClone(ensureMock()));
+
 // ── Google Calendar (org-gcal) ──────────────────────────────────────────
 export interface GcalStatus {
   available: boolean; // org-gcal installed + loadable

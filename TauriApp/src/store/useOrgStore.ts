@@ -22,6 +22,8 @@ import {
   setDeadline as apiSetDeadline,
   setTimestampRange as apiSetTimestampRange,
   setSpan as apiSetSpan,
+  gcalMove as apiGcalMove,
+  gcalSync as apiGcalSync,
   incompleteDeps,
   validateScheduleAgainstDeps,
   wouldCreateCycle,
@@ -30,6 +32,11 @@ import {
   pathExists,
   IN_TAURI,
 } from "../api/org";
+import {
+  DEFAULT_GOOGLE_CLIENT_ID,
+  DEFAULT_GOOGLE_CLIENT_SECRET,
+  HAS_DEFAULT_GOOGLE_CLIENT,
+} from "../config/google";
 
 // The graph is always the main canvas; this is the right-side pull-out panel
 // (null = collapsed, graph full-width). "details" is the same DetailPanel
@@ -219,6 +226,53 @@ function applyGcalCalendarTags(
     if (cal.color && !merged[cal.summary]) merged[cal.summary] = cal.color;
   }
   return merged;
+}
+
+/** Re-inject Google-calendar tags into a FRESHLY-parsed bridge doc, in place.
+ *  Bridge mutators return a raw parse that lacks the frontend-only calendar
+ *  tags; without this, ANY edit (set-tags, schedule, todo, …) strips the
+ *  calendar colours/auras from every node until the next loadFile — which read
+ *  as "removing one tag wiped all tags from all nodes". The calendar COLOURS
+ *  already live in state.tagColors (merged at loadFile), so we only need to
+ *  restore the tagsAll membership here. Returns the same doc for chaining. */
+function reapplyGcalTags<T extends OrgDoc | null | undefined>(doc: T): T {
+  if (doc) applyGcalCalendarTags(doc, {});
+  return doc;
+}
+
+// ── Google Calendar "ghost" moves ─────────────────────────────────────────
+// When the user shifts a Google-calendar event on the timeline, we move it
+// LOCALLY in the .org file (so there's exactly one entry, no duplicate) but
+// remember where Google still has it — a "ghost" of the original. The timeline
+// draws that ghost with a connecting line and a "Sync calendar" button; the
+// push to Google happens only when the user clicks Sync. Keyed by orgId (the
+// org-gcal :ID:, stable across reparses; node `begin` ids are not).
+export interface GcalGhost {
+  orgId: string;
+  calendarId: string;
+  title: string;
+  startMs: number; // ORIGINAL (Google) start instant
+  endMs: number | null; // ORIGINAL end instant (null = a point event)
+  hasStartTime: boolean;
+  hasEndTime: boolean;
+}
+const GCAL_GHOST_KEY = (file: string) => `org-gui:gcalghost:${file}`;
+function loadGcalGhosts(file: string | null): Record<string, GcalGhost> {
+  if (!file) return {};
+  try {
+    const raw = localStorage.getItem(GCAL_GHOST_KEY(file));
+    return raw ? (JSON.parse(raw) as Record<string, GcalGhost>) : {};
+  } catch {
+    return {};
+  }
+}
+function saveGcalGhosts(file: string | null, g: Record<string, GcalGhost>) {
+  if (!file) return;
+  try {
+    localStorage.setItem(GCAL_GHOST_KEY(file), JSON.stringify(g));
+  } catch {
+    /* non-fatal */
+  }
 }
 
 /** Tag names that are DERIVED from a Google calendar (a calendar's summary).
@@ -429,6 +483,12 @@ interface OrgState {
   /** Currently-selected timeline chip (single click on a chip). Arrow keys
    *  nudge this chip's scheduled or deadline date. Esc clears. */
   timelineSelectedChip: { nodeId: string; isDeadline: boolean } | null;
+  /** Google-calendar events moved locally but not yet pushed to Google, keyed
+   *  by orgId. The timeline draws a "ghost" at the original position + a Sync
+   *  button. `gcalSyncing` is true while a push is in flight. */
+  gcalGhosts: Record<string, GcalGhost>;
+  gcalSyncing: boolean;
+  gcalSyncError: string | null;
   /** Multi-selection set for bulk operations (e.g. tag-many). Holds node ids.
    *  Separate from selectedId so the Details panel and ordinary single-select
    *  workflow don't interfere with bulk gestures. */
@@ -498,6 +558,20 @@ interface OrgState {
   setShowTimeline: (v: boolean) => void;
   setTimelineSelectedChip: (chip: { nodeId: string; isDeadline: boolean } | null) => void;
   scheduleNode: (node: OrgNode, dateStr: string, kind: "scheduled" | "deadline") => Promise<void>;
+  /** Move a Google-calendar event LOCALLY (rewrite its body timestamp in
+   *  place — no SCHEDULED line, so org-gcal can still push it and there's no
+   *  duplicate) and record a ghost of where Google still has it. `orig` is the
+   *  event's pre-move position; only the FIRST move per event records it. */
+  moveGcalEvent: (
+    node: OrgNode,
+    start: string,
+    end: string,
+    orig: { startMs: number; endMs: number | null; hasStartTime: boolean; hasEndTime: boolean },
+  ) => Promise<void>;
+  /** Forget a ghost without pushing (the local move stays). */
+  clearGcalGhost: (orgId: string) => void;
+  /** Push all pending local moves to Google (two-way sync), then clear ghosts. */
+  syncGcalNow: () => Promise<void>;
   toggleMultiSelected: (id: string) => void;
   clearMultiSelected: () => void;
   applyTagToSelection: (tag: string) => Promise<void>;
@@ -545,6 +619,9 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   tagAuraEnabled: loadTagAuraEnabled(),
   showTimeline: loadShowTimeline(),
   timelineSelectedChip: null,
+  gcalGhosts: {},
+  gcalSyncing: false,
+  gcalSyncError: null,
   multiSelected: new Set<string>(),
   updateChannel: loadUpdateChannel(),
   contextMenu: null,
@@ -626,6 +703,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         highlightDepth: new Map<string, number>(),
         highlightDone: new Set<string>(),
         timelineSelectedChip: null,
+        gcalGhosts: loadGcalGhosts(file),
       });
       rememberLastFile(file);
     } catch (e) {
@@ -751,7 +829,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       if (after.file !== target || after.loadingFile) return;
       const a = JSON.stringify(fresh.nodes);
       const b = JSON.stringify(doc?.nodes ?? null);
-      if (a !== b) set({ doc: fresh });
+      if (a !== b) set({ doc: reapplyGcalTags(fresh) });
     } catch {
       /* transient parse error while the buffer is mid-edit — ignore */
     }
@@ -762,7 +840,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     if (!file || !doc) return;
     try {
       const newDoc = await apiToggleCheckbox(file, node.begin, index);
-      set({ doc: newDoc });
+      set({ doc: reapplyGcalTags(newDoc) });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -864,7 +942,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiAddDependency(file, fromNode.begin, toNode.begin);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -876,7 +954,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiRemoveDependency(file, fromNode.begin, toNode.begin);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -958,6 +1036,93 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     await get().edit(kind === "scheduled" ? apiSetScheduled : apiSetDeadline, node, dateStr);
   },
 
+  moveGcalEvent: async (node, start, end, orig) => {
+    const { file, doc, gcalGhosts } = get();
+    if (!file || !doc) return;
+    // Record the ghost BEFORE the write, and only once per event so repeated
+    // nudges keep pointing at Google's TRUE original position. Events always
+    // carry an :ID: (org-gcal stamps it); fall back to nothing if missing.
+    if (node.orgId && node.calendarId && !gcalGhosts[node.orgId]) {
+      const ghost: GcalGhost = {
+        orgId: node.orgId,
+        calendarId: node.calendarId,
+        title: node.title ?? "(untitled)",
+        startMs: orig.startMs,
+        endMs: orig.endMs,
+        hasStartTime: orig.hasStartTime,
+        hasEndTime: orig.hasEndTime,
+      };
+      const next = { ...gcalGhosts, [node.orgId]: ghost };
+      saveGcalGhosts(file, next);
+      set({ gcalGhosts: next });
+    }
+    // Rewrite the event's BODY active timestamp in place (org-gcal's native
+    // shape), NOT a SCHEDULED planning line — org-gcal reads the body timestamp
+    // when it pushes, and a SCHEDULED line beside the untouched body timestamp
+    // would show as a DUPLICATE on the timeline.
+    set({ saving: true, error: null });
+    try {
+      const newDoc = await apiGcalMove(file, node.begin, start, end);
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
+    } catch (e) {
+      set({ error: String(e), saving: false });
+    }
+  },
+
+  clearGcalGhost: (orgId) => {
+    const { file, gcalGhosts } = get();
+    if (!gcalGhosts[orgId]) return;
+    const next = { ...gcalGhosts };
+    delete next[orgId];
+    saveGcalGhosts(file, next);
+    set({ gcalGhosts: next });
+  },
+
+  syncGcalNow: async () => {
+    const { file } = get();
+    // Read the same saved config the GcalPanel uses so the timeline's Sync
+    // button works without opening the panel.
+    let cfg: {
+      clientId?: string;
+      clientSecret?: string;
+      account?: string;
+      selectedCalendars?: string[];
+      file?: string;
+      useOwnClient?: boolean;
+    } = {};
+    try {
+      const raw = localStorage.getItem("org-gui:gcal:config");
+      if (raw) cfg = JSON.parse(raw);
+    } catch {
+      /* ignore */
+    }
+    const usingBuiltIn = HAS_DEFAULT_GOOGLE_CLIENT && !cfg.useOwnClient;
+    const clientId = (usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_ID : cfg.clientId ?? "").trim();
+    const clientSecret = (usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_SECRET : cfg.clientSecret ?? "").trim();
+    const account = (cfg.account ?? "").trim();
+    const syncFile = (cfg.file ?? file ?? "").trim();
+    const cals = cfg.selectedCalendars?.length ? cfg.selectedCalendars : account ? [account] : [];
+    if (!clientId || !clientSecret || !account || !syncFile || cals.length === 0) {
+      set({
+        gcalSyncError:
+          "Google Calendar isn't fully set up — open the 🗓 panel and sign in / pick calendars first.",
+      });
+      return;
+    }
+    set({ gcalSyncing: true, gcalSyncError: null });
+    try {
+      // Force two-way so the local moves actually push to Google.
+      await apiGcalSync(clientId, clientSecret, account, cals, syncFile, true);
+      // Reconciled with Google → ghosts are resolved. Clear them, then reload
+      // the file so the timeline reflects whatever Google returned.
+      saveGcalGhosts(syncFile, {});
+      set({ gcalGhosts: {}, gcalSyncing: false });
+      await get().loadFile(syncFile);
+    } catch (e) {
+      set({ gcalSyncing: false, gcalSyncError: String(e) });
+    }
+  },
+
   toggleMultiSelected: (id) =>
     set((s) => {
       const next = new Set(s.multiSelected);
@@ -977,7 +1142,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiAddTagMany(file, begins, t);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -990,7 +1155,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiAddTagMany(file, [node.begin], t);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1050,7 +1215,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiReorderNode(file, node.begin, delta);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1062,7 +1227,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiRefileNode(file, node.begin, targetBegin);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1081,7 +1246,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiStartTask(file, node.begin);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1093,7 +1258,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiArchiveNode(file, node.begin);
-      set({ doc: newDoc, selectedId: null, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1113,7 +1278,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiFn(file, node.begin, value);
       const tracked = idx >= 0 ? (newDoc.nodes[idx]?.id ?? null) : null;
       const newSel = prevSel === node.id ? tracked : prevSel;
-      set({ doc: newDoc, selectedId: newSel, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), selectedId: newSel, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1128,7 +1293,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiSetTimestampRange(file, node.begin, start, end);
       const tracked = idx >= 0 ? (newDoc.nodes[idx]?.id ?? null) : null;
       const newSel = prevSel === node.id ? tracked : prevSel;
-      set({ doc: newDoc, selectedId: newSel, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), selectedId: newSel, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1143,7 +1308,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiSetSpan(file, node.begin, start, end);
       const tracked = idx >= 0 ? (newDoc.nodes[idx]?.id ?? null) : null;
       const newSel = prevSel === node.id ? tracked : prevSel;
-      set({ doc: newDoc, selectedId: newSel, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), selectedId: newSel, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1157,7 +1322,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiSetBody(file, node.begin, body);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1177,7 +1342,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         expanded.add(parentNode.id);
         saveExpanded(file, expanded);
       }
-      set({ doc: newDoc, expanded, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), expanded, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1212,7 +1377,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       // Expand the parent so the new child node is visible.
       const expanded = new Set(get().expanded);
       if (child?.parent) expanded.add(child.parent);
-      set({ doc: newDoc, selectedId: sel, expanded, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), selectedId: sel, expanded, saving: false });
       // Pan the React Flow viewport to the new node and flash it. Top-level
       // headings get appended after the last root and would otherwise drop
       // off-screen — the user had to hunt for them; this surfaces them.
@@ -1236,7 +1401,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiDeleteNode(file, node.begin);
-      set({ doc: newDoc, selectedId: null, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1248,7 +1413,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiSetSubtree(file, begin, text);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
@@ -1260,7 +1425,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       const newDoc = await apiSetFile(file, text);
-      set({ doc: newDoc, saving: false });
+      set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
     }
