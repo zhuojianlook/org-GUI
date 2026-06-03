@@ -51,6 +51,7 @@ export default function TimelineGraph() {
   const refile = useOrgStore((s) => s.refile);
   const depMode = useOrgStore((s) => s.depMode);
   const scheduleMode = useOrgStore((s) => s.scheduleMode);
+  const setScheduleDragNode = useOrgStore((s) => s.setScheduleDragNode);
   const addDependency = useOrgStore((s) => s.addDependency);
   const setConnectDrag = useOrgStore((s) => s.setConnectDrag);
   const rf = useReactFlow();
@@ -230,6 +231,63 @@ export default function TimelineGraph() {
       el.removeEventListener("click", onClickCap, true);
     };
   }, [depMode, byId, addDependency, canLink, setConnectDrag]);
+
+  // Schedule mode: drag a node onto the timeline to set its SCHEDULED date+
+  // time. We use NATIVE capture-phase pointer events (not HTML5 drag-and-
+  // drop) because HTML5 dnd does not fire reliably inside Tauri's WKWebView.
+  // The drop position is resolved by the TimelineBand, which listens for the
+  // events we dispatch here and converts X→date, Y→time.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onDown = (e: PointerEvent) => {
+      if (!scheduleMode || e.button !== 0) return;
+      const nodeEl = (e.target as HTMLElement).closest(".react-flow__node") as HTMLElement | null;
+      const nodeId = nodeEl?.getAttribute("data-id");
+      if (!nodeEl || !nodeId) return; // empty pane → let React Flow pan
+      e.preventDefault();
+      e.stopPropagation();
+      setScheduleDragNode(nodeId);
+      let moved = false;
+      const move = (ev: PointerEvent) => {
+        moved = true;
+        window.dispatchEvent(
+          new CustomEvent("orggui:scheduleDragMove", {
+            detail: { nodeId, x: ev.clientX, y: ev.clientY },
+          }),
+        );
+      };
+      const up = (ev: PointerEvent) => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        setScheduleDragNode(null);
+        // A no-move click shouldn't schedule (and the TimelineBand ignores
+        // drops outside the rail anyway).
+        if (moved) {
+          window.dispatchEvent(
+            new CustomEvent("orggui:scheduleDrop", {
+              detail: { nodeId, x: ev.clientX, y: ev.clientY },
+            }),
+          );
+        }
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    };
+    // Swallow node clicks while in schedule mode so the drag owns the surface.
+    const onClickCap = (e: MouseEvent) => {
+      if (scheduleMode && (e.target as HTMLElement).closest(".react-flow__node")) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    el.addEventListener("pointerdown", onDown, true);
+    el.addEventListener("click", onClickCap, true);
+    return () => {
+      el.removeEventListener("pointerdown", onDown, true);
+      el.removeEventListener("click", onClickCap, true);
+    };
+  }, [scheduleMode, setScheduleDragNode]);
 
   // Cross-component focus: the TimelineBand dispatches "orggui:focusNode" when
   // a date tick is double-clicked. Pan the React Flow viewport to that node and

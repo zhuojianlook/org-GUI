@@ -369,7 +369,6 @@ export default function OrgNode({ data }: NodeProps) {
   const dropTargetId = useOrgStore((s) => s.dropTargetId);
   const depMode = useOrgStore((s) => s.depMode);
   const scheduleMode = useOrgStore((s) => s.scheduleMode);
-  const setScheduleDragNode = useOrgStore((s) => s.setScheduleDragNode);
   const isConnectSource = useOrgStore((s) => s.connectFrom === n.id);
   // null = not the hovered target; true/false = hovered & (in)valid drop
   const connectHoverValid = useOrgStore((s) => (s.connectHover === n.id ? s.connectValid : null));
@@ -420,24 +419,11 @@ export default function OrgNode({ data }: NodeProps) {
   return (
     <div
       className={flashed ? "node-flash" : undefined}
-      // Schedule mode: turn the node into a native HTML5 drag source so it
-      // can be dropped onto the timeline rail to set its scheduled date+
-      // time. Native dnd uses a different event family from React Flow's
-      // pointer-based drag, so the two coexist without conflict — though
-      // we also disable React Flow's nodesDraggable while in this mode to
-      // keep the cursor semantics clean (see TimelineGraph).
-      draggable={scheduleMode}
-      onDragStart={(e) => {
-        if (!scheduleMode) return;
-        e.stopPropagation();
-        e.dataTransfer.setData("application/orggui-node-id", n.id);
-        e.dataTransfer.setData("text/plain", n.title ?? "");
-        e.dataTransfer.effectAllowed = "move";
-        setScheduleDragNode(n.id);
-      }}
-      onDragEnd={() => {
-        if (scheduleMode) setScheduleDragNode(null);
-      }}
+      // Schedule mode drag is handled by TimelineGraph via native pointer
+      // events (HTML5 drag-and-drop does not fire reliably inside Tauri's
+      // WKWebView). We don't set `draggable` here — doing so would let the
+      // webview try to start a native drag and steal the pointer from that
+      // handler. React Flow's nodesDraggable is also off in this mode.
       onClick={(e) => {
         // Cmd/Ctrl-click toggles this node in the multi-selection set used
         // by the "Apply tag to N selected" bulk action. Plain click clears
@@ -494,7 +480,7 @@ export default function OrgNode({ data }: NodeProps) {
         // get a slight grey-out independently.
         opacity: tagFiltered ? 0.18 : n.done ? 0.45 : 1,
         filter: tagFiltered ? "blur(1.5px) grayscale(0.6)" : n.done ? "grayscale(0.7)" : "none",
-        cursor: depMode ? "crosshair" : "pointer",
+        cursor: depMode ? "crosshair" : scheduleMode ? "grab" : "pointer",
       }}
     >
       <Handle

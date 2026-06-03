@@ -434,6 +434,57 @@ export default function TimelineBand() {
     window.addEventListener("pointerup", onUp);
   };
 
+  // Schedule mode: the graph (TimelineGraph) drives a pointer-based drag of a
+  // node and dispatches these events with the cursor position. We render a
+  // live ghost while the cursor is over the rail, and on drop convert
+  // X→date / Y→time and commit the SCHEDULED date through scheduleNode.
+  useEffect(() => {
+    const overRail = (x: number, y: number): DOMRect | null => {
+      const r = railRef.current?.getBoundingClientRect();
+      if (!r || x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+      return r;
+    };
+    const onMove = (e: Event) => {
+      const { nodeId, x, y } = (e as CustomEvent<{ nodeId: string; x: number; y: number }>).detail;
+      const r = overRail(x, y);
+      if (!r) {
+        setChipGhost(null);
+        return;
+      }
+      const node = doc?.nodes.find((n) => n.id === nodeId);
+      const dt = dateAtClientX(x);
+      const time = timeAtRailY(y - r.top, r.height, workHoursMode);
+      setChipGhost({
+        nodeId,
+        deadline: false,
+        title: node?.title ?? "(untitled)",
+        color: "#a3be8c",
+        x,
+        y,
+        iso: `${isoOf(dt)} ${time}`,
+        time,
+      });
+    };
+    const onDrop = (e: Event) => {
+      setChipGhost(null);
+      const { nodeId, x, y } = (e as CustomEvent<{ nodeId: string; x: number; y: number }>).detail;
+      const r = overRail(x, y);
+      if (!r) return; // dropped off the timeline — no-op
+      const node = doc?.nodes.find((n) => n.id === nodeId);
+      if (!node) return;
+      const dt = dateAtClientX(x);
+      const time = timeAtRailY(y - r.top, r.height, workHoursMode);
+      Promise.resolve(scheduleNode(node, `${isoOf(dt)} ${time}`, "scheduled")).catch(() => {});
+      setScheduleMode(false);
+    };
+    window.addEventListener("orggui:scheduleDragMove", onMove);
+    window.addEventListener("orggui:scheduleDrop", onDrop);
+    return () => {
+      window.removeEventListener("orggui:scheduleDragMove", onMove);
+      window.removeEventListener("orggui:scheduleDrop", onDrop);
+    };
+  }, [doc, workHoursMode, scheduleNode, setScheduleMode]);
+
   // Outside-click + Esc closes the stack popover. Capture-phase pointerdown
   // so React Flow / other capture handlers can't swallow the dismiss.
   useEffect(() => {
