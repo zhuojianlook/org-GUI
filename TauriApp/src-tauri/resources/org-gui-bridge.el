@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.46")
+(defconst org-gui-bridge-version "0.2.47")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -883,6 +883,77 @@ table syntax is minimally valid; Emacs aligns it on first TAB inside it."
        (org-gui--refresh-cookies))
       (save-buffer)
       (org-gui--doc-json file))))
+
+;;;; ---- Google Calendar (org-gcal) -----------------------------------------
+;; org-gcal is installed self-contained into ~/.org-gui/elpa (independent of
+;; the user's Doom/straight setup) by the app's `gcal_install' Rust command,
+;; and loaded from there on demand. OAuth tokens persist in a dedicated
+;; plstore so the user authorises once.
+
+(defconst org-gui--gcal-dir (expand-file-name "~/.org-gui/elpa")
+  "Self-contained package dir for org-gcal and its dependencies.")
+
+(defun org-gui--gcal-load ()
+  "Load org-gcal from the app-private package dir. Returns t when org-gcal
+is available (installed + required), nil otherwise. Points org-gcal's
+OAuth token store at an app-scoped plstore so authorisation persists and
+never collides with the user's own org-gcal setup."
+  (ignore-errors
+    (let ((package-user-dir org-gui--gcal-dir))
+      (require 'package)
+      (package-initialize)
+      (when (require 'org-gcal nil t)
+        (require 'oauth2-auto nil t)
+        (when (boundp 'oauth2-auto-plstore)
+          (setq oauth2-auto-plstore (expand-file-name "~/.org-gui/oauth2.plist")))
+        t))))
+
+(defun org-gui-gcal-status ()
+  "Report org-gcal availability/config as JSON {available, configured,
+authorized}."
+  (let* ((available (org-gui--gcal-load))
+         (configured (and available
+                          (boundp 'org-gcal-client-id)
+                          (stringp (bound-and-true-p org-gcal-client-id))
+                          (> (length org-gcal-client-id) 0)
+                          (boundp 'org-gcal-client-secret)
+                          (stringp (bound-and-true-p org-gcal-client-secret))
+                          (> (length org-gcal-client-secret) 0)))
+         (authorized (and available
+                          (file-exists-p (expand-file-name "~/.org-gui/oauth2.plist")))))
+    (json-serialize
+     (list (cons 'available (org-gui--b available))
+           (cons 'configured (org-gui--b configured))
+           (cons 'authorized (org-gui--b authorized))))))
+
+(defun org-gui--gcal-apply-config (client-id client-secret calendar-id file)
+  "Set org-gcal variables: CLIENT-ID/SECRET and a single CALENDAR-ID→FILE map."
+  (unless (org-gui--gcal-load)
+    (error "org-gcal is not installed yet — install it from the Google Calendar panel"))
+  (setq org-gcal-client-id client-id
+        org-gcal-client-secret client-secret
+        org-gcal-fetch-file-alist (list (cons calendar-id (expand-file-name file)))))
+
+(defun org-gui-gcal-sync (client-id client-secret calendar-id file)
+  "Configure org-gcal then PULL events from CALENDAR-ID into FILE
+\(one-way fetch — Google → org), and return the freshly parsed FILE doc so
+the timeline reflects the imported events. The first call triggers the
+OAuth consent flow in the system browser; subsequent calls reuse the
+stored token. Runs the async fetch to completion."
+  (org-gui--gcal-apply-config client-id client-secret calendar-id file)
+  ;; Make sure the target file exists so org-gcal can write into it.
+  (let ((f (expand-file-name file)))
+    (unless (file-exists-p f)
+      (with-temp-file f (insert (format "#+TITLE: Google Calendar (%s)\n" calendar-id))))
+    ;; org-gcal-fetch is asynchronous (aio). Drive it to completion before we
+    ;; reparse, so the returned doc already contains the new events.
+    (cond
+     ((fboundp 'aio-wait-for)
+      (aio-wait-for (org-gcal-fetch)))
+     ((fboundp 'org-gcal-fetch)
+      (org-gcal-fetch))
+     (t (error "org-gcal-fetch is unavailable")))
+    (org-gui--doc-json f)))
 
 ;;;; ---- Dispatch -----------------------------------------------------------
 ;; The app calls everything through `org-gui-call', which writes the result

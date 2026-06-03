@@ -631,6 +631,10 @@ async fn org_call(
     app: tauri::AppHandle,
     func: String,
     args: Vec<String>,
+    // Optional per-call wall-clock ceiling (seconds). Defaults to 30. Long-
+    // running bridge ops (e.g. a Google Calendar sync that waits on the
+    // OAuth browser consent) pass a larger value.
+    timeout_secs: Option<u64>,
 ) -> Result<String, String> {
     // Whitelist: only our own namespaced functions, no arbitrary elisp.
     let valid = func.starts_with("org-gui-")
@@ -668,6 +672,7 @@ async fn org_call(
 
     let bin = emacsclient_bin();
     let tmp_for_blk = tmp.clone();
+    let call_timeout = timeout_secs.unwrap_or(30);
     let result = tauri::async_runtime::spawn_blocking(move || {
         // One attempt = ensure_daemon → emacsclient --eval → read temp file.
         // Returns Err with a stale-socket-shaped message when we want the
@@ -688,7 +693,7 @@ async fn org_call(
             // it). Rather than block this command forever — which strands the
             // whole UI and lets emacsclient zombies pile up — we kill the
             // client and surface a recoverable error pointing at ↻ Daemon.
-            const BRIDGE_CALL_TIMEOUT_SECS: u64 = 30;
+            let bridge_call_timeout_secs = call_timeout;
             let mut child = match std::process::Command::new(&bin)
                 .arg(format!("--socket-name={sock}"))
                 .arg("--eval")
@@ -705,7 +710,7 @@ async fn org_call(
                 }
             };
             let deadline = std::time::Instant::now()
-                + std::time::Duration::from_secs(BRIDGE_CALL_TIMEOUT_SECS);
+                + std::time::Duration::from_secs(bridge_call_timeout_secs);
             let out = loop {
                 match child.try_wait() {
                     Ok(Some(_status)) => {
@@ -718,7 +723,7 @@ async fn org_call(
                             let _ = child.kill();
                             let _ = child.wait();
                             return Err(format!(
-                                "Emacs call timed out after {BRIDGE_CALL_TIMEOUT_SECS}s — the \
+                                "Emacs call timed out after {bridge_call_timeout_secs}s — the \
                                  daemon looks wedged (a runaway parse or a prompt with no \
                                  frame). Click ↻ Restart Emacs daemon in the ⚙ menu to recover.",
                             ));
@@ -889,6 +894,70 @@ fn path_exists(path: String) -> bool {
     !path.is_empty() && std::path::Path::new(&path).exists()
 }
 
+/// Install org-gcal (and its dependencies) into the app-private package dir
+/// `~/.org-gui/elpa`, fully decoupled from the user's Doom/straight setup.
+/// Runs a throwaway `emacs --batch` (NOT the daemon — the download takes
+/// 1–2 min and we don't want to block the daemon), pulling from GNU/NonGNU/
+/// MELPA. The daemon then loads org-gcal from that dir on demand.
+#[tauri::command]
+async fn gcal_install() -> Result<String, String> {
+    let emacs = emacs_bin();
+    let elisp = r#"(let ((package-user-dir (expand-file-name "~/.org-gui/elpa"))
+        (package-archives '(("gnu" . "https://elpa.gnu.org/packages/")
+                            ("nongnu" . "https://elpa.nongnu.org/nongnu/")
+                            ("melpa" . "https://melpa.org/packages/"))))
+    (require 'package)
+    (package-initialize)
+    (unless (package-installed-p 'org-gcal)
+      (package-refresh-contents)
+      (package-install 'org-gcal))
+    (princ (if (package-installed-p 'org-gcal) "INSTALLED" "FAILED")))"#;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut child = std::process::Command::new(&emacs)
+            .arg("-Q")
+            .arg("--batch")
+            .arg("--eval")
+            .arg(elisp)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to launch '{emacs}': {e}"))?;
+        // Generous ceiling — first-time install fetches the archive list +
+        // a dozen packages over the network.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    let out = child
+                        .wait_with_output()
+                        .map_err(|e| format!("Failed to read install output: {e}"))?;
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if stdout.contains("INSTALLED") {
+                        return Ok("org-gcal installed.".to_string());
+                    }
+                    return Err(format!(
+                        "org-gcal install did not complete.\n{}\n{}",
+                        stdout.trim(),
+                        stderr.trim(),
+                    ));
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err("org-gcal install timed out after 5 min (network?).".to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                Err(e) => return Err(format!("Error waiting on install: {e}")),
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Join error: {e}"))?
+}
+
 /// Open a terminal Emacs frame (emacsclient -t) on FILE inside a PTY. Streams
 /// the terminal output to the frontend via `emacs-term-data` events and returns
 /// a session id used by the write/resize/close commands.
@@ -1042,6 +1111,7 @@ pub fn run() {
             restart_app,
             restart_emacs_daemon,
             path_exists,
+            gcal_install,
             emacs_term_open,
             emacs_term_write,
             emacs_term_resize,

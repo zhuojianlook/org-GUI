@@ -11,6 +11,7 @@ import TimelineBand from "./components/TimelineBand";
 import ContextMenu from "./components/ContextMenu";
 import ErrorToast from "./components/ErrorToast";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
+import GcalPanel from "./components/GcalPanel";
 import { useOrgStore } from "./store/useOrgStore";
 import { IN_TAURI } from "./api/org";
 
@@ -31,6 +32,7 @@ export default function App() {
   const loadingFile = useOrgStore((s) => s.loadingFile);
 
   const [showSetup, setShowSetup] = useState(false);
+  const [showGcal, setShowGcal] = useState(false);
 
   useEffect(() => {
     checkEmacs();
@@ -50,8 +52,13 @@ export default function App() {
     })();
     // Toolbar's Setup button asks us to open the modal on demand.
     const onOpen = () => setShowSetup(true);
+    const onGcal = () => setShowGcal(true);
     window.addEventListener("orggui:openSetup", onOpen);
-    return () => window.removeEventListener("orggui:openSetup", onOpen);
+    window.addEventListener("orggui:openGcal", onGcal);
+    return () => {
+      window.removeEventListener("orggui:openSetup", onOpen);
+      window.removeEventListener("orggui:openGcal", onGcal);
+    };
   }, [checkEmacs, restoreSession]);
 
   const pickFile = async () => {
@@ -198,6 +205,7 @@ export default function App() {
         )}
       </div>
       {showSetup && <PrereqsModal onClose={() => setShowSetup(false)} />}
+      {showGcal && <GcalPanel onClose={() => setShowGcal(false)} />}
       <ContextMenu />
       <ErrorToast />
     </div>

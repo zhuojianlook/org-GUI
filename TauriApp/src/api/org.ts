@@ -190,8 +190,9 @@ export function parseCheckboxes(body: string | null): CheckboxItem[] {
 export async function orgCall<T = unknown>(
   func: string,
   args: string[] = [],
+  timeoutSecs?: number,
 ): Promise<T> {
-  const raw = await invoke<string>("org_call", { func, args });
+  const raw = await invoke<string>("org_call", { func, args, timeoutSecs });
   let data: unknown;
   try {
     data = JSON.parse(raw);
@@ -734,6 +735,40 @@ export const setTimestampRange = (
   IN_TAURI
     ? orgCall<OrgDoc>("org-gui-set-timestamp-range", [file, String(begin), start, end])
     : Promise.resolve(structuredClone(ensureMock()));
+
+// ── Google Calendar (org-gcal) ──────────────────────────────────────────
+export interface GcalStatus {
+  available: boolean; // org-gcal installed + loadable
+  configured: boolean; // client id/secret present in the daemon
+  authorized: boolean; // an OAuth token has been stored
+}
+
+/** Install org-gcal + deps into the app-private ~/.org-gui/elpa (1–2 min). */
+export const gcalInstall = (): Promise<string> =>
+  IN_TAURI ? invoke<string>("gcal_install") : Promise.reject(new Error("Desktop only"));
+
+/** Current org-gcal availability/config/authorization state. */
+export const gcalStatus = (): Promise<GcalStatus> =>
+  IN_TAURI
+    ? orgCall<GcalStatus>("org-gui-gcal-status")
+    : Promise.resolve({ available: false, configured: false, authorized: false });
+
+/** Configure org-gcal and pull events from CALENDAR into FILE (Google → org).
+ *  The first call opens the OAuth consent in the browser, so we allow a long
+ *  timeout. Returns the freshly-parsed file doc. */
+export const gcalSync = (
+  clientId: string,
+  clientSecret: string,
+  calendarId: string,
+  file: string,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>(
+        "org-gui-gcal-sync",
+        [clientId, clientSecret, calendarId, file],
+        180, // allow time for browser consent + fetch
+      )
+    : Promise.reject(new Error("Desktop only"));
 
 export const archiveNode = (file: string, begin: number) =>
   IN_TAURI

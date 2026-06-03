@@ -342,6 +342,13 @@ export default function Toolbar() {
             }}
           />
           <MenuItem
+            label="📅 Google Calendar…"
+            onClick={() => {
+              setSystemOpen(false);
+              window.dispatchEvent(new CustomEvent("orggui:openGcal"));
+            }}
+          />
+          <MenuItem
             label="⚙ Emacs / Doom setup…"
             onClick={() => {
               setSystemOpen(false);
