@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.57")
+(defconst org-gui-bridge-version "0.2.58")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -1022,6 +1022,22 @@ Without this the login flow runs against an empty/old client and fails."
   (when (fboundp 'org-gcal-reload-client-id-secret)
     (org-gcal-reload-client-id-secret)))
 
+(defun org-gui--gcal-browse-with-chooser (orig-fn url &rest args)
+  "Append `prompt=select_account' to Google OAuth authorize URLs so the
+account chooser ALWAYS appears. Without it, when the default browser is
+signed into multiple Google accounts the consent flow silently uses the
+wrong (non-test-user) account and dies with Google's generic \"Something
+went wrong\". `consent' is added too so an offline refresh token is issued.
+Non-Google URLs pass through untouched. Installed as :around advice on
+`browse-url' only for the duration of a sync."
+  (when (and (stringp url)
+             (string-match-p "accounts\\.google\\.com/o/oauth2" url)
+             (not (string-match-p "[?&]prompt=" url)))
+    (setq url (concat url
+                      (if (string-match-p "\\?" url) "&" "?")
+                      "prompt=select_account%20consent")))
+  (apply orig-fn url args))
+
 (defun org-gui-gcal-sync (client-id client-secret calendar-id file)
   "Configure org-gcal then PULL events from CALENDAR-ID into FILE
 \(one-way fetch — Google → org), and return the freshly parsed FILE doc so
@@ -1043,15 +1059,19 @@ stored token. Runs the async fetch to completion."
     ;; actually get. Passing a deferred to `aio-wait-for' was the
     ;; "Wrong type argument: aio-promise" crash. The first call opens Google's
     ;; consent page in the browser and blocks here until you approve it.
-    (let ((res (if (fboundp 'org-gcal-fetch)
-                   (org-gcal-fetch)
-                 (error "org-gcal-fetch is unavailable"))))
-      (cond
-       ((and (fboundp 'deferred-p) (deferred-p res))
-        (deferred:sync! res))
-       ((and (fboundp 'aio-promise-p) (aio-promise-p res) (fboundp 'aio-wait-for))
-        (aio-wait-for res))
-       (t res)))
+    ;; Force the Google account chooser during this sync (multi-account fix).
+    (advice-add 'browse-url :around #'org-gui--gcal-browse-with-chooser)
+    (unwind-protect
+        (let ((res (if (fboundp 'org-gcal-fetch)
+                       (org-gcal-fetch)
+                     (error "org-gcal-fetch is unavailable"))))
+          (cond
+           ((and (fboundp 'deferred-p) (deferred-p res))
+            (deferred:sync! res))
+           ((and (fboundp 'aio-promise-p) (aio-promise-p res) (fboundp 'aio-wait-for))
+            (aio-wait-for res))
+           (t res)))
+      (advice-remove 'browse-url #'org-gui--gcal-browse-with-chooser))
     (org-gui--doc-json f)))
 
 ;;;; ---- Dispatch -----------------------------------------------------------
