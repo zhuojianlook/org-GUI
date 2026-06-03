@@ -1149,8 +1149,12 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     }
     set({ saving: true, error: null });
     try {
-      const newDoc = await apiGcalCreate(clientId, clientSecret, account, calendarId, file, node.begin);
-      set({ doc: reapplyGcalTags(newDoc), saving: false });
+      await apiGcalCreate(clientId, clientSecret, account, calendarId, file, node.begin);
+      set({ saving: false });
+      // Reload the file: the create rewrote the entry (new properties + drawer,
+      // shifting later begins) and it's now a calendar event — a fresh parse
+      // re-applies the calendar tag and per-file state cleanly.
+      await get().loadFile(file);
     } catch (e) {
       set({ error: String(e), saving: false });
     }

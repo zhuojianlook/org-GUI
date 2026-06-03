@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.68")
+(defconst org-gui-bridge-version "0.2.69")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1528,8 +1528,11 @@ and sync like any other. Returns the reparsed doc."
            (let ((res (org-gcal-post-at-point nil nil 'always-push)))
              (when (and (fboundp 'deferred-p) (deferred-p res))
                (org-gui--gcal-wait-deferred res 120))))
-         (save-buffer)))
-      (org-gui--doc-json f))))
+         (save-buffer))
+        ;; Parse INSIDE the file's buffer — org-gui--doc-json reads the CURRENT
+        ;; buffer, so calling it outside `with-current-buffer' returned an empty
+        ;; node list and blanked the canvas.
+        (org-gui--doc-json f)))))
 
 (defun org-gui--gcal-valid-token (account)
   "Return a currently-valid access token for ACCOUNT (the Google email the
