@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.51")
+(defconst org-gui-bridge-version "0.2.52")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -974,8 +974,15 @@ never collides with the user's own org-gcal setup."
       (package-initialize)
       (when (require 'org-gcal nil t)
         (require 'oauth2-auto nil t)
+        (require 'deferred nil t)
         (when (boundp 'oauth2-auto-plstore)
           (setq oauth2-auto-plstore (expand-file-name "~/.org-gui/oauth2.plist")))
+        ;; Use the automatic browser+loopback OAuth flow: open Google's
+        ;; consent page in the system browser and capture the redirect on a
+        ;; localhost port — NOT the copy-paste-the-code fallback. This is the
+        ;; "click → log in → done" login portal.
+        (when (boundp 'oauth2-auto-manually-auth)
+          (setq oauth2-auto-manually-auth nil))
         t))))
 
 (defun org-gui-gcal-status ()
@@ -997,12 +1004,23 @@ authorized}."
            (cons 'authorized (org-gui--b authorized))))))
 
 (defun org-gui--gcal-apply-config (client-id client-secret calendar-id file)
-  "Set org-gcal variables: CLIENT-ID/SECRET and a single CALENDAR-ID→FILE map."
+  "Set org-gcal variables: CLIENT-ID/SECRET and a single CALENDAR-ID→FILE map,
+then register the credentials with oauth2-auto. org-gcal does NOT wire its
+client id/secret into oauth2-auto automatically when you just `setq' them —
+the OAuth provider entry is only (re)built by `org-gcal-reload-client-id-secret'.
+Without this the login flow runs against an empty/old client and fails."
   (unless (org-gui--gcal-load)
     (error "org-gcal is not installed yet — install it from the Google Calendar panel"))
   (setq org-gcal-client-id client-id
         org-gcal-client-secret client-secret
-        org-gcal-fetch-file-alist (list (cons calendar-id (expand-file-name file)))))
+        org-gcal-fetch-file-alist (list (cons calendar-id (expand-file-name file))))
+  ;; `org-gcal-reload-client-id-secret' uses `add-to-list', which won't update
+  ;; an existing entry — drop any stale one first so credential changes take.
+  (when (boundp 'oauth2-auto-additional-providers-alist)
+    (setq oauth2-auto-additional-providers-alist
+          (assq-delete-all 'org-gcal oauth2-auto-additional-providers-alist)))
+  (when (fboundp 'org-gcal-reload-client-id-secret)
+    (org-gcal-reload-client-id-secret)))
 
 (defun org-gui-gcal-sync (client-id client-secret calendar-id file)
   "Configure org-gcal then PULL events from CALENDAR-ID into FILE
@@ -1015,14 +1033,25 @@ stored token. Runs the async fetch to completion."
   (let ((f (expand-file-name file)))
     (unless (file-exists-p f)
       (with-temp-file f (insert (format "#+TITLE: Google Calendar (%s)\n" calendar-id))))
-    ;; org-gcal-fetch is asynchronous (aio). Drive it to completion before we
-    ;; reparse, so the returned doc already contains the new events.
-    (cond
-     ((fboundp 'aio-wait-for)
-      (aio-wait-for (org-gcal-fetch)))
-     ((fboundp 'org-gcal-fetch)
-      (org-gcal-fetch))
-     (t (error "org-gcal-fetch is unavailable")))
+    ;; A previously-interrupted fetch can leave `org-gcal--sync-lock' set,
+    ;; which makes the next `org-gcal-fetch' refuse to start. Clear it.
+    (when (boundp 'org-gcal--sync-lock)
+      (setq org-gcal--sync-lock nil))
+    ;; Drive the fetch to completion before reparsing, so the returned doc
+    ;; already contains the new events. Current org-gcal returns a deferred.el
+    ;; object (older releases returned an aio promise) — wait on whichever we
+    ;; actually get. Passing a deferred to `aio-wait-for' was the
+    ;; "Wrong type argument: aio-promise" crash. The first call opens Google's
+    ;; consent page in the browser and blocks here until you approve it.
+    (let ((res (if (fboundp 'org-gcal-fetch)
+                   (org-gcal-fetch)
+                 (error "org-gcal-fetch is unavailable"))))
+      (cond
+       ((and (fboundp 'deferred-p) (deferred-p res))
+        (deferred:sync! res))
+       ((and (fboundp 'aio-promise-p) (aio-promise-p res) (fboundp 'aio-wait-for))
+        (aio-wait-for res))
+       (t res)))
     (org-gui--doc-json f)))
 
 ;;;; ---- Dispatch -----------------------------------------------------------
