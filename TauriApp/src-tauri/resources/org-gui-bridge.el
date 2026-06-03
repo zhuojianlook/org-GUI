@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.65")
+(defconst org-gui-bridge-version "0.2.66")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1354,10 +1354,20 @@ browser consent; later calls reuse the stored token."
     (org-gui--gcal-share-token account ids)
     ;; STEP 2 — fetch (one-way) or full sync (two-way: pull + push edits +
     ;; create assigned + cancel), driving the deferred with the sleep-for poll.
-    ;; Prompts forced off so the headless daemon can't hang on a y/n.
-    (let ((org-gcal-remove-api-cancelled-events nil)
-          (org-gcal-managed-post-at-point-update-existing 'always-push)
-          (res (cond
+    ;;
+    ;; org-gcal decides whether to PUSH an existing edited event inside an
+    ;; async deferred callback (org-gcal--sync-update-entries -> post-at-point),
+    ;; which runs OFF the event loop — i.e. OUTSIDE any `let' dynamic scope we
+    ;; establish here. A `let'-binding of
+    ;; `org-gcal-managed-post-at-point-update-existing' therefore never reaches
+    ;; the callback, which then reads the global default `prompt' -> resolves to
+    ;; `never-push' -> the user's calendar move is silently NOT pushed to Google
+    ;; (the "edits don't show on Google" bug). Set it (and the cancel guard)
+    ;; GLOBALLY in this dedicated daemon so the async push sees them. Prompts
+    ;; are forced off so the headless daemon can't hang on a y/n.
+    (setq org-gcal-managed-post-at-point-update-existing 'always-push
+          org-gcal-remove-api-cancelled-events nil)
+    (let ((res (cond
                 ((and twp (fboundp 'org-gcal-sync)) (org-gcal-sync))
                 ((fboundp 'org-gcal-fetch) (org-gcal-fetch))
                 (t (error "org-gcal is unavailable")))))
