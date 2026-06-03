@@ -1,12 +1,34 @@
 import { useEffect, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useOrgStore } from "../store/useOrgStore";
-import { gcalInstall, gcalStatus, gcalSync, type GcalStatus, IN_TAURI } from "../api/org";
+import {
+  gcalInstall,
+  gcalStatus,
+  gcalSync,
+  gcalCalendars,
+  type GcalStatus,
+  type GcalCalendar,
+  IN_TAURI,
+} from "../api/org";
 import {
   HAS_DEFAULT_GOOGLE_CLIENT,
   DEFAULT_GOOGLE_CLIENT_ID,
   DEFAULT_GOOGLE_CLIENT_SECRET,
 } from "../config/google";
+
+// Mirror of the store's key — GcalPanel writes the id→{summary,colour} map
+// here after a calendar-list fetch; the timeline reads it to colour/tag events
+// by calendar.
+const GCAL_CALS_KEY = "org-gui:gcal:calendars";
+function saveCalMap(cals: GcalCalendar[]) {
+  try {
+    const map: Record<string, { summary: string; color: string | null }> = {};
+    for (const c of cals) map[c.id] = { summary: c.summary, color: c.color };
+    localStorage.setItem(GCAL_CALS_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
 
 // Persisted, non-secret-aware: the client secret lives in localStorage. It's
 // the user's OWN Google OAuth client secret for a desktop app, on their own
@@ -18,24 +40,41 @@ const CFG_KEY = "org-gui:gcal:config";
 interface GcalConfig {
   clientId: string;
   clientSecret: string;
-  calendarId: string;
+  /** The Google account email you sign in with (the primary calendar's id).
+   *  The OAuth token is keyed under this; the calendar picker lists all of
+   *  this account's calendars. */
+  account: string;
+  /** Calendar ids selected to sync (checkboxes). Empty = just the primary. */
+  selectedCalendars: string[];
+  /** Push Emacs edits back to Google on Sync (org-gcal-sync) vs one-way pull. */
+  twoWay: boolean;
   file: string;
   // Opt out of the built-in "Sign in with Google" client and use your own
-  // OAuth credentials instead (advanced). Ignored when the build has no
-  // first-party client baked in — then the fields are the only option.
+  // OAuth credentials instead (advanced).
   useOwnClient: boolean;
+  // Legacy single-calendar field; migrated into `account` on load.
+  calendarId?: string;
 }
 function loadCfg(): GcalConfig {
   const base: GcalConfig = {
     clientId: "",
     clientSecret: "",
-    calendarId: "primary",
+    account: "",
+    selectedCalendars: [],
+    twoWay: false,
     file: "",
     useOwnClient: false,
   };
   try {
     const raw = localStorage.getItem(CFG_KEY);
-    if (raw) return { ...base, ...JSON.parse(raw) };
+    if (raw) {
+      const merged = { ...base, ...JSON.parse(raw) } as GcalConfig;
+      // Migrate the old single calendarId → account.
+      if (!merged.account && merged.calendarId && merged.calendarId !== "primary") {
+        merged.account = merged.calendarId;
+      }
+      return merged;
+    }
   } catch {
     /* ignore */
   }
@@ -67,9 +106,10 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
     return c;
   });
   const [status, setStatus] = useState<GcalStatus | null>(null);
-  const [busy, setBusy] = useState<null | "status" | "install" | "sync">(null);
+  const [busy, setBusy] = useState<null | "status" | "install" | "sync" | "cals">(null);
   const [msg, setMsg] = useState<string>("");
   const [err, setErr] = useState<string>("");
+  const [calendars, setCalendars] = useState<GcalCalendar[]>([]);
 
   const refreshStatus = async () => {
     setBusy("status");
@@ -125,22 +165,60 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
   const usingBuiltIn = HAS_DEFAULT_GOOGLE_CLIENT && !cfg.useOwnClient;
   const effClientId = usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_ID : cfg.clientId.trim();
   const effClientSecret = usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_SECRET : cfg.clientSecret.trim();
-  const effCalendarId = cfg.calendarId.trim() || "primary";
+  const account = cfg.account.trim();
+  // Calendars to sync: the checked ones, or just the account (primary) on the
+  // very first sign-in before the picker is populated.
+  const calsToSync = cfg.selectedCalendars.length ? cfg.selectedCalendars : account ? [account] : [];
 
-  const canSync = !!effClientId && !!effClientSecret && !!effCalendarId && !!cfg.file.trim();
+  const haveCreds = !!effClientId && !!effClientSecret;
+  const canSync = haveCreds && !!account && !!cfg.file.trim() && calsToSync.length > 0;
+
+  // Pull the account's calendar list (after sign-in) to populate the picker,
+  // and stash the id→{name,colour} map for the timeline's per-calendar tags.
+  const fetchCalendars = async () => {
+    if (!haveCreds || !account) return;
+    setBusy("cals");
+    try {
+      const cals = await gcalCalendars(effClientId, effClientSecret, account);
+      setCalendars(cals);
+      saveCalMap(cals);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  // Auto-load the picker once we're authorized and have an account.
+  useEffect(() => {
+    if (IN_TAURI && status?.authorized && account && calendars.length === 0) {
+      void fetchCalendars();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.authorized, account]);
+
+  const toggleCalendar = (id: string) => {
+    const sel = cfg.selectedCalendars.includes(id)
+      ? cfg.selectedCalendars.filter((x) => x !== id)
+      : [...cfg.selectedCalendars, id];
+    set({ selectedCalendars: sel });
+  };
 
   const onSync = async () => {
     setBusy("sync");
     setErr("");
     setMsg(
-      "Syncing… if this is the first time, your browser will open for Google sign-in — approve it, then come back.",
+      cfg.twoWay
+        ? "Two-way syncing… your Emacs edits push to Google and Google's changes pull back."
+        : "Syncing… if this is the first time, your browser opens for Google sign-in — approve it, then come back.",
     );
     try {
-      await gcalSync(effClientId, effClientSecret, effCalendarId, cfg.file.trim());
+      await gcalSync(effClientId, effClientSecret, account, calsToSync, cfg.file.trim(), cfg.twoWay);
       setMsg("Synced. Opening the calendar file…");
       await loadFile(cfg.file.trim());
       await refreshStatus();
-      setMsg("Synced — events are now on the timeline.");
+      // Refresh the picker (also captures any newly-created calendars).
+      void fetchCalendars();
+      setMsg("Synced — events are on the timeline.");
     } catch (e) {
       setErr(String(e));
       setMsg("");
@@ -246,7 +324,7 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
                 Create an OAuth <b>Client ID</b> of type <b>Desktop app</b> — copy the Client ID and
                 Client secret below.
               </li>
-              <li>Your Calendar ID is usually your email, or <code>primary</code> for the main one.</li>
+              <li>Your account is your Gmail address; after sign-in, pick which calendars to sync.</li>
             </ol>
           </details>
         )}
@@ -273,11 +351,11 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
             </Field>
           </>
         )}
-        <Field label="Calendar ID">
+        <Field label="Google account (the email you sign in with)">
           <input
-            value={cfg.calendarId}
-            onChange={(e) => set({ calendarId: e.target.value })}
-            placeholder="primary  (or you@gmail.com)"
+            value={cfg.account}
+            onChange={(e) => set({ account: e.target.value })}
+            placeholder="you@gmail.com"
             style={input}
           />
         </Field>
@@ -295,6 +373,97 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
           </div>
         </Field>
 
+        {/* Multi-calendar picker — appears once authorized + calendars loaded.
+            Each row shows the calendar's Google colour (also used as its tag). */}
+        {status?.authorized && (
+          <Field
+            label={`Calendars to sync${cfg.selectedCalendars.length ? ` (${cfg.selectedCalendars.length} selected)` : ""}`}
+          >
+            {busy === "cals" ? (
+              <span style={{ fontSize: 12, color: "var(--c-text-dim)" }}>Loading calendars…</span>
+            ) : calendars.length === 0 ? (
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: "var(--c-text-dim)" }}>
+                  No calendars loaded yet.
+                </span>
+                <button onClick={fetchCalendars} style={secondaryBtn}>
+                  Load calendars
+                </button>
+              </div>
+            ) : (
+              <div
+                style={{
+                  maxHeight: 168,
+                  overflowY: "auto",
+                  border: "1px solid var(--c-border)",
+                  borderRadius: 7,
+                  padding: "4px 0",
+                }}
+              >
+                {calendars.map((c) => {
+                  const checked = cfg.selectedCalendars.includes(c.id);
+                  return (
+                    <label
+                      key={c.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "5px 10px",
+                        cursor: "pointer",
+                        fontSize: 12.5,
+                      }}
+                    >
+                      <input type="checkbox" checked={checked} onChange={() => toggleCalendar(c.id)} />
+                      <span
+                        style={{
+                          width: 11,
+                          height: 11,
+                          borderRadius: 3,
+                          flexShrink: 0,
+                          background: c.color ?? "var(--c-text-dim)",
+                          boxShadow: "0 0 0 1px rgba(0,0,0,0.25) inset",
+                        }}
+                      />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {c.summary}
+                        {c.primary && (
+                          <span style={{ color: "var(--c-text-dim)", marginLeft: 5 }}>· primary</span>
+                        )}
+                        {c.accessRole === "reader" || c.accessRole === "freeBusyReader" ? (
+                          <span style={{ color: "var(--c-text-dim)", marginLeft: 5 }}>· read-only</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </Field>
+        )}
+
+        {/* Two-way sync toggle. */}
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            marginTop: 4,
+            marginBottom: 10,
+            fontSize: 12.5,
+            cursor: "pointer",
+          }}
+        >
+          <input type="checkbox" checked={cfg.twoWay} onChange={(e) => set({ twoWay: e.target.checked })} />
+          <span>
+            Two-way sync — push my Emacs edits back to Google on Sync
+            <span style={{ color: "var(--c-text-dim)", display: "block", fontSize: 11 }}>
+              Edits to synced events update Google; org entries assigned to a calendar create new
+              events. Off = pull only (Google → org).
+            </span>
+          </span>
+        </label>
+
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
           <button
             onClick={onSync}
@@ -304,19 +473,19 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
               !status?.available
                 ? "Install org-gcal first"
                 : !canSync
-                  ? usingBuiltIn
-                    ? "Choose a target .org file first"
-                    : "Fill in all fields above"
-                  : "Pull events from Google into the target file"
+                  ? "Enter your Google account email and a target .org file"
+                  : cfg.twoWay
+                    ? "Push your edits to Google and pull Google's changes"
+                    : "Pull events from Google into the target file"
             }
           >
             {busy === "sync"
               ? "Syncing…"
-              : usingBuiltIn && !status?.authorized
+              : !status?.authorized
                 ? "Sign in with Google"
-                : usingBuiltIn
-                  ? "Sync now"
-                  : "Sync now (Google → org)"}
+                : cfg.twoWay
+                  ? "Sync now (two-way)"
+                  : "Sync now"}
           </button>
           <button onClick={refreshStatus} disabled={busy != null} style={secondaryBtn}>
             Refresh status
@@ -351,7 +520,8 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
           </p>
         )}
         <p style={{ fontSize: 11, color: "var(--c-text-dim)", marginTop: 14, marginBottom: 0 }}>
-          One-way for now (Google → org). Pushing org changes back to Google is a future step.
+          Each calendar's events are tagged + coloured by calendar on the timeline. Two-way sync
+          pushes your Emacs edits back to Google when enabled.
         </p>
       </div>
     </div>

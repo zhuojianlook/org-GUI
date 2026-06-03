@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.59")
+(defconst org-gui-bridge-version "0.2.60")
 
 ;;;; ---- JSON helpers -------------------------------------------------------
 ;; json-serialize is strict: t=true, :false=false, :null=null, and JSON
@@ -107,6 +107,9 @@ planning lines and property drawers."
          (category (org-get-category))
          (deps-raw (org-entry-get nil "DEPENDS_ON"))
          (deadline-color (org-entry-get nil "DEADLINE_COLOR"))
+         ;; Google Calendar id (org-gcal stamps this on imported events) —
+         ;; drives the per-calendar colour tag on the timeline.
+         (calendar-id (org-entry-get nil "calendar-id"))
          (body (org-gui--entry-body)))
     (list
      (cons 'id id)
@@ -134,6 +137,7 @@ planning lines and property drawers."
      (cons 'orgId (org-gui--s org-id))
      (cons 'dependsOn (vconcat (and deps-raw (split-string deps-raw "[ ]+" t))))
      (cons 'deadlineColor (org-gui--s deadline-color))
+     (cons 'calendarId (org-gui--s calendar-id))
      (cons 'body (org-gui--s body)))))
 
 (defun org-gui--collect-nodes ()
@@ -1126,6 +1130,40 @@ Without this the login flow runs against an empty/old client and fails."
   (when (fboundp 'org-gcal-reload-client-id-secret)
     (org-gcal-reload-client-id-secret)))
 
+(defun org-gui--gcal-apply-config-multi (client-id client-secret calendar-ids file)
+  "Like `org-gui--gcal-apply-config' but maps EVERY id in CALENDAR-IDS (a list)
+to FILE, so org-gcal fetches all selected calendars into the one file."
+  (unless (org-gui--gcal-load)
+    (error "org-gcal is not installed yet — install it from the Google Calendar panel"))
+  (let ((f (expand-file-name file)))
+    (setq org-gcal-client-id client-id
+          org-gcal-client-secret client-secret
+          org-gcal-fetch-file-alist (mapcar (lambda (cid) (cons cid f)) calendar-ids)))
+  (when (boundp 'oauth2-auto-additional-providers-alist)
+    (setq oauth2-auto-additional-providers-alist
+          (assq-delete-all 'org-gcal oauth2-auto-additional-providers-alist)))
+  (when (fboundp 'org-gcal-reload-client-id-secret)
+    (org-gcal-reload-client-id-secret)))
+
+(defun org-gui--gcal-share-token (account calendar-ids)
+  "org-gcal keys OAuth tokens by calendar-id (it calls
+`oauth2-auto-access-token' with the calendar id as the username), so a token
+obtained once under ACCOUNT wouldn't be found for the OTHER calendars and
+each would re-trigger a browser auth. Copy ACCOUNT's token plist to each id
+in CALENDAR-IDS so every selected calendar reuses the single sign-in."
+  (when (fboundp 'oauth2-auto--compute-id)
+    (let* ((db (org-gui--gcal-token-db))
+           (acct (cdr (assoc (oauth2-auto--compute-id account 'org-gcal) db))))
+      (when acct
+        (dolist (cid calendar-ids)
+          (let ((id (oauth2-auto--compute-id cid 'org-gcal)))
+            (setq db (cons (cons id acct)
+                           (seq-remove (lambda (e) (equal (car e) id)) db)))))
+        (with-temp-file org-gui--gcal-token-file
+          (let ((print-level nil) (print-length nil))
+            (prin1 db (current-buffer))))
+        (ignore-errors (set-file-modes org-gui--gcal-token-file #o600))))))
+
 (defun org-gui--gcal-browse-with-chooser (orig-fn url &rest args)
   "Append `prompt=select_account' to Google OAuth authorize URLs so the
 account chooser ALWAYS appears. Without it, when the default browser is
@@ -1160,51 +1198,95 @@ synchronous request complete (verified). Resignals errors like
     (when uncaught (deferred:resignal uncaught))
     result))
 
-(defun org-gui-gcal-sync (client-id client-secret calendar-id file)
-  "Configure org-gcal then PULL events from CALENDAR-ID into FILE
-\(one-way fetch — Google → org), and return the freshly parsed FILE doc so
-the timeline reflects the imported events. The first call triggers the
-OAuth consent flow in the system browser; subsequent calls reuse the
-stored token."
-  (org-gui--gcal-apply-config client-id client-secret calendar-id file)
-  ;; Make sure the target file exists so org-gcal can write into it.
-  (let ((f (expand-file-name file)))
+(defun org-gui-gcal-sync (client-id client-secret account calendar-ids file two-way)
+  "Sync the selected Google calendars into FILE and return the reparsed doc.
+ACCOUNT is the Google email signed in (the token's oauth2-auto username).
+CALENDAR-IDS is a comma-separated list of calendar ids to sync. When TWO-WAY
+is non-nil (\"t\"/\"1\"), use `org-gcal-sync' which ALSO pushes Emacs edits
+back to Google (and creates events for org entries assigned to a calendar);
+otherwise a one-way `org-gcal-fetch' (Google → org). First call triggers the
+browser consent; later calls reuse the stored token."
+  (let* ((ids (split-string (or calendar-ids "") "," t "[ \t]*"))
+         (ids (or ids (and account (list account))))
+         (twp (member two-way '("t" "1" "true" t)))
+         (f (expand-file-name file)))
+    (org-gui--gcal-apply-config-multi client-id client-secret ids file)
     (unless (file-exists-p f)
-      (with-temp-file f (insert (format "#+TITLE: Google Calendar (%s)\n" calendar-id))))
-    ;; A previously-interrupted fetch can leave `org-gcal--sync-lock' set
-    ;; (refuses the next fetch) and leak loopback OAuth listeners — clear both.
-    (when (boundp 'org-gcal--sync-lock)
-      (setq org-gcal--sync-lock nil))
+      (with-temp-file f (insert "#+TITLE: Google Calendar\n")))
+    ;; Clear a stale sync lock + leaked loopback listeners from prior aborts.
+    (when (boundp 'org-gcal--sync-lock) (setq org-gcal--sync-lock nil))
     (dolist (p (process-list))
       (when (string-prefix-p "oauth2-auto--httpd" (process-name p))
         (ignore-errors (delete-process p))))
-    ;; STEP 1 — obtain + persist the OAuth token via oauth2-auto's OWN
-    ;; synchronous entry point (`oauth2-auto-access-token-sync'), which polls
-    ;; with `sleep-for'. Driving the token exchange with aio-wait-for /
-    ;; deferred:sync! deadlocks its nested url-retrieve-synchronously at
-    ;; "Contacting host: oauth2.googleapis.com" in our headless daemon; the
-    ;; sleep-for poll does not (verified). After this the token is cached, so
-    ;; STEP 2's access-token lookup is a cache hit and never re-enters OAuth.
-    ;; NOTE: we deliberately DON'T force `prompt=select_account' on the
-    ;; authorize URL — it triggers a passkey re-auth in some browsers and a
-    ;; post-consent 400 via the copy-to-incognito detour. Sign-in just uses the
-    ;; browser's current Google session (keep the target account signed in).
-    (when (fboundp 'oauth2-auto-access-token-sync)
-      (oauth2-auto-access-token-sync calendar-id 'org-gcal))
-    ;; STEP 2 — fetch with the cached token, driving the deferred with the
-    ;; same sleep-for poll so the event request can't deadlock either. Force
-    ;; the cancelled-event prompt off so the headless daemon can't hang on y/n.
-    (let ((org-gcal-remove-api-cancelled-events nil))
-      (let ((res (if (fboundp 'org-gcal-fetch)
-                     (org-gcal-fetch)
-                   (error "org-gcal-fetch is unavailable"))))
-        (cond
-         ((and (fboundp 'deferred-p) (deferred-p res))
-          (org-gui--gcal-wait-deferred res))
-         ((and (fboundp 'aio-promise-p) (aio-promise-p res) (fboundp 'oauth2-auto-poll-promise))
-          (oauth2-auto-poll-promise res))
-         (t res))))
+    ;; STEP 1 — sign in ONCE for the account (sleep-for-polled; the curl token
+    ;; override makes the exchange complete instead of deadlocking), then SHARE
+    ;; that token to every selected calendar id so none of them re-prompts.
+    (when (and account (fboundp 'oauth2-auto-access-token-sync))
+      (oauth2-auto-access-token-sync account 'org-gcal))
+    (org-gui--gcal-share-token account ids)
+    ;; STEP 2 — fetch (one-way) or full sync (two-way: pull + push edits +
+    ;; create assigned + cancel), driving the deferred with the sleep-for poll.
+    ;; Prompts forced off so the headless daemon can't hang on a y/n.
+    (let ((org-gcal-remove-api-cancelled-events nil)
+          (org-gcal-managed-post-at-point-update-existing 'always-push)
+          (res (cond
+                ((and twp (fboundp 'org-gcal-sync)) (org-gcal-sync))
+                ((fboundp 'org-gcal-fetch) (org-gcal-fetch))
+                (t (error "org-gcal is unavailable")))))
+      (cond
+       ((and (fboundp 'deferred-p) (deferred-p res))
+        (org-gui--gcal-wait-deferred res))
+       ((and (fboundp 'aio-promise-p) (aio-promise-p res) (fboundp 'oauth2-auto-poll-promise))
+        (oauth2-auto-poll-promise res))
+       (t res)))
     (org-gui--doc-json f)))
+
+(defun org-gui--gcal-valid-token (account)
+  "Return a currently-valid access token for ACCOUNT (the Google email the
+token is stored under), refreshing via curl if expired. No browser popup as
+long as a token already exists; errors if not signed in."
+  (or (and (fboundp 'oauth2-auto-access-token-sync)
+           (ignore-errors (oauth2-auto-access-token-sync account 'org-gcal)))
+      (plist-get (cdar (org-gui--gcal-token-db)) :access-token)
+      (error "Not signed in to Google yet — click Sign in with Google first")))
+
+(defun org-gui-gcal-calendars (client-id client-secret account)
+  "Return JSON array of the signed-in ACCOUNT's Google calendars:
+[{id, summary, primary, color, accessRole}]. ACCOUNT is the Google email
+used at sign-in (the oauth2-auto username the token is keyed under). Used to
+populate the multi-calendar picker."
+  (unless (org-gui--gcal-load)
+    (error "org-gcal is not installed yet — install it from the Google Calendar panel"))
+  (setq org-gcal-client-id client-id org-gcal-client-secret client-secret)
+  (when (boundp 'oauth2-auto-additional-providers-alist)
+    (setq oauth2-auto-additional-providers-alist
+          (assq-delete-all 'org-gcal oauth2-auto-additional-providers-alist)))
+  (when (fboundp 'org-gcal-reload-client-id-secret)
+    (org-gcal-reload-client-id-secret))
+  (let ((tok (org-gui--gcal-valid-token account)))
+    (with-temp-buffer
+      (call-process "curl" nil t nil "-sS" "--max-time" "25"
+                    "-H" (concat "Authorization: Bearer " tok)
+                    (concat "https://www.googleapis.com/calendar/v3/users/me/calendarList"
+                            "?fields=items(id,summary,summaryOverride,primary,backgroundColor,accessRole)"))
+      (goto-char (point-min))
+      (let* ((j (json-parse-buffer :object-type 'alist :array-type 'list
+                                   :null-object nil :false-object nil))
+             (err (alist-get 'error j))
+             (items (alist-get 'items j)))
+        (when err
+          (error "Calendar list failed: %s" (or (alist-get 'message err) err)))
+        (json-serialize
+         (vconcat
+          (mapcar (lambda (c)
+                    (list (cons 'id (org-gui--s (alist-get 'id c)))
+                          (cons 'summary (org-gui--s (or (alist-get 'summaryOverride c)
+                                                         (alist-get 'summary c)
+                                                         (alist-get 'id c))))
+                          (cons 'primary (org-gui--b (alist-get 'primary c)))
+                          (cons 'color (org-gui--s (alist-get 'backgroundColor c)))
+                          (cons 'accessRole (org-gui--s (alist-get 'accessRole c)))))
+                  items)))))))
 
 ;;;; ---- Dispatch -----------------------------------------------------------
 ;; The app calls everything through `org-gui-call', which writes the result

@@ -36,6 +36,9 @@ export interface OrgNode {
   dependsOn: string[]; // org IDs of prerequisite nodes (this node depends on them)
   /** Optional CSS color from :DEADLINE_COLOR: property, overriding the default red. */
   deadlineColor: string | null;
+  /** Google Calendar id (org-gcal :calendar-id: property) for imported events.
+   *  Drives the per-calendar colour tag on the timeline. Null for non-gcal nodes. */
+  calendarId: string | null;
   body: string | null;
 }
 
@@ -427,7 +430,8 @@ function emptyNode(begin: number, level: number, parent: string | null, title: s
     scheduledEnd: null, deadlineEnd: null, timestampEnd: null,
     rawScheduled: null, rawDeadline: null, rawClosed: null,
     raw: `${"*".repeat(level)} ${title}`,
-    category: "Demo", orgId: null, dependsOn: [], deadlineColor: null, body: null,
+    category: "Demo", orgId: null, dependsOn: [], deadlineColor: null,
+    calendarId: null, body: null,
   };
 }
 
@@ -767,20 +771,46 @@ export const gcalStatus = (): Promise<GcalStatus> =>
     ? orgCall<GcalStatus>("org-gui-gcal-status")
     : Promise.resolve({ available: false, configured: false, authorized: false });
 
-/** Configure org-gcal and pull events from CALENDAR into FILE (Google → org).
- *  The first call opens the OAuth consent in the browser, so we allow a long
+/** One of the signed-in account's Google calendars (from calendarList). */
+export interface GcalCalendar {
+  id: string;
+  summary: string;
+  primary: boolean;
+  color: string | null; // Google's backgroundColor, used for the per-calendar tag
+  accessRole: string | null; // owner | writer | reader | freeBusyReader
+}
+
+/** List the signed-in ACCOUNT's calendars (needs a stored token). */
+export const gcalCalendars = (
+  clientId: string,
+  clientSecret: string,
+  account: string,
+): Promise<GcalCalendar[]> =>
+  IN_TAURI
+    ? orgCall<GcalCalendar[]>(
+        "org-gui-gcal-calendars",
+        [clientId, clientSecret, account],
+        60,
+      )
+    : Promise.resolve([]);
+
+/** Sync the selected calendars into FILE. ACCOUNT is the signed-in email;
+ *  CALENDARIDS the calendars to sync; TWOWAY pushes Emacs edits back to Google
+ *  (org-gcal-sync) vs one-way fetch. First call opens OAuth consent → long
  *  timeout. Returns the freshly-parsed file doc. */
 export const gcalSync = (
   clientId: string,
   clientSecret: string,
-  calendarId: string,
+  account: string,
+  calendarIds: string[],
   file: string,
+  twoWay: boolean,
 ): Promise<OrgDoc> =>
   IN_TAURI
     ? orgCall<OrgDoc>(
         "org-gui-gcal-sync",
-        [clientId, clientSecret, calendarId, file],
-        180, // allow time for browser consent + fetch
+        [clientId, clientSecret, account, calendarIds.join(","), file, twoWay ? "t" : "nil"],
+        300, // browser consent + push + fetch across multiple calendars
       )
     : Promise.reject(new Error("Desktop only"));
 

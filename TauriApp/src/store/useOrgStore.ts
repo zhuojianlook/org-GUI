@@ -185,6 +185,40 @@ function saveTagColors(file: string | null, c: Record<string, string>) {
   }
 }
 
+// ── Google Calendar: id → {summary, colour}, written by GcalPanel after a
+// calendar-list fetch. Used to tag + colour imported events BY CALENDAR on the
+// timeline, without writing literal org tags (which would pollute the event
+// titles pushed back to Google).
+const GCAL_CALS_KEY = "org-gui:gcal:calendars";
+type GcalCalMap = Record<string, { summary: string; color: string | null }>;
+function loadGcalCalMap(): GcalCalMap {
+  try {
+    const raw = localStorage.getItem(GCAL_CALS_KEY);
+    return raw ? (JSON.parse(raw) as GcalCalMap) : {};
+  } catch {
+    return {};
+  }
+}
+/** Tag each gcal node (by calendar-id) with its calendar name and fold the
+ *  calendar's Google colour into the per-file tag colours (user overrides win).
+ *  Mutates doc nodes in place; returns the merged tag-colour map. */
+function applyGcalCalendarTags(
+  doc: OrgDoc,
+  tagColors: Record<string, string>,
+): Record<string, string> {
+  const cals = loadGcalCalMap();
+  if (Object.keys(cals).length === 0) return tagColors;
+  const merged = { ...tagColors };
+  for (const n of doc.nodes) {
+    const cal = n.calendarId ? cals[n.calendarId] : undefined;
+    if (!cal || !cal.summary) continue;
+    if (!n.tagsAll.includes(cal.summary)) n.tagsAll = [...n.tagsAll, cal.summary];
+    if (!n.tags.includes(cal.summary)) n.tags = [...n.tags, cal.summary];
+    if (cal.color && !merged[cal.summary]) merged[cal.summary] = cal.color;
+  }
+  return merged;
+}
+
 // Per-file set of collapsed table keys (`${nodeId}:${tableStartLine}`).
 // A collapsed table renders as a one-line "▸ Table (N × M)" summary instead of
 // the full inline editor — useful when a node has a big table that's not the
@@ -554,6 +588,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const saved = loadExpanded(file);
       const expanded = saved ?? autoExpandForDeps(doc);
       if (!saved) saveExpanded(file, expanded);
+      // Tag + colour imported Google-Calendar events by their calendar.
+      const mergedTagColors = applyGcalCalendarTags(doc, loadTagColors(file));
       // Atomic swap: every piece of per-file state lands in a single
       // set() so React never observes a frame where they disagree.
       set({
@@ -567,7 +603,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         milestones: loadMilestones(file),
         timelineView: loadTimelineView(file),
         tableCollapsed: loadTableCollapsed(file),
-        tagColors: loadTagColors(file),
+        tagColors: mergedTagColors,
         tagFilter: null,
         multiSelected: new Set<string>(),
         editBegin: 0,
