@@ -1487,7 +1487,17 @@ export default function TimelineBand() {
           const multiDay = effEndDay > effStartDay;
 
           const left = pct(effStartDay);
-          const rightMs = multiDay ? effEndDay : effStartDay;
+          // Right edge of a multi-day bar. A timed end reaches its actual end
+          // instant (e.g. ends 17:00 on the last day); an all-day end covers
+          // the WHOLE last day — extend to the start of the following day so a
+          // Jun 20–22 event visually spans all three columns, not stopping at
+          // the left edge of the 22nd (which read as a day short).
+          const endOfLastDay = startOfDay(new Date(effEndDay + 36 * 3_600_000)).getTime();
+          const rightMs = multiDay
+            ? effEndTime
+              ? effEndFull
+              : endOfLastDay
+            : effStartDay;
           const right = pct(rightMs);
           if (right < -5 || left > 105) continue;
 
