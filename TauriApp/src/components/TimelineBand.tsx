@@ -10,6 +10,7 @@ import { parseOrgDate, startOfDay } from "../utils/time";
 // ✕ to remove). Drag the band itself to pan through time at any non-Fit zoom.
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MILESTONE_COLOR = "#c678dd"; // violet — default when a milestone has no explicit color
 const MS_DAY = 86_400_000;
 
@@ -1368,13 +1369,12 @@ export default function TimelineBand() {
         const left = pct(d.getTime());
         if (left < -2 || left > 102) return null;
         const isMonday = d.getDay() === 1;
+        const isWeekend = d.getDay() === 0 || d.getDay() === 6;
         // The gridline marks the boundary BETWEEN this day and the previous
-        // one. The number label belongs centered in this day's cell — so its
-        // x is the midpoint between this day's start and the next day's
-        // start. That puts "5" in the middle of the day-5 column rather than
-        // hugging the line separating day 4 from day 5.
-        const nextLeft = pct(d.getTime() + MS_DAY);
-        const labelLeft = (left + nextLeft) / 2;
+        // one. Labels are LEFT-ALIGNED to that boundary (the start of the day's
+        // cell) so they line up with the events, which also start at the day's
+        // start. Show the weekday (Mon/Tue/…) when the column is wide enough.
+        const showWeekday = pxPerDay >= 40;
         return (
           <div key={`d${d.getTime()}`}>
             <div
@@ -1384,7 +1384,7 @@ export default function TimelineBand() {
                 top: 24,
                 bottom: 18,
                 width: 1,
-                background: isMonday ? "var(--c-border)" : "var(--c-border)",
+                background: "var(--c-border)",
                 opacity: isMonday ? 0.45 : 0.18,
               }}
             />
@@ -1392,16 +1392,22 @@ export default function TimelineBand() {
               <div
                 style={{
                   position: "absolute",
-                  left: `${labelLeft}%`,
+                  left: `${left}%`,
                   bottom: 2,
-                  transform: "translateX(-50%)",
+                  marginLeft: 3,
+                  display: "flex",
+                  gap: 3,
+                  alignItems: "baseline",
                   fontSize: 9,
-                  color: "var(--c-text-dim)",
+                  color: isWeekend ? "var(--c-red)" : "var(--c-text-dim)",
                   whiteSpace: "nowrap",
-                  opacity: isMonday ? 1 : 0.55,
+                  opacity: isMonday ? 1 : isWeekend ? 0.8 : 0.6,
                 }}
               >
-                {d.getDate()}
+                {showWeekday && (
+                  <span style={{ fontWeight: 600, letterSpacing: 0.2 }}>{WEEKDAYS[d.getDay()]}</span>
+                )}
+                <span>{d.getDate()}</span>
               </div>
             )}
           </div>
@@ -1601,7 +1607,7 @@ export default function TimelineBand() {
                     top: segTop,
                     width: segW,
                     height: segH,
-                    transform: "translateX(-50%)",
+                    transform: "translateX(0)",
                     borderRadius: 4,
                     background: bg,
                     border: isSelected ? "2px solid #ffd166" : `1px solid ${border}`,
@@ -1768,7 +1774,7 @@ export default function TimelineBand() {
                   top,
                   height,
                   width: w,
-                  transform: "translateX(-50%)",
+                  transform: "translateX(0)",
                   borderRadius: 5,
                   background: bg,
                   border: isSelected ? "2px solid #ffd166" : `1px solid ${border}`,
@@ -1952,7 +1958,7 @@ export default function TimelineBand() {
                   position: "absolute",
                   left: `${left}%`,
                   top,
-                  transform: "translate(-50%, -50%)",
+                  transform: "translate(0, -50%)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: tier === "dot" ? "center" : "flex-start",
@@ -2096,7 +2102,7 @@ export default function TimelineBand() {
                   position: "absolute",
                   left: `${left}%`,
                   top,
-                  transform: "translate(-50%, -50%)",
+                  transform: "translate(0, -50%)",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",

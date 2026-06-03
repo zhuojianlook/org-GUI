@@ -182,6 +182,10 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
       const cals = await gcalCalendars(effClientId, effClientSecret, account);
       setCalendars(cals);
       saveCalMap(cals);
+      // The calendar→colour map now exists; re-load the current file so its
+      // events get tagged + coloured by calendar (the map may not have existed
+      // when the file was first opened).
+      if (currentFile) void loadFile(currentFile);
     } catch (e) {
       setErr(String(e));
     } finally {
