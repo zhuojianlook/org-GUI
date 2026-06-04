@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useOrgStore, type ZoomLevel } from "../store/useOrgStore";
 import type { OrgNode } from "../api/org";
 import { parseOrgDate, startOfDay } from "../utils/time";
@@ -262,6 +262,27 @@ export default function TimelineBand() {
   const setScheduleDragNode = useOrgStore((s) => s.setScheduleDragNode);
 
   const railRef = useRef<HTMLDivElement>(null);
+  // Measured inner width of the scrollable rail, in state so width-dependent
+  // layout (pxPerDay, chip clustering, ghost x-positions) is correct from the
+  // first paint and re-flows whenever the band is resized.
+  //
+  // Without this, those values read `railRef.current.getBoundingClientRect()`
+  // during render — but the ref is null on the very first render, so they fell
+  // back to 0 / 800 and never recovered (attaching a ref doesn't re-render and
+  // the memoised pxPerDay only recomputes when `span` changes). The symptom was
+  // chips rendering wrong on startup until the user toggled a zoom level. A
+  // ResizeObserver fixes both the first-paint case and the new resizable
+  // timeline divider / window-resize cases.
+  const [railWidth, setRailWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = railRef.current;
+    if (!el) return;
+    const measure = () => setRailWidth(el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const dragId = useRef<string | null>(null);
   const panRef = useRef<{ startX: number; startCenterMs: number } | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
@@ -1268,10 +1289,9 @@ export default function TimelineBand() {
   };
 
   const pxPerDay = useMemo(() => {
-    const r = railRef.current?.getBoundingClientRect();
-    if (!r) return 0;
-    return (r.width / span) * MS_DAY;
-  }, [span]);
+    if (!railWidth || !span) return 0;
+    return (railWidth / span) * MS_DAY;
+  }, [span, railWidth]);
 
   // Height of the (vertically-scrollable) TIME content. Taller than the visible
   // band so each event gets real vertical room; the rail scrolls to reach the
@@ -2118,7 +2138,7 @@ export default function TimelineBand() {
       {(() => {
         const ghosts = Object.values(gcalGhosts);
         if (ghosts.length === 0 || !doc) return null;
-        const railWidthPx = railRef.current?.getBoundingClientRect().width ?? 800;
+        const railWidthPx = railWidth || railRef.current?.getBoundingClientRect().width || 800;
         const bandH = timeContentH;
         const xPx = (ms: number) => (pct(startOfDay(new Date(ms)).getTime()) / 100) * railWidthPx;
         const out: React.ReactNode[] = [];
@@ -2259,7 +2279,7 @@ export default function TimelineBand() {
           title + time) when the day cell is wide, compact (icon + time)
           mid-range, dot (icon only) when narrow. */}
       {(() => {
-        const railWidthPx = railRef.current?.getBoundingClientRect().width ?? 800;
+        const railWidthPx = railWidth || railRef.current?.getBoundingClientRect().width || 800;
         const bandH = timeContentH;
         const CLUSTER_X_PX = 22; // ~one chip width on a typical 1Y zoom
         const CLUSTER_Y_PX = 16; // chip height ≈ 18 px → overlap if within this
