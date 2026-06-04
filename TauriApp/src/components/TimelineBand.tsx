@@ -128,6 +128,13 @@ const TIME_TOP_PX = 56;
 const TIME_BOTTOM_OFFSET = 32;
 const WORK_START_MIN = 8 * 60; // 08:00
 const WORK_END_MIN = 20 * 60; // 20:00 — typical "work day" envelope
+// Vertical density of the time axis. The band's TIME content is this tall
+// (taller than the visible band), so the band scrolls vertically and each
+// event gets real room. 24h or the 12h working-hours window.
+const PX_PER_HOUR = 40;
+function timeContentHeight(workMode: boolean): number {
+  return TIME_TOP_PX + (workMode ? 12 : 24) * PX_PER_HOUR + TIME_BOTTOM_OFFSET;
+}
 
 /** Map a "HH:MM" string to a vertical pixel position inside the band's chip
  *  zone. When `workMode` is on, the [WORK_START_MIN..WORK_END_MIN] window
@@ -509,7 +516,7 @@ export default function TimelineBand() {
     const move = (ev: PointerEvent) => {
       const r = railRef.current?.getBoundingClientRect();
       if (!r) return;
-      const mins = minOfTime(timeAtRailY(ev.clientY - r.top, r.height, workHoursMode));
+      const mins = minOfTime(timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode));
       endMs = Math.max(dayStart + mins * 60000, startMs + MIN);
       setStretch({ nodeId: d.nodeId, startMs, endMs });
     };
@@ -626,7 +633,7 @@ export default function TimelineBand() {
       }
       const node = doc?.nodes.find((n) => n.id === nodeId);
       const dt = dateAtClientX(x);
-      const time = timeAtRailY(y - r.top, r.height, workHoursMode);
+      const time = timeAtRailY(contentY(y), timeContentH, workHoursMode);
       setChipGhost({
         nodeId,
         deadline: false,
@@ -646,7 +653,7 @@ export default function TimelineBand() {
       const node = doc?.nodes.find((n) => n.id === nodeId);
       if (!node) return;
       const dt = dateAtClientX(x);
-      const time = timeAtRailY(y - r.top, r.height, workHoursMode);
+      const time = timeAtRailY(contentY(y), timeContentH, workHoursMode);
       Promise.resolve(scheduleNode(node, `${isoOf(dt)} ${time}`, "scheduled")).catch(() => {});
       setScheduleMode(false);
     };
@@ -1026,7 +1033,7 @@ export default function TimelineBand() {
       const r = railRef.current?.getBoundingClientRect();
       if (!r) return;
       const dt = dateAtClientX(ev.clientX);
-      const time = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
+      const time = timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode);
       setChipGhost({
         ...info,
         x: ev.clientX,
@@ -1054,7 +1061,7 @@ export default function TimelineBand() {
       const r = railRef.current?.getBoundingClientRect();
       if (!r) return;
       const dt = dateAtClientX(ev.clientX);
-      const time = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
+      const time = timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode);
       const dateStr = `${isoOf(dt)} ${time}`;
       void commitPointMove(node, dateStr, info.deadline ? "deadline" : "scheduled");
     };
@@ -1093,7 +1100,7 @@ export default function TimelineBand() {
       // New start from the cursor; the span shifts rigidly so we also preview
       // the end. The bar follows under the cursor via spanPreview.
       const ndate = dateAtClientX(ev.clientX);
-      const ntimeStr = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
+      const ntimeStr = timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode);
       const newStartMs = startOfDay(ndate).getTime() + minOfTime(ntimeStr) * 60000;
       const delta = newStartMs - oldStart;
       setSpanPreview({
@@ -1126,7 +1133,7 @@ export default function TimelineBand() {
         return;
       }
       const ndate = dateAtClientX(ev.clientX);
-      const ntimeStr = timeAtRailY(ev.clientY - r.top, r.height, workHoursMode);
+      const ntimeStr = timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode);
       const newStartMs = startOfDay(ndate).getTime() + minOfTime(ntimeStr) * 60000;
       const delta = newStartMs - oldStart;
       const newEndMs = oldEnd + delta;
@@ -1172,12 +1179,12 @@ export default function TimelineBand() {
       switch (edge) {
         case "startTime": {
           // Change the time-of-day of the start, keep its date.
-          const mins = minOfTime(timeAtRailY(ev.clientY - r.top, r.height, workHoursMode));
+          const mins = minOfTime(timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode));
           curStart = Math.min(dayOf(curStart) + mins * 60000, curEnd - MIN_GAP);
           break;
         }
         case "endTime": {
-          const mins = minOfTime(timeAtRailY(ev.clientY - r.top, r.height, workHoursMode));
+          const mins = minOfTime(timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode));
           curEnd = Math.max(dayOf(curEnd) + mins * 60000, curStart + MIN_GAP);
           break;
         }
@@ -1266,6 +1273,17 @@ export default function TimelineBand() {
     return (r.width / span) * MS_DAY;
   }, [span]);
 
+  // Height of the (vertically-scrollable) TIME content. Taller than the visible
+  // band so each event gets real vertical room; the rail scrolls to reach the
+  // rest. All time-positioned elements use this as their "band height".
+  const timeContentH = timeContentHeight(workHoursMode);
+  // Convert a viewport clientY into a Y inside the scrollable time content
+  // (accounts for the current vertical scroll offset).
+  const contentY = (clientY: number): number =>
+    clientY -
+    (railRef.current?.getBoundingClientRect().top ?? 0) +
+    (railRef.current?.scrollTop ?? 0);
+
   // Adaptive day-tick density: only draw day labels when there's room.
   // Day gridlines visibility — driven by the 📆 toggle in the header, not
   // by zoom-level heuristics. Labels still gate on having enough width to
@@ -1276,44 +1294,6 @@ export default function TimelineBand() {
 
   return (
     <div
-      ref={railRef}
-      onPointerDown={onPanStart}
-      onDoubleClick={onBandDoubleClick}
-      // HTML5 drag-and-drop drop target for the Schedule mode. Accepting
-      // dragover (with preventDefault) is required for drop to fire. The
-      // dataTransfer payload is set by OrgNode in its onDragStart handler
-      // when scheduleMode is on.
-      onDragOver={(e) => {
-        if (!scheduleMode) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-      }}
-      onDrop={(e) => {
-        if (!scheduleMode) return;
-        e.preventDefault();
-        const nodeId =
-          e.dataTransfer.getData("application/orggui-node-id") ||
-          scheduleDragNodeId ||
-          "";
-        if (!nodeId) return;
-        const node = doc?.nodes.find((n) => n.id === nodeId);
-        if (!node) return;
-        const r = railRef.current?.getBoundingClientRect();
-        if (!r) return;
-        const dt = dateAtClientX(e.clientX);
-        const time = timeAtRailY(e.clientY - r.top, r.height, workHoursMode);
-        const dateStr = `${isoOf(dt)} ${time}`;
-        Promise.resolve(scheduleNode(node, dateStr, "scheduled")).catch(() => {});
-        setScheduleDragNode(null);
-        setScheduleMode(false);
-      }}
-      title={
-        scheduleMode
-          ? "Drop a graph node here to schedule it at the X = date, Y = time of the drop point"
-          : timelineView.zoom === "fit"
-            ? "Double-click to add a milestone · use the zoom buttons to focus a date range"
-            : "Drag to pan · double-click empty band to add a milestone · double-click a tick to focus that node"
-      }
       style={{
         position: "relative",
         height: "100%",
@@ -1321,13 +1301,6 @@ export default function TimelineBand() {
         borderBottom: "1px solid var(--c-border)",
         overflow: "hidden",
         userSelect: "none",
-        cursor: scheduleMode
-          ? "copy"
-          : timelineView.zoom === "fit"
-            ? "default"
-            : panRef.current
-              ? "grabbing"
-              : "grab",
         // Visual hint that the rail is an active drop target.
         boxShadow: scheduleMode ? "inset 0 0 0 2px #a3be8c" : undefined,
       }}
@@ -1579,6 +1552,56 @@ export default function TimelineBand() {
         </div>
       )}
 
+      {/* Scrollable TIME content. The rail scrolls vertically; everything
+          date/time-positioned lives in a tall content layer (timeContentH) so
+          each event gets real room. The toolbar + legend above stay fixed. */}
+      <div
+        ref={railRef}
+        onPointerDown={onPanStart}
+        onDoubleClick={onBandDoubleClick}
+        onDragOver={(e) => {
+          if (!scheduleMode) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+        }}
+        onDrop={(e) => {
+          if (!scheduleMode) return;
+          e.preventDefault();
+          const nodeId =
+            e.dataTransfer.getData("application/orggui-node-id") || scheduleDragNodeId || "";
+          if (!nodeId) return;
+          const node = doc?.nodes.find((n) => n.id === nodeId);
+          if (!node) return;
+          const dt = dateAtClientX(e.clientX);
+          const time = timeAtRailY(contentY(e.clientY), timeContentH, workHoursMode);
+          const dateStr = `${isoOf(dt)} ${time}`;
+          Promise.resolve(scheduleNode(node, dateStr, "scheduled")).catch(() => {});
+          setScheduleDragNode(null);
+          setScheduleMode(false);
+        }}
+        title={
+          scheduleMode
+            ? "Drop a graph node here to schedule it at the X = date, Y = time of the drop point"
+            : timelineView.zoom === "fit"
+              ? "Double-click to add a milestone · use the zoom buttons to focus a date range"
+              : "Drag to pan · scroll for all times · double-click empty band to add a milestone"
+        }
+        style={{
+          position: "absolute",
+          inset: 0,
+          overflowX: "hidden",
+          overflowY: "auto",
+          cursor: scheduleMode
+            ? "copy"
+            : timelineView.zoom === "fit"
+              ? "default"
+              : panRef.current
+                ? "grabbing"
+                : "grab",
+        }}
+      >
+        <div style={{ position: "relative", width: "100%", height: timeContentH }}>
+
       {/* Month gridlines + labels */}
       {months.map((m) => {
         const left = pct(m.getTime());
@@ -1648,7 +1671,7 @@ export default function TimelineBand() {
           mark every 3 hours; in working-hours mode we mark every hour from
           08:00 to 20:00 so the denser visible window stays readable. */}
       {(() => {
-        const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
+        const bandH = timeContentH;
         const usable = Math.max(40, bandH - TIME_TOP_PX - TIME_BOTTOM_OFFSET);
         const hours = workHoursMode
           ? [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
@@ -1706,7 +1729,7 @@ export default function TimelineBand() {
           across its day columns. Click to select + focus the node (then the
           usual arrow-key nudge moves the start). */}
       {(() => {
-        const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
+        const bandH = timeContentH;
         const out: React.ReactNode[] = [];
         for (let i = 0; i < nodeDates.length; i++) {
           const d = nodeDates[i];
@@ -2096,7 +2119,7 @@ export default function TimelineBand() {
         const ghosts = Object.values(gcalGhosts);
         if (ghosts.length === 0 || !doc) return null;
         const railWidthPx = railRef.current?.getBoundingClientRect().width ?? 800;
-        const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
+        const bandH = timeContentH;
         const xPx = (ms: number) => (pct(startOfDay(new Date(ms)).getTime()) / 100) * railWidthPx;
         const out: React.ReactNode[] = [];
         for (const g of ghosts) {
@@ -2237,7 +2260,7 @@ export default function TimelineBand() {
           mid-range, dot (icon only) when narrow. */}
       {(() => {
         const railWidthPx = railRef.current?.getBoundingClientRect().width ?? 800;
-        const bandH = railRef.current?.getBoundingClientRect().height ?? 200;
+        const bandH = timeContentH;
         const CLUSTER_X_PX = 22; // ~one chip width on a typical 1Y zoom
         const CLUSTER_Y_PX = 16; // chip height ≈ 18 px → overlap if within this
 
@@ -3117,6 +3140,8 @@ export default function TimelineBand() {
           Double-click to drop a milestone · double-click a tick to focus that node
         </div>
       )}
+        </div>
+      </div>
     </div>
   );
 }
