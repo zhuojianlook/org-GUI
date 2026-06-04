@@ -2520,10 +2520,14 @@ export default function TimelineBand() {
                 </div>,
               );
             }
-            // "Set duration" affordance: a selected, timed, non-deadline chip
-            // gets a handle below it; drag it down to give the task an end time
-            // (turn the single point into a range). Deadlines have no duration.
-            if (isSelected && !d.deadline && !!d.timeOfDay && tier !== "dot") {
+            // "Set duration" affordance: any timed, non-deadline point chip
+            // gets a small handle below it; drag it down to give the task an
+            // end time (turn the single point into a range). The handle is
+            // always visible (subtle) so it is discoverable without first
+            // selecting the chip, and brightens once the chip is selected.
+            // Deadlines have no duration; dot-tier (zoomed right out) is too
+            // coarse to set a meaningful end time, so it is excluded there.
+            if (!d.deadline && !!d.timeOfDay && tier !== "dot") {
               if (stretch?.nodeId === d.nodeId) {
                 const endY = yForTimeOfDay(hhmmOf(stretch.endMs), bandH, workHoursMode);
                 out.push(
@@ -2572,13 +2576,18 @@ export default function TimelineBand() {
                     position: "absolute",
                     left: `${left}%`,
                     top: top + 8,
-                    width: 18,
-                    height: 6,
-                    background: "#ffd166",
+                    width: isSelected ? 22 : 18,
+                    height: isSelected ? 7 : 5,
+                    background: isSelected ? "#ffd166" : "rgba(255,209,102,0.6)",
+                    border: "1px solid rgba(0,0,0,0.35)",
                     borderRadius: 3,
                     cursor: "ns-resize",
                     zIndex: 7,
-                    boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
+                    boxShadow: isSelected
+                      ? "0 1px 3px rgba(0,0,0,0.5)"
+                      : "0 1px 2px rgba(0,0,0,0.35)",
+                    transition: "width 0.1s, height 0.1s, background 0.1s",
+                    touchAction: "none",
                   }}
                 />,
               );
