@@ -2462,8 +2462,13 @@ export default function TimelineBand() {
                   width: tier === "dot" ? 16 : undefined,
                   height: tier === "dot" ? 16 : undefined,
                   borderRadius: tier === "dot" ? 999 : 6,
-                  background: chipBackground(d.tagsAll, tagColors, 0.82),
-                  color: "#1c1c1e",
+                  // Match the duration BAR's translucent fill + white text, so
+                  // a point chip and the bar it turns into when resized look
+                  // identical (no dark→white text flip). The shadow keeps the
+                  // text legible on lighter tag colours.
+                  background: chipBackground(d.tagsAll, tagColors, isSelected ? 0.62 : 0.52),
+                  color: "var(--c-text)",
+                  textShadow: "0 1px 2px rgba(0,0,0,0.7)",
                   border: isSelected
                     ? "2px solid #ffd166"
                     : "1px solid rgba(0,0,0,0.3)",

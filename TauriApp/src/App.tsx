@@ -123,6 +123,26 @@ export default function App() {
     };
   }, [checkEmacs, restoreSession]);
 
+  // Suppress the WebView's built-in right-click menu (Reload / Inspect
+  // Element / Back…) — it's jarring in a desktop app and exposes dev tools.
+  // The app's own right-click menus use React onContextMenu handlers, which
+  // still fire; this only cancels the browser default. Native menus stay
+  // available inside text editors (input / textarea / CodeMirror / the Emacs
+  // terminal) so copy-paste-via-right-click keeps working there.
+  useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        t.closest('input, textarea, [contenteditable="true"], .cm-editor, .xterm')
+      )
+        return;
+      e.preventDefault();
+    };
+    window.addEventListener("contextmenu", onContextMenu);
+    return () => window.removeEventListener("contextmenu", onContextMenu);
+  }, []);
+
   const pickFile = async () => {
     if (!IN_TAURI) {
       await loadFile("demo.org");
