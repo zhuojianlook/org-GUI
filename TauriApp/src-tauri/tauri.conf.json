@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "org-GUI",
   "mainBinaryName": "org-GUI",
-  "version": "0.2.83",
+  "version": "0.2.84",
   "identifier": "com.zhuojianlook.orggui",
   "build": {
     "frontendDist": "../dist",

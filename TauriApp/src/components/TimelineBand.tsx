@@ -1585,6 +1585,71 @@ export default function TimelineBand() {
         </div>
       )}
 
+      {/* Sticky date axis — the month + day-number labels, pinned to the
+          bottom of the band OUTSIDE the scroll rail so they're always visible
+          no matter the vertical scroll position. (The gridlines they label
+          live in the scrolling content and span its full height.) A gentle
+          gradient fades the strip so chips scrolling underneath read clearly. */}
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: 22,
+          pointerEvents: "none",
+          background: "linear-gradient(to top, var(--c-surface) 55%, transparent)",
+          overflow: "hidden",
+          zIndex: 9,
+        }}
+      >
+        {months.map((m) => {
+          const left = pct(m.getTime());
+          if (left < -2 || left > 102) return null;
+          return (
+            <div
+              key={`ml${m.getTime()}`}
+              style={{ position: "absolute", left: `${left}%`, bottom: 2, transform: "translateX(3px)", fontSize: 10, color: "var(--c-text-dim)", whiteSpace: "nowrap" }}
+            >
+              {MONTHS[m.getMonth()]}
+              {m.getMonth() === 0 ? ` ${m.getFullYear()}` : ""}
+            </div>
+          );
+        })}
+        {showDayLabels &&
+          days.map((d) => {
+            const left = pct(d.getTime());
+            if (left < -2 || left > 102) return null;
+            const isMonday = d.getDay() === 1;
+            const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+            const showWeekday = pxPerDay >= 40;
+            return (
+              <div
+                key={`dl${d.getTime()}`}
+                style={{
+                  position: "absolute",
+                  left: `${left}%`,
+                  bottom: 2,
+                  marginLeft: 3,
+                  display: "flex",
+                  gap: 3,
+                  alignItems: "baseline",
+                  fontSize: 9,
+                  color: isWeekend ? "var(--c-red)" : "var(--c-text-dim)",
+                  whiteSpace: "nowrap",
+                  opacity: isMonday ? 1 : isWeekend ? 0.8 : 0.6,
+                }}
+              >
+                {showWeekday && (
+                  <span style={{ fontWeight: 600, letterSpacing: 0.2 }}>{WEEKDAYS[d.getDay()]}</span>
+                )}
+                <span>{d.getDate()}</span>
+              </div>
+            );
+          })}
+      </div>
+
       {/* Scrollable TIME content. The rail scrolls vertically; everything
           date/time-positioned lives in a tall content layer (timeContentH) so
           each event gets real room. The toolbar + legend above stay fixed. */}
@@ -1635,68 +1700,36 @@ export default function TimelineBand() {
       >
         <div style={{ position: "relative", width: "100%", height: timeContentH }}>
 
-      {/* Month gridlines + labels */}
+      {/* Month gridlines (vertical, span the full content so they're visible
+          at any scroll). The month/day LABELS live in the sticky date-axis
+          footer below the rail, not here, so they stay readable no matter how
+          far the band is scrolled. */}
       {months.map((m) => {
         const left = pct(m.getTime());
         if (left < -2 || left > 102) return null;
         return (
-          <div key={`m${m.getTime()}`}>
-            <div style={{ position: "absolute", left: `${left}%`, top: 24, bottom: 18, width: 1, background: "var(--c-border)", opacity: 0.5 }} />
-            <div style={{ position: "absolute", left: `${left}%`, bottom: 2, transform: "translateX(3px)", fontSize: 10, color: "var(--c-text-dim)", whiteSpace: "nowrap" }}>
-              {MONTHS[m.getMonth()]}
-              {m.getMonth() === 0 ? ` ${m.getFullYear()}` : ""}
-            </div>
-          </div>
+          <div key={`m${m.getTime()}`} style={{ position: "absolute", left: `${left}%`, top: 24, bottom: 0, width: 1, background: "var(--c-border)", opacity: 0.5 }} />
         );
       })}
 
-      {/* Day ticks at narrower zoom levels */}
+      {/* Day gridlines at narrower zoom levels */}
       {days.map((d) => {
         const left = pct(d.getTime());
         if (left < -2 || left > 102) return null;
         const isMonday = d.getDay() === 1;
-        const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-        // The gridline marks the boundary BETWEEN this day and the previous
-        // one. Labels are LEFT-ALIGNED to that boundary (the start of the day's
-        // cell) so they line up with the events, which also start at the day's
-        // start. Show the weekday (Mon/Tue/…) when the column is wide enough.
-        const showWeekday = pxPerDay >= 40;
         return (
-          <div key={`d${d.getTime()}`}>
-            <div
-              style={{
-                position: "absolute",
-                left: `${left}%`,
-                top: 24,
-                bottom: 18,
-                width: 1,
-                background: "var(--c-border)",
-                opacity: isMonday ? 0.45 : 0.18,
-              }}
-            />
-            {showDayLabels && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: `${left}%`,
-                  bottom: 2,
-                  marginLeft: 3,
-                  display: "flex",
-                  gap: 3,
-                  alignItems: "baseline",
-                  fontSize: 9,
-                  color: isWeekend ? "var(--c-red)" : "var(--c-text-dim)",
-                  whiteSpace: "nowrap",
-                  opacity: isMonday ? 1 : isWeekend ? 0.8 : 0.6,
-                }}
-              >
-                {showWeekday && (
-                  <span style={{ fontWeight: 600, letterSpacing: 0.2 }}>{WEEKDAYS[d.getDay()]}</span>
-                )}
-                <span>{d.getDate()}</span>
-              </div>
-            )}
-          </div>
+          <div
+            key={`d${d.getTime()}`}
+            style={{
+              position: "absolute",
+              left: `${left}%`,
+              top: 24,
+              bottom: 0,
+              width: 1,
+              background: "var(--c-border)",
+              opacity: isMonday ? 0.45 : 0.18,
+            }}
+          />
         );
       })}
 
