@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.72")
+(defconst org-gui-bridge-version "0.2.73")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1548,6 +1548,105 @@ and sync like any other. Returns the reparsed doc."
         ;; buffer, so calling it outside `with-current-buffer' returned an empty
         ;; node list and blanked the canvas.
         (org-gui--doc-json f)))))
+
+(defun org-gui--gcal-api (method url token &optional data)
+  "Call the Google Calendar API: METHOD (\"GET\"/\"POST\"/\"DELETE\"/\"PATCH\")
+on URL with bearer TOKEN and optional JSON DATA. Returns (HTTP-CODE . JSON-alist)
+\(JSON nil when the response has no body, e.g. a 204 DELETE)."
+  (with-temp-buffer
+    (apply #'call-process "curl" nil t nil
+           (append (list "-sS" "--max-time" "30" "-X" method
+                         "-H" (concat "Authorization: Bearer " token))
+                   (when data (list "-H" "Content-Type: application/json" "--data" data))
+                   (list "-w" "\n%{http_code}" url)))
+    (goto-char (point-max))
+    (let ((code (string-trim (buffer-substring (line-beginning-position) (point-max)))))
+      (goto-char (point-min))
+      (cons code
+            (condition-case _
+                (json-parse-buffer :object-type 'alist :null-object nil :false-object nil)
+              (error nil))))))
+
+(defun org-gui-gcal-unsync (file begin client-id client-secret account)
+  "Remove the calendar event at BEGIN from Google Calendar and DETACH the org
+entry. Deletes the event on Google (so it won't re-import on the next fetch),
+then strips ONLY the org-gcal linking properties (:calendar-id:, :entry-id:,
+:ETag:, :org-gcal-managed:) — the heading, its time, tags and any description
+drawer are left intact, so the task stays on the timeline as a plain org entry
+(no longer a managed calendar event). Returns the reparsed doc."
+  (unless (org-gui--gcal-load)
+    (error "org-gcal is not installed yet — install it from the Google Calendar panel"))
+  (setq org-gcal-client-id client-id org-gcal-client-secret client-secret)
+  (let ((token (and account (fboundp 'oauth2-auto-access-token-sync)
+                    (oauth2-auto-access-token-sync account 'org-gcal)))
+        (f (expand-file-name file)) (b (org-gui--num begin)))
+    (unless (and token (stringp token))
+      (error "Not signed in to Google — open the calendar panel and sign in first"))
+    (with-current-buffer (org-gui--visit f)
+      (org-with-wide-buffer
+       (goto-char (min b (point-max)))
+       (org-back-to-heading t)
+       (let* ((eid (org-entry-get nil "entry-id"))
+              (cal (or (org-entry-get nil "calendar-id")
+                       (and eid (cadr (split-string eid "/")))))
+              (event-id (and eid (car (split-string eid "/")))))
+         (unless eid (error "This entry is not a Google Calendar event"))
+         (when (and cal event-id)
+           (let* ((url (format "https://www.googleapis.com/calendar/v3/calendars/%s/events/%s"
+                               (url-hexify-string cal) (url-hexify-string event-id)))
+                  (code (car (org-gui--gcal-api "DELETE" url token))))
+             ;; 404/410 = already gone on Google; treat as success.
+             (unless (member code '("200" "204" "404" "410"))
+               (error "Google refused to delete the event (HTTP %s)" code))))
+         (dolist (p '("calendar-id" "entry-id" "ETag" "org-gcal-managed"))
+           (ignore-errors (org-entry-delete nil p))))
+       (org-gui--refresh-cookies))
+      (save-buffer)
+      (org-gui--doc-json f))))
+
+(defun org-gui-gcal-switch (file begin client-id client-secret account new-cal-id)
+  "Move the calendar event at BEGIN to a DIFFERENT Google calendar NEW-CAL-ID
+\(events.move API). An event belongs to exactly one calendar, so this changes
+it rather than adding a second. Updates the local :calendar-id:/:entry-id:/:ETag:
+to match. Returns the reparsed doc."
+  (unless (org-gui--gcal-load)
+    (error "org-gcal is not installed yet — install it from the Google Calendar panel"))
+  (setq org-gcal-client-id client-id org-gcal-client-secret client-secret)
+  (let ((token (and account (fboundp 'oauth2-auto-access-token-sync)
+                    (oauth2-auto-access-token-sync account 'org-gcal)))
+        (f (expand-file-name file)) (b (org-gui--num begin)))
+    (unless (and token (stringp token))
+      (error "Not signed in to Google — open the calendar panel and sign in first"))
+    (with-current-buffer (org-gui--visit f)
+      (org-with-wide-buffer
+       (goto-char (min b (point-max)))
+       (org-back-to-heading t)
+       (let* ((eid (org-entry-get nil "entry-id"))
+              (cal (or (org-entry-get nil "calendar-id")
+                       (and eid (cadr (split-string eid "/")))))
+              (event-id (and eid (car (split-string eid "/")))))
+         (unless (and eid cal event-id) (error "This entry is not a Google Calendar event"))
+         (when (string= cal new-cal-id) (error "Already on that calendar"))
+         (org-gui--gcal-share-token account (list cal new-cal-id))
+         (let* ((url (format "https://www.googleapis.com/calendar/v3/calendars/%s/events/%s/move?destination=%s"
+                             (url-hexify-string cal) (url-hexify-string event-id)
+                             (url-hexify-string new-cal-id)))
+                (res (org-gui--gcal-api "POST" url token))
+                (code (car res)) (json (cdr res)))
+           (unless (member code '("200"))
+             (error "Google refused to move the event (HTTP %s%s)" code
+                    (let ((m (alist-get 'message (alist-get 'error json))))
+                      (if m (format ": %s" m) ""))))
+           ;; The event id is preserved across calendars; relink locally.
+           (org-entry-put nil (or (bound-and-true-p org-gcal-calendar-id-property) "calendar-id")
+                          new-cal-id)
+           (org-entry-put nil (or (bound-and-true-p org-gcal-entry-id-property) "entry-id")
+                          (concat event-id "/" new-cal-id))
+           (let ((etag (alist-get 'etag json)))
+             (when (stringp etag) (org-entry-put nil "ETag" etag)))))
+       (org-gui--refresh-cookies))
+      (save-buffer)
+      (org-gui--doc-json f))))
 
 (defun org-gui--gcal-valid-token (account)
   "Return a currently-valid access token for ACCOUNT (the Google email the

@@ -27,8 +27,11 @@ export default function DetailPanel() {
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const setNodeSpan = useOrgStore((s) => s.setNodeSpan);
   const addNodeToGcal = useOrgStore((s) => s.addNodeToGcal);
+  const unsyncGcalNode = useOrgStore((s) => s.unsyncGcalNode);
+  const switchGcalNode = useOrgStore((s) => s.switchGcalNode);
   const tagColors = useOrgStore((s) => s.tagColors);
   const [gcalTarget, setGcalTarget] = useState("");
+  const [confirmUnsync, setConfirmUnsync] = useState(false);
 
   const node = doc?.nodes.find((n) => n.id === selectedId);
 
@@ -39,6 +42,8 @@ export default function DetailPanel() {
     setTitleDraft(node?.title ?? "");
     setTagsDraft(node?.tags.join(" ") ?? "");
     setConfirmDel(false);
+    setConfirmUnsync(false);
+    setGcalTarget("");
   }, [node?.id, node?.title, node?.tags]);
 
   if (!node || !doc) return null;
@@ -280,13 +285,81 @@ export default function DetailPanel() {
         />
       </div>
 
-      {/* Add this task to Google Calendar as a new event. Shown only when at
-          least one calendar is configured and the task isn't already a synced
-          calendar event. */}
+      {/* Google Calendar: ADD a task to a calendar, or — for an item that is
+          already a calendar event — switch its calendar / remove it. An item
+          belongs to exactly one calendar. */}
       {(() => {
         const calOpts = gcalCalendarOptions();
+        if (calOpts.length === 0) return null;
         const isGcal = !!node.calendarId;
-        if (calOpts.length === 0 || isGcal) return null;
+
+        // ── Already a calendar event → manage it ──────────────────────────
+        if (isGcal) {
+          const current = calOpts.find((c) => c.id === node.calendarId);
+          const others = calOpts.filter((c) => c.id !== node.calendarId);
+          const target = gcalTarget || (others[0]?.id ?? "");
+          return (
+            <div>
+              <Lbl>Google Calendar</Lbl>
+              <div style={{ fontSize: 11, color: "var(--c-text-dim)", marginBottom: 5 }}>
+                On <b style={{ color: "var(--c-text)" }}>📅 {current?.summary ?? node.calendarId}</b>
+              </div>
+              {others.length > 0 && (
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                  <select
+                    value={target}
+                    onChange={(e) => setGcalTarget(e.target.value)}
+                    style={{ ...input, flex: 1, minWidth: 0 }}
+                    title="Move this event to a different Google calendar"
+                  >
+                    {others.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.summary}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => switchGcalNode(node, target)}
+                    disabled={saving || !target}
+                    style={actionBtn}
+                    title="Move this event to the selected calendar (an event belongs to one calendar)"
+                  >
+                    ⇄ Move
+                  </button>
+                </div>
+              )}
+              {confirmUnsync ? (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    onClick={() => {
+                      setConfirmUnsync(false);
+                      void unsyncGcalNode(node);
+                    }}
+                    disabled={saving}
+                    style={{ ...actionBtn, background: "var(--c-red)", color: "#000", borderColor: "var(--c-red)" }}
+                    title="Delete the event on Google and keep the task locally"
+                  >
+                    Delete from Google
+                  </button>
+                  <button onClick={() => setConfirmUnsync(false)} style={actionBtn}>
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmUnsync(true)}
+                  disabled={saving}
+                  style={actionBtn}
+                  title="Remove from Google Calendar — deletes the event on Google but keeps the task (with its time) here"
+                >
+                  ✕ Remove from calendar
+                </button>
+              )}
+            </div>
+          );
+        }
+
+        // ── Not yet on a calendar → offer to add it ───────────────────────
         const hasTime = !!(node.scheduled || node.deadline || node.timestamp);
         const target = gcalTarget || calOpts[0].id;
         return (

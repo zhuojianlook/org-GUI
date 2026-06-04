@@ -25,6 +25,8 @@ import {
   gcalMove as apiGcalMove,
   gcalPush as apiGcalPush,
   gcalCreate as apiGcalCreate,
+  gcalUnsync as apiGcalUnsync,
+  gcalSwitch as apiGcalSwitch,
   incompleteDeps,
   validateScheduleAgainstDeps,
   wouldCreateCycle,
@@ -619,6 +621,10 @@ interface OrgState {
   syncGcalNow: () => Promise<void>;
   /** Add a (timed/scheduled) task to Google Calendar CALENDARID as a new event. */
   addNodeToGcal: (node: OrgNode, calendarId: string) => Promise<void>;
+  /** Remove a calendar event from Google + detach the org entry (keeps task). */
+  unsyncGcalNode: (node: OrgNode) => Promise<void>;
+  /** Move a calendar event to a different Google calendar. */
+  switchGcalNode: (node: OrgNode, newCalendarId: string) => Promise<void>;
   toggleMultiSelected: (id: string) => void;
   clearMultiSelected: () => void;
   applyTagToSelection: (tag: string) => Promise<void>;
@@ -1154,6 +1160,45 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       // Reload the file: the create rewrote the entry (new properties + drawer,
       // shifting later begins) and it's now a calendar event — a fresh parse
       // re-applies the calendar tag and per-file state cleanly.
+      await get().loadFile(file);
+    } catch (e) {
+      set({ error: String(e), saving: false });
+    }
+  },
+
+  unsyncGcalNode: async (node) => {
+    const { file } = get();
+    if (!file) return;
+    const { clientId, clientSecret, account } = readGcalCreds();
+    if (!clientId || !clientSecret || !account) {
+      set({ error: "Sign in to Google Calendar first (open the 🗓 panel)." });
+      return;
+    }
+    // A move-ghost keyed on this event no longer applies once it's detached.
+    if (node.orgId) get().clearGcalGhost(node.orgId);
+    set({ saving: true, error: null });
+    try {
+      await apiGcalUnsync(clientId, clientSecret, account, file, node.begin);
+      set({ saving: false });
+      await get().loadFile(file);
+    } catch (e) {
+      set({ error: String(e), saving: false });
+    }
+  },
+
+  switchGcalNode: async (node, newCalendarId) => {
+    const { file } = get();
+    if (!file) return;
+    const { clientId, clientSecret, account } = readGcalCreds();
+    if (!clientId || !clientSecret || !account) {
+      set({ error: "Sign in to Google Calendar first (open the 🗓 panel)." });
+      return;
+    }
+    if (!newCalendarId || newCalendarId === node.calendarId) return;
+    set({ saving: true, error: null });
+    try {
+      await apiGcalSwitch(clientId, clientSecret, account, newCalendarId, file, node.begin);
+      set({ saving: false });
       await get().loadFile(file);
     } catch (e) {
       set({ error: String(e), saving: false });

@@ -847,6 +847,38 @@ export const gcalCreate = (
       )
     : Promise.reject(new Error("Desktop only"));
 
+/** Remove the calendar event at BEGIN from Google and detach the org entry
+ *  (deletes on Google, strips the org-gcal linking properties; keeps the task
+ *  + time). Returns the doc. */
+export const gcalUnsync = (
+  clientId: string,
+  clientSecret: string,
+  account: string,
+  file: string,
+  begin: number,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>("org-gui-gcal-unsync", [file, String(begin), clientId, clientSecret, account], 60)
+    : Promise.reject(new Error("Desktop only"));
+
+/** Move the calendar event at BEGIN to a DIFFERENT Google calendar (events.move;
+ *  one event = one calendar). Returns the doc. */
+export const gcalSwitch = (
+  clientId: string,
+  clientSecret: string,
+  account: string,
+  newCalendarId: string,
+  file: string,
+  begin: number,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>(
+        "org-gui-gcal-switch",
+        [file, String(begin), clientId, clientSecret, account, newCalendarId],
+        60,
+      )
+    : Promise.reject(new Error("Desktop only"));
+
 /** Push specific moved events to Google by their org-gcal entry-id, via
  *  org-gcal-post-at-point (deterministic — org-gcal-sync's export skips
  *  gcal-managed events). ENTRYIDS are the move-ghost ids. Returns the doc. */
