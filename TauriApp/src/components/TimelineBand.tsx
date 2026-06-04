@@ -292,6 +292,7 @@ export default function TimelineBand() {
   const [stackPopover, setStackPopover] = useState<
     { key: string; x: number; y: number } | null
   >(null);
+  const [showLegend, setShowLegend] = useState(false);
   // Live preview of a task chip being dragged — shows a ghost at the cursor
   // with the proposed date + time so the user can see where they're aiming
   // before they release.
@@ -1477,6 +1478,29 @@ export default function TimelineBand() {
           <button
             onClick={(e) => {
               e.stopPropagation();
+              setShowLegend((v) => !v);
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            title="Show / hide the legend (item types + colours)"
+            style={{
+              background: showLegend ? "var(--c-accent)" : "transparent",
+              color: showLegend ? "#fff" : "var(--c-text-dim)",
+              border: "1px solid var(--c-border)",
+              borderRadius: 4,
+              padding: "1px 7px",
+              fontSize: 10.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              marginLeft: 4,
+            }}
+          >
+            🔑 Key
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
               setScheduleMode(!scheduleMode);
             }}
             onPointerDown={(e) => e.stopPropagation()}
@@ -1503,6 +1527,57 @@ export default function TimelineBand() {
           </button>
         </div>
       </div>
+
+      {/* Legend / key — item types + tag/calendar colours. */}
+      {showLegend && (
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          style={{
+            position: "absolute",
+            top: 26,
+            right: 10,
+            zIndex: 30,
+            background: "var(--c-surface)",
+            border: "1px solid var(--c-border)",
+            borderRadius: 8,
+            padding: "8px 10px",
+            boxShadow: "0 8px 28px rgba(0,0,0,0.5)",
+            maxWidth: 240,
+            fontSize: 11,
+            color: "var(--c-text)",
+          }}
+        >
+          <div style={{ fontWeight: 700, fontSize: 9.5, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--c-text-dim)", marginBottom: 5 }}>
+            Item types
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 8px", alignItems: "center" }}>
+            <span aria-hidden style={{ textAlign: "center" }}>⏱</span>
+            <span>Scheduled task</span>
+            <span aria-hidden style={{ textAlign: "center" }}>⚑</span>
+            <span>Deadline</span>
+            <span aria-hidden style={{ justifySelf: "center", width: 18, height: 9, background: "#5fb3a1", borderRadius: 3 }} />
+            <span>Event / duration</span>
+            <span aria-hidden style={{ justifySelf: "center", width: 12, height: 12, borderRadius: "50%", border: "2px dashed #ffd166" }} />
+            <span>Moved — needs Sync</span>
+          </div>
+          {Object.keys(tagColors).length > 0 && (
+            <>
+              <div style={{ fontWeight: 700, fontSize: 9.5, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--c-text-dim)", margin: "8px 0 5px" }}>
+                Tags / calendars
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 150, overflowY: "auto" }}>
+                {Object.entries(tagColors).map(([tag, color]) => (
+                  <div key={tag} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ width: 12, height: 12, borderRadius: 3, background: color, flexShrink: 0, border: "1px solid rgba(0,0,0,0.3)" }} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tag}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Month gridlines + labels */}
       {months.map((m) => {
@@ -2172,7 +2247,7 @@ export default function TimelineBand() {
         const chipWidthAvail = Math.max(20, Math.min(220, pxPerDay - 6));
         type Tier = "full" | "compact" | "dot";
         const tier: Tier =
-          chipWidthAvail >= 110 ? "full" : chipWidthAvail >= 56 ? "compact" : "dot";
+          chipWidthAvail >= 88 ? "full" : chipWidthAvail >= 44 ? "compact" : "dot";
 
         type Anchor = (typeof nodeDates)[number] & {
           leftPct: number;
@@ -2233,8 +2308,31 @@ export default function TimelineBand() {
             .sort()
             .join(",");
 
-        const out: React.ReactNode[] = [];
+        // De-overlap: rather than collapse a small pile of chips into one stack
+        // badge, SPREAD them into vertical lanes around the cluster centre so
+        // each is individually visible and clickable. Only larger piles
+        // collapse into the expandable stack indicator.
+        const LANE_MAX = 4; // up to this many → lanes; more → stack badge
+        const LANE_H = 19; // px between lanes
+        const laneClusters: Anchor[][] = [];
         for (const chips of clusters) {
+          if (chips.length >= 2 && chips.length <= LANE_MAX) {
+            const sorted = [...chips].sort(
+              (a, b) => a.topPx - b.topPx || (a.title < b.title ? -1 : 1),
+            );
+            const cy = sorted.reduce((s, c) => s + c.topPx, 0) / sorted.length;
+            sorted.forEach((c, i) => {
+              const offset = (i - (sorted.length - 1) / 2) * LANE_H;
+              const ty = Math.max(8, Math.min(bandH - 8, cy + offset));
+              laneClusters.push([{ ...c, topPx: ty }]);
+            });
+          } else {
+            laneClusters.push(chips);
+          }
+        }
+
+        const out: React.ReactNode[] = [];
+        for (const chips of laneClusters) {
           const key = keyFor(chips);
           if (chips.length === 1) {
             // ── Singleton chip ────────────────────────────────────────────
@@ -2273,7 +2371,7 @@ export default function TimelineBand() {
             const showTitle = tier === "full";
             const showTime = tier !== "dot" && !!effectiveTime;
             // Trim title aggressively at narrow zooms.
-            const titleLimit = chipWidthAvail >= 180 ? 28 : chipWidthAvail >= 130 ? 18 : 12;
+            const titleLimit = chipWidthAvail >= 160 ? 32 : chipWidthAvail >= 104 ? 22 : 15;
             const truncated =
               d.title.length > titleLimit ? d.title.slice(0, titleLimit - 1) + "…" : d.title;
             const externalLabel = tier === "dot" ? (d.title.length > 22 ? d.title.slice(0, 21) + "…" : d.title) : null;
@@ -2366,6 +2464,39 @@ export default function TimelineBand() {
                 )}
               </button>,
             );
+            // Selected chip → show its FULL (untruncated) title as a pill above
+            // it, so even a long or clipped title is always readable.
+            if (isSelected && tier !== "dot" && d.title) {
+              out.push(
+                <div
+                  key={`sellbl${key}`}
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: `${left}%`,
+                    top: top - 15,
+                    transform: "translate(0, -50%)",
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: "var(--c-text)",
+                    background: "var(--c-bg)",
+                    border: "1px solid #ffd166",
+                    padding: "1px 5px",
+                    borderRadius: 4,
+                    whiteSpace: "nowrap",
+                    pointerEvents: "none",
+                    maxWidth: 260,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    zIndex: 8,
+                    boxShadow: "0 1px 4px rgba(0,0,0,0.45)",
+                  }}
+                >
+                  {d.title}
+                  {effectiveTime ? ` · ${effectiveTime}` : ""}
+                </div>,
+              );
+            }
             // "Set duration" affordance: a selected, timed, non-deadline chip
             // gets a handle below it; drag it down to give the task an end time
             // (turn the single point into a range). Deadlines have no duration.
