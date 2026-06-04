@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useStore, type NodeProps } from "@xyflow/react";
-import { useOrgStore, type CanvasBox } from "../store/useOrgStore";
+import { useOrgStore, type CanvasBox, REGION_PALETTE } from "../store/useOrgStore";
 
 /**
  * A user-drawn "region" box on the canvas (React Flow node, type `box`).
@@ -156,24 +156,60 @@ export default function BoxNode({ id, data }: NodeProps) {
         </div>
       )}
 
-      {/* Hover affordances: colour swatch + delete. */}
+      {/* Hover toolbar: quick preset colours + a full custom picker + delete.
+          Floats at the top-right edge; pointerDown is swallowed so using it
+          never starts a box drag. */}
       {hover && !editing && (
-        <>
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          style={{
+            position: "absolute",
+            top: -16,
+            right: 2,
+            display: "flex",
+            alignItems: "center",
+            gap: 3,
+            padding: "2px 4px",
+            background: "var(--c-surface)",
+            border: "1px solid var(--c-border)",
+            borderRadius: 6,
+            pointerEvents: "auto",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.5)",
+            zIndex: 3,
+          }}
+        >
+          {REGION_PALETTE.slice(0, 6).map((c) => {
+            const active = c.toLowerCase() === color.toLowerCase();
+            return (
+              <button
+                key={c}
+                title={`Use ${c}`}
+                onClick={() => updateBox(id, { color: c })}
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: "50%",
+                  background: c,
+                  border: active ? "2px solid #fff" : "1px solid rgba(0,0,0,0.4)",
+                  padding: 0,
+                  cursor: "pointer",
+                  flexShrink: 0,
+                }}
+              />
+            );
+          })}
           <label
-            title="Region colour"
+            title="Custom colour…"
             style={{
-              position: "absolute",
-              top: -13,
-              right: 30,
-              width: 18,
-              height: 18,
-              borderRadius: 4,
-              background: color,
-              border: "1px solid rgba(0,0,0,0.35)",
-              pointerEvents: "auto",
-              cursor: "pointer",
+              position: "relative",
+              width: 14,
+              height: 14,
+              borderRadius: "50%",
               overflow: "hidden",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+              cursor: "pointer",
+              flexShrink: 0,
+              border: "1px solid rgba(0,0,0,0.4)",
+              background: "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)",
             }}
           >
             <input
@@ -186,30 +222,26 @@ export default function BoxNode({ id, data }: NodeProps) {
           </label>
           <button
             title="Delete this region (its nodes are freed)"
-            onPointerDown={(e) => e.stopPropagation()}
             onClick={() => removeBox(id)}
             style={{
-              position: "absolute",
-              top: -14,
-              right: 4,
-              width: 20,
-              height: 20,
+              width: 16,
+              height: 16,
               borderRadius: 4,
               border: "none",
               background: "#d96459",
               color: "#fff",
-              font: "700 12px system-ui, sans-serif",
-              lineHeight: "20px",
+              font: "700 11px system-ui, sans-serif",
+              lineHeight: "16px",
               textAlign: "center",
               padding: 0,
+              marginLeft: 2,
               cursor: "pointer",
-              pointerEvents: "auto",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+              flexShrink: 0,
             }}
           >
             ✕
           </button>
-        </>
+        </div>
       )}
 
       {/* Bottom-right resize grip. */}

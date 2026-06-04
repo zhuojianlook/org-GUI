@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Mutator,
   OrgDoc,
@@ -163,6 +164,20 @@ function saveBoxes(file: string | null, boxes: CanvasBox[]) {
     /* non-fatal */
   }
 }
+
+/** Preset palette for region boxes. New boxes cycle through it so several
+ *  regions are visually distinct out of the box; the BoxNode toolbar offers
+ *  these as quick swatches alongside a full custom colour picker. */
+export const REGION_PALETTE = [
+  "#8ab4f8", // blue
+  "#a3be8c", // green
+  "#e0a458", // amber
+  "#d96459", // red
+  "#c08cf5", // purple
+  "#5fb3a1", // teal
+  "#e0c060", // gold
+  "#ef9bc4", // pink
+];
 
 // User-placed milestone dates on the top timeline, persisted per file.
 export interface Milestone {
@@ -365,6 +380,32 @@ function readGcalCreds(): { clientId: string; clientSecret: string; account: str
     clientSecret: (usingBuiltIn ? DEFAULT_GOOGLE_CLIENT_SECRET : cfg.clientSecret ?? "").trim(),
     account: (cfg.account ?? "").trim(),
   };
+}
+
+/** Archiving a Google-Calendar-linked task: ask whether to also delete the
+ *  event from Google. If we DON'T, org-gcal re-imports the event on the next
+ *  sync (resurrecting it), so deleting is usually what the user wants — but
+ *  it's destructive, so the non-destructive "keep" is the default (Escape /
+ *  cancel). Returns true iff the user opted to delete the Google event. */
+async function askDeleteGcalOnArchive(title: string): Promise<boolean> {
+  const msg =
+    `"${title}" is on Google Calendar.\n\n` +
+    `Delete the calendar event from Google too?\n\n` +
+    `If you keep it, Google will re-add this task to your file on the next ` +
+    `calendar sync.`;
+  try {
+    if (IN_TAURI) {
+      return await ask(msg, {
+        title: "Archive calendar task",
+        kind: "warning",
+        okLabel: "Delete from Google",
+        cancelLabel: "Keep on Google",
+      });
+    }
+    return typeof window !== "undefined" ? window.confirm(msg) : false;
+  } catch {
+    return false;
+  }
 }
 
 /** Tag names that are DERIVED from a Google calendar (a calendar's summary).
@@ -1069,7 +1110,10 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     ),
   addBox: (box) => {
     const id = `box-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    const next = [...get().boxes, { ...box, id }];
+    const existing = get().boxes;
+    // Cycle the palette so each new region is a different colour by default.
+    const color = box.color ?? REGION_PALETTE[existing.length % REGION_PALETTE.length];
+    const next = [...existing, { ...box, id, color }];
     saveBoxes(get().file, next);
     set({ boxes: next });
     return id;
@@ -1493,9 +1537,45 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   archive: async (node) => {
     const { file, doc } = get();
     if (!file || !doc) return;
+    let begin = node.begin;
+    // A Google-Calendar-linked task needs care: archiving only moves the org
+    // subtree to the archive file — the event stays on Google, and org-gcal
+    // re-imports it on the next sync (it reappears in the active file). Offer
+    // to delete the Google event first so the archive actually sticks.
+    if (node.calendarId) {
+      const alsoDelete = await askDeleteGcalOnArchive(node.title ?? "This task");
+      if (alsoDelete) {
+        const { clientId, clientSecret, account } = readGcalCreds();
+        if (!clientId || !clientSecret || !account) {
+          set({
+            error:
+              "Sign in to Google Calendar first (open the 🗓 panel) to delete the event — the task was NOT archived.",
+          });
+          return;
+        }
+        set({ saving: true, error: null });
+        try {
+          if (node.orgId) get().clearGcalGhost(node.orgId);
+          // Deletes the event on Google and strips the gcal properties. The
+          // heading line itself is untouched, so `begin` stays valid; re-derive
+          // it from the returned doc as a guard in case positions shifted.
+          const afterUnsync = await apiGcalUnsync(clientId, clientSecret, account, file, begin);
+          const match =
+            afterUnsync.nodes.find((n) => n.begin === begin) ??
+            afterUnsync.nodes.find((n) => n.title === node.title);
+          if (match) begin = match.begin;
+        } catch (e) {
+          set({
+            error: `Couldn't delete the Google event — the task was NOT archived: ${String(e)}`,
+            saving: false,
+          });
+          return;
+        }
+      }
+    }
     set({ saving: true, error: null });
     try {
-      const newDoc = await apiArchiveNode(file, node.begin);
+      const newDoc = await apiArchiveNode(file, begin);
       set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
