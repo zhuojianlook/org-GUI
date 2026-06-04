@@ -117,6 +117,53 @@ function savePositions(file: string | null, positions: RootPositions) {
   }
 }
 
+// User-drawn region boxes on the canvas, persisted per file. A box is a plain
+// rectangle in flow coordinates with an optional colour + label. Membership of
+// a node in a box is purely GEOMETRIC (a root node whose centre falls inside
+// the box belongs to it; if boxes overlap, the smallest-area box wins so a node
+// never belongs to more than one) — so we only persist the box geometry, never
+// an explicit membership list that could drift as the file is edited.
+export interface CanvasBox {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** CSS colour for the dotted border + label chip. Falls back to a default. */
+  color?: string;
+  label?: string;
+}
+const BOX_KEY = (file: string) => `org-gui:boxes:${file}`;
+
+function loadBoxes(file: string | null): CanvasBox[] {
+  if (!file) return [];
+  try {
+    const raw = localStorage.getItem(BOX_KEY(file));
+    const arr = raw ? (JSON.parse(raw) as CanvasBox[]) : [];
+    // Defensive: drop anything that isn't a well-formed finite rectangle so a
+    // corrupt entry can't crash the canvas.
+    return Array.isArray(arr)
+      ? arr.filter(
+          (b) =>
+            b &&
+            typeof b.id === "string" &&
+            [b.x, b.y, b.w, b.h].every((n) => typeof n === "number" && Number.isFinite(n)),
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveBoxes(file: string | null, boxes: CanvasBox[]) {
+  if (!file) return;
+  try {
+    localStorage.setItem(BOX_KEY(file), JSON.stringify(boxes));
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // User-placed milestone dates on the top timeline, persisted per file.
 export interface Milestone {
   id: string;
@@ -518,6 +565,11 @@ interface OrgState {
   flashId: string | null;
   expanded: Set<string>;
   rootPositions: Record<number, { x: number; y: number }>;
+  /** User-drawn region boxes on the canvas (per file). */
+  boxes: CanvasBox[];
+  /** When true, dragging on the canvas pane draws a new region box instead of
+   *  panning. Mutually exclusive with depMode / scheduleMode. */
+  boxDrawMode: boolean;
   milestones: Milestone[];
   timelineView: TimelineView; // milestone-band zoom + pan
   tableCollapsed: Set<string>; // keys `${nodeId}:${startLine}` → folded tables
@@ -593,6 +645,14 @@ interface OrgState {
   editInEmacs: (node: OrgNode) => void;
   toggleExpand: (id: string) => void;
   setRootPosition: (index: number, x: number, y: number) => void;
+  /** Toggle region-drawing mode (drag on the pane to draw a box). */
+  setBoxDrawMode: (on: boolean) => void;
+  /** Create a region box from a flow-coordinate rectangle. Returns its id. */
+  addBox: (box: Omit<CanvasBox, "id">) => string;
+  /** Patch a box's geometry / colour / label. */
+  updateBox: (id: string, patch: Partial<Omit<CanvasBox, "id">>) => void;
+  /** Delete a region box (its member nodes simply become free again). */
+  removeBox: (id: string) => void;
   addMilestone: (iso: string, label?: string) => string;
   updateMilestone: (id: string, patch: Partial<Pick<Milestone, "iso" | "label" | "color">>) => void;
   removeMilestone: (id: string) => void;
@@ -664,6 +724,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   flashId: null,
   expanded: new Set<string>(),
   rootPositions: {},
+  boxes: [],
+  boxDrawMode: false,
   milestones: [],
   timelineView: { zoom: "fit", centerMs: Date.now() },
   tableCollapsed: new Set<string>(),
@@ -743,6 +805,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         emacsOk: true,
         expanded,
         rootPositions: loadPositions(file),
+        boxes: loadBoxes(file),
+        boxDrawMode: false,
         milestones: loadMilestones(file),
         timelineView: loadTimelineView(file),
         tableCollapsed: loadTableCollapsed(file),
@@ -849,6 +913,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         error: null,
         expanded: new Set<string>(),
         rootPositions: {},
+        boxes: [],
+        boxDrawMode: false,
         milestones: [],
         tagColors: {},
         tagFilter: null,
@@ -974,17 +1040,50 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   // Dependency mode is a graph overlay; entering it collapses the pull-out so
   // the graph is full-width for drawing.
   setDepMode: (on) =>
-    set(on ? { depMode: true, panel: null } : { depMode: false, connectFrom: null, connectHover: null, connectValid: false }),
+    set(on ? { depMode: true, boxDrawMode: false, panel: null } : { depMode: false, connectFrom: null, connectHover: null, connectValid: false }),
   setScheduleMode: (on) =>
-    // Mutually exclusive with depMode — only one "graph interaction mode"
-    // can be active at a time, otherwise the cursor / draggable semantics
-    // get ambiguous.
+    // Mutually exclusive with depMode / boxDrawMode — only one "graph
+    // interaction mode" can be active at a time, otherwise the cursor /
+    // draggable semantics get ambiguous.
     set(
       on
-        ? { scheduleMode: true, depMode: false, connectFrom: null, connectHover: null, connectValid: false, panel: null }
+        ? { scheduleMode: true, depMode: false, boxDrawMode: false, connectFrom: null, connectHover: null, connectValid: false, panel: null }
         : { scheduleMode: false, scheduleDragNodeId: null },
     ),
   setScheduleDragNode: (id) => set({ scheduleDragNodeId: id }),
+
+  setBoxDrawMode: (on) =>
+    set(
+      on
+        ? {
+            boxDrawMode: true,
+            depMode: false,
+            scheduleMode: false,
+            scheduleDragNodeId: null,
+            connectFrom: null,
+            connectHover: null,
+            connectValid: false,
+            panel: null,
+          }
+        : { boxDrawMode: false },
+    ),
+  addBox: (box) => {
+    const id = `box-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const next = [...get().boxes, { ...box, id }];
+    saveBoxes(get().file, next);
+    set({ boxes: next });
+    return id;
+  },
+  updateBox: (id, patch) => {
+    const next = get().boxes.map((b) => (b.id === id ? { ...b, ...patch } : b));
+    saveBoxes(get().file, next);
+    set({ boxes: next });
+  },
+  removeBox: (id) => {
+    const next = get().boxes.filter((b) => b.id !== id);
+    saveBoxes(get().file, next);
+    set({ boxes: next });
+  },
 
   setConnectDrag: (from, hover, valid) => set({ connectFrom: from, connectHover: hover, connectValid: valid }),
 
@@ -1503,6 +1602,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         selectedId: null,
         expanded: loadExpanded(file) ?? new Set<string>(),
         rootPositions: loadPositions(file),
+        boxes: loadBoxes(file),
+        boxDrawMode: false,
         milestones: loadMilestones(file),
         timelineView: loadTimelineView(file),
         tableCollapsed: loadTableCollapsed(file),

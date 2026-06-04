@@ -42,6 +42,8 @@ export default function Toolbar() {
   const addHeading = useOrgStore((s) => s.addHeading);
   const depMode = useOrgStore((s) => s.depMode);
   const setDepMode = useOrgStore((s) => s.setDepMode);
+  const boxDrawMode = useOrgStore((s) => s.boxDrawMode);
+  const setBoxDrawMode = useOrgStore((s) => s.setBoxDrawMode);
   const tagFilter = useOrgStore((s) => s.tagFilter);
   const updateChannel = useOrgStore((s) => s.updateChannel);
   const setUpdateChannel = useOrgStore((s) => s.setUpdateChannel);
@@ -233,6 +235,19 @@ export default function Toolbar() {
         title="Dependency mode: drag from a prerequisite onto a dependent to link them; click a link to remove it"
       >
         ⇢ Deps
+      </button>
+      <button
+        onClick={() => setBoxDrawMode(!boxDrawMode)}
+        style={{
+          ...btn,
+          ...(boxDrawMode
+            ? { background: "#8ab4f8", color: "#000", borderColor: "#8ab4f8", fontWeight: 700 }
+            : {}),
+        }}
+        disabled={!doc}
+        title="Region mode: drag on the canvas to draw a box. Nodes inside a box stay inside it; drag one well past the edge to release it."
+      >
+        ▭ Region
       </button>
       <button
         ref={tagsBtnRef}

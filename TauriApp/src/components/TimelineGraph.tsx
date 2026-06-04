@@ -9,23 +9,46 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
+  type CoordinateExtent,
   type Edge,
   type Node,
 } from "@xyflow/react";
-import { useOrgStore } from "../store/useOrgStore";
+import { useOrgStore, type CanvasBox } from "../store/useOrgStore";
 import { wouldCreateCycle } from "../api/org";
 import { buildLayout, INDENT_X, type OrgNodeView } from "../utils/layout";
 import OrgNode, { levelColor } from "./OrgNode";
+import BoxNode from "./BoxNode";
 import TreeEdge from "./TreeEdge";
 import DependencyEdge from "./DependencyEdge";
 import SelectionBar from "./SelectionBar";
 import TagAura from "./TagAura";
 
-const nodeTypes = { org: OrgNode };
+const nodeTypes = { org: OrgNode, box: BoxNode };
 const edgeTypes = { tree: TreeEdge, dependency: DependencyEdge };
 
+// How far (in flow units) the cursor must travel PAST a region's edge during a
+// drag before the node "breaks out" and leaves the box on drop. Below this the
+// node stays clamped inside — so a node can't accidentally escape, only via a
+// deliberate drag-and-drop well outside the boundary.
+const BREAKOUT = 64;
+
 type DragState =
-  | { kind: "root"; id: string; sx: number; sy: number; desc: { id: string; sx: number; sy: number }[] }
+  | {
+      kind: "root";
+      id: string;
+      sx: number;
+      sy: number;
+      desc: { id: string; sx: number; sy: number }[];
+      // Region containment for this drag: the box the node started inside (if
+      // any), the cursor→node-origin grab offset (to compute where the cursor
+      // "wants" the node on drop), and the node's measured size (for the
+      // centre test). Used to decide breakout on drop.
+      box: CanvasBox | null;
+      grabDx: number;
+      grabDy: number;
+      w: number;
+      h: number;
+    }
   | {
       kind: "child";
       id: string;
@@ -35,7 +58,9 @@ type DragState =
       parentId: string | null;
       parentLevel: number;
       descSet: Set<string>;
-    };
+    }
+  // Dragging a region box moves the box AND every node it currently contains.
+  | { kind: "box"; id: string; bx: number; by: number; members: { id: string; sx: number; sy: number }[] };
 
 export default function TimelineGraph() {
   const doc = useOrgStore((s) => s.doc);
@@ -46,6 +71,10 @@ export default function TimelineGraph() {
   const tagFilter = useOrgStore((s) => s.tagFilter);
   const rootPositions = useOrgStore((s) => s.rootPositions);
   const setRootPosition = useOrgStore((s) => s.setRootPosition);
+  const boxes = useOrgStore((s) => s.boxes);
+  const boxDrawMode = useOrgStore((s) => s.boxDrawMode);
+  const addBox = useOrgStore((s) => s.addBox);
+  const updateBox = useOrgStore((s) => s.updateBox);
   const setDropTarget = useOrgStore((s) => s.setDropTarget);
   const reorder = useOrgStore((s) => s.reorder);
   const refile = useOrgStore((s) => s.refile);
@@ -124,13 +153,82 @@ export default function TimelineGraph() {
     return out;
   }, [doc, layout, tagFilter]);
 
+  // Which region box (if any) contains the point (cx, cy)? When boxes overlap,
+  // the SMALLEST-area box wins — so a node always belongs to exactly one box
+  // (the innermost), satisfying "a node cannot belong to multiple boxes".
+  const boxContaining = useCallback(
+    (cx: number, cy: number): CanvasBox | null => {
+      let best: CanvasBox | null = null;
+      let bestArea = Infinity;
+      for (const b of boxes) {
+        if (cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h) {
+          const area = b.w * b.h;
+          if (area < bestArea) {
+            bestArea = area;
+            best = b;
+          }
+        }
+      }
+      return best;
+    },
+    [boxes],
+  );
+
+  // The full node set fed to React Flow: the region boxes (rendered beneath the
+  // org nodes) plus the org nodes, where each root node that currently sits
+  // inside a box gets a rectangular `extent` hard-clamping it to that box so it
+  // cannot be dragged out (except via the deliberate breakout handled on drop).
+  const displayNodes = useMemo<Node[]>(() => {
+    if (!layout) return [];
+    const sizeOf = (n: Node) => ({
+      w: n.width ?? n.measured?.width ?? 240,
+      h: n.height ?? n.measured?.height ?? 64,
+    });
+    const orgNodes: Node[] = layout.nodes.map((n) => {
+      const org = byId.get(n.id);
+      // Only top-level (root) nodes are freely positioned, so only they can be
+      // "contained". Children are laid out relative to their parent and snap
+      // back, so an extent would just fight the reorder/refile gesture.
+      if (!org || org.parent) return n.extent ? { ...n, extent: undefined } : n;
+      const { w, h } = sizeOf(n);
+      const b = boxContaining(n.position.x + w / 2, n.position.y + h / 2);
+      if (!b) return n.extent ? { ...n, extent: undefined } : n;
+      // Raw box rectangle — React Flow's clampPosition subtracts the node's
+      // own width/height when clamping, so the node's FULL rect is what stays
+      // inside the box. (Pre-subtracting here would clamp twice.)
+      const ext: CoordinateExtent = [
+        [b.x, b.y],
+        [b.x + b.w, b.y + b.h],
+      ];
+      return { ...n, extent: ext };
+    });
+    const boxNodes: Node[] = boxes.map((b) => ({
+      id: b.id,
+      type: "box",
+      position: { x: b.x, y: b.y },
+      data: { box: b },
+      draggable: !depMode && !scheduleMode && !boxDrawMode,
+      selectable: false,
+      deletable: false,
+      zIndex: 0,
+      dragHandle: ".box-move-handle",
+      // pointerEvents:none on the wrapper makes the box interior click-through
+      // (nodes inside stay interactive, panning works); the BoxNode re-enables
+      // events only on its border strips / header / buttons.
+      style: { width: b.w, height: b.h, pointerEvents: "none" },
+    }));
+    return [...boxNodes, ...orgNodes];
+  }, [layout, boxes, byId, boxContaining, depMode, scheduleMode, boxDrawMode]);
+
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const dragRef = useRef<DragState | null>(null);
+  // Rubber-band rectangle (screen coords) while drawing a new region box.
+  const [drawRect, setDrawRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
   useEffect(() => {
-    if (layout) setNodes(layout.nodes);
-  }, [layout, setNodes]);
+    setNodes(displayNodes);
+  }, [displayNodes, setNodes]);
 
   useEffect(() => {
     if (layout) setEdges([...layout.edges, ...depEdges]);
@@ -310,6 +408,46 @@ export default function TimelineGraph() {
     };
   }, [scheduleMode, setScheduleDragNode, rf, setNodes]);
 
+  // Region-draw mode: drag anywhere on the canvas to rubber-band a new box.
+  // Native capture-phase pointer events (like dep / schedule mode) so the
+  // gesture pre-empts React Flow's pan. A sub-threshold press is treated as a
+  // click and draws nothing.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onDown = (e: PointerEvent) => {
+      if (!boxDrawMode || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      setDrawRect({ x0: startX, y0: startY, x1: startX, y1: startY });
+      const move = (ev: PointerEvent) => {
+        setDrawRect({ x0: startX, y0: startY, x1: ev.clientX, y1: ev.clientY });
+      };
+      const up = (ev: PointerEvent) => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        setDrawRect(null);
+        // Ignore a click / tiny drag.
+        if (Math.abs(ev.clientX - startX) < 8 || Math.abs(ev.clientY - startY) < 8) return;
+        // Convert the two screen corners to flow coordinates and normalise.
+        const a = rf.screenToFlowPosition({ x: startX, y: startY });
+        const b = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
+        addBox({
+          x: Math.min(a.x, b.x),
+          y: Math.min(a.y, b.y),
+          w: Math.abs(a.x - b.x),
+          h: Math.abs(a.y - b.y),
+        });
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    };
+    el.addEventListener("pointerdown", onDown, true);
+    return () => el.removeEventListener("pointerdown", onDown, true);
+  }, [boxDrawMode, rf, addBox]);
+
   // Cross-component focus: the TimelineBand dispatches "orggui:focusNode" when
   // a date tick is double-clicked. Pan the React Flow viewport to that node and
   // trigger a brief flash highlight so the eye finds it.
@@ -372,7 +510,22 @@ export default function TimelineGraph() {
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onPaneClick={() => select(null)}
-      onNodeDragStart={(_e, node) => {
+      onNodeDragStart={(e, node) => {
+        // Region box drag: snapshot the box origin + the nodes it currently
+        // contains so we can move them all in lockstep.
+        if (node.type === "box") {
+          const members = nodes
+            .filter((nd) => {
+              const o = byId.get(nd.id);
+              if (!o || o.parent) return false;
+              const w = nd.width ?? nd.measured?.width ?? 240;
+              const h = nd.height ?? nd.measured?.height ?? 64;
+              return boxContaining(nd.position.x + w / 2, nd.position.y + h / 2)?.id === node.id;
+            })
+            .map((nd) => ({ id: nd.id, sx: nd.position.x, sy: nd.position.y }));
+          dragRef.current = { kind: "box", id: node.id, bx: node.position.x, by: node.position.y, members };
+          return;
+        }
         const org = byId.get(node.id);
         if (!org) return;
         if (!org.parent) {
@@ -380,7 +533,22 @@ export default function TimelineGraph() {
           const desc = nodes
             .filter((nd) => descIds.has(nd.id))
             .map((nd) => ({ id: nd.id, sx: nd.position.x, sy: nd.position.y }));
-          dragRef.current = { kind: "root", id: node.id, sx: node.position.x, sy: node.position.y, desc };
+          const w = node.width ?? node.measured?.width ?? 240;
+          const h = node.height ?? node.measured?.height ?? 64;
+          const box = boxContaining(node.position.x + w / 2, node.position.y + h / 2);
+          const startCursor = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+          dragRef.current = {
+            kind: "root",
+            id: node.id,
+            sx: node.position.x,
+            sy: node.position.y,
+            desc,
+            box,
+            grabDx: startCursor.x - node.position.x,
+            grabDy: startCursor.y - node.position.y,
+            w,
+            h,
+          };
         } else {
           const sibs = nodes
             .filter((nd) => byId.get(nd.id)?.parent === org.parent)
@@ -401,6 +569,22 @@ export default function TimelineGraph() {
       onNodeDrag={(_e, node) => {
         const ds = dragRef.current;
         if (!ds || ds.id !== node.id) return;
+        if (ds.kind === "box") {
+          // Move every member node by the same delta as the box. Clear each
+          // member's `extent` for the duration of the move — otherwise React
+          // Flow's clampPosition keeps re-pinning them to the box's OLD bounds
+          // and they lag behind. The correct extent (the box's new position)
+          // is restored from displayNodes when the drag ends.
+          const dx = node.position.x - ds.bx;
+          const dy = node.position.y - ds.by;
+          setNodes((nds) =>
+            nds.map((nd) => {
+              const m = ds.members.find((mm) => mm.id === nd.id);
+              return m ? { ...nd, position: { x: m.sx + dx, y: m.sy + dy }, extent: undefined } : nd;
+            }),
+          );
+          return;
+        }
         if (ds.kind === "root") {
           const dx = node.position.x - ds.sx;
           const dy = node.position.y - ds.sy;
@@ -415,13 +599,44 @@ export default function TimelineGraph() {
           setDropTarget(t ? t.id : null);
         }
       }}
-      onNodeDragStop={(_e, node) => {
+      onNodeDragStop={(e, node) => {
         const ds = dragRef.current;
         dragRef.current = null;
         if (!ds) return;
+        if (ds.kind === "box") {
+          // Persist the box's new origin and each member's new position.
+          const dx = node.position.x - ds.bx;
+          const dy = node.position.y - ds.by;
+          for (const m of ds.members) {
+            const mi = rootIndexById.get(m.id);
+            if (mi !== undefined) setRootPosition(mi, m.sx + dx, m.sy + dy);
+          }
+          updateBox(node.id, { x: node.position.x, y: node.position.y });
+          return;
+        }
         if (ds.kind === "root") {
           const idx = rootIndexById.get(node.id);
-          if (idx !== undefined) setRootPosition(idx, node.position.x, node.position.y);
+          if (idx === undefined) return;
+          if (ds.box) {
+            // The node started inside a region and was hard-clamped to it
+            // (React Flow `extent`). Decide whether the user deliberately
+            // dragged it OUT: compute where the cursor "wants" the node
+            // (unclamped) and break out only if that lands well beyond the
+            // boundary. Otherwise keep it clamped inside (it stays a member).
+            const cur = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+            const want = { x: cur.x - ds.grabDx, y: cur.y - ds.grabDy };
+            const cx = want.x + ds.w / 2;
+            const cy = want.y + ds.h / 2;
+            const b = ds.box;
+            const out =
+              cx < b.x - BREAKOUT ||
+              cx > b.x + b.w + BREAKOUT ||
+              cy < b.y - BREAKOUT ||
+              cy > b.y + b.h + BREAKOUT;
+            setRootPosition(idx, out ? want.x : node.position.x, out ? want.y : node.position.y);
+          } else {
+            setRootPosition(idx, node.position.x, node.position.y);
+          }
           return;
         }
         const org = byId.get(node.id);
@@ -445,9 +660,9 @@ export default function TimelineGraph() {
             return;
           }
         }
-        if (layout) setNodes(layout.nodes); // snap back
+        setNodes(displayNodes); // snap back
       }}
-      nodesDraggable={!depMode && !scheduleMode}
+      nodesDraggable={!depMode && !scheduleMode && !boxDrawMode}
       zoomOnDoubleClick={false}
       deleteKeyCode={null}
       fitView
@@ -476,6 +691,25 @@ export default function TimelineGraph() {
           }}
         >
           Dependency mode — drag from a prerequisite node onto a dependent to link · click the ✕ on a link to remove
+        </div>
+      )}
+      {boxDrawMode && (
+        <div
+          style={{
+            position: "absolute",
+            top: 8,
+            left: 8,
+            zIndex: 6,
+            background: "rgba(138,180,248,0.15)",
+            border: "1px solid #8ab4f8",
+            color: "#8ab4f8",
+            padding: "4px 10px",
+            borderRadius: 6,
+            fontSize: 12,
+            pointerEvents: "none",
+          }}
+        >
+          Region mode — drag on the canvas to draw a box · nodes inside it stay inside (drag one well past the edge to release it)
         </div>
       )}
       {/* Bottom-right cluster: zoom / fit-view controls just to the left of a
@@ -534,6 +768,22 @@ export default function TimelineGraph() {
             </svg>
           );
         })()}
+      {drawRect && (
+        <div
+          style={{
+            position: "fixed",
+            left: Math.min(drawRect.x0, drawRect.x1),
+            top: Math.min(drawRect.y0, drawRect.y1),
+            width: Math.abs(drawRect.x1 - drawRect.x0),
+            height: Math.abs(drawRect.y1 - drawRect.y0),
+            border: "2px dashed #8ab4f8",
+            background: "rgba(138,180,248,0.10)",
+            borderRadius: 8,
+            pointerEvents: "none",
+            zIndex: 9999,
+          }}
+        />
+      )}
     </div>
   );
 }
