@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Toolbar from "./components/Toolbar";
@@ -33,6 +33,52 @@ export default function App() {
 
   const [showSetup, setShowSetup] = useState(false);
   const [showGcal, setShowGcal] = useState(false);
+
+  // The timeline band's height is user-resizable: a divider between the band
+  // and the canvas can be dragged up/down to give either region more room.
+  // The chosen height is persisted so it survives relaunches. A `maxHeight`
+  // of `calc(100% - CANVAS_MIN)` on the band guarantees the canvas always
+  // keeps at least CANVAS_MIN px regardless of the stored value or window
+  // size, so the resize can never swallow the graph entirely.
+  const TIMELINE_MIN = 120;
+  const CANVAS_MIN = 160;
+  const leftColRef = useRef<HTMLDivElement>(null);
+  const [timelineHeight, setTimelineHeight] = useState<number>(() => {
+    const v = Number(localStorage.getItem("orggui:timelineHeight"));
+    return Number.isFinite(v) && v >= TIMELINE_MIN ? v : 280;
+  });
+  const [dividerActive, setDividerActive] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem("orggui:timelineHeight", String(Math.round(timelineHeight)));
+  }, [timelineHeight]);
+
+  const onDividerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const col = leftColRef.current;
+    if (!col) return;
+    const colTop = col.getBoundingClientRect().top;
+    setDividerActive(true);
+    const move = (ev: PointerEvent) => {
+      const colH = col.getBoundingClientRect().height;
+      const h = Math.max(TIMELINE_MIN, Math.min(colH - CANVAS_MIN, ev.clientY - colTop));
+      setTimelineHeight(h);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setDividerActive(false);
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  // Double-click the divider to snap the timeline back to its default size.
+  const onDividerReset = () => setTimelineHeight(280);
 
   useEffect(() => {
     checkEmacs();
@@ -95,14 +141,56 @@ export default function App() {
       <Toolbar />
       <TabBar />
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {/* Left column: milestone timeline band on top, graph below */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        {/* Left column: milestone timeline band on top, graph below, with a
+            draggable divider between them so the user can give either region
+            more space. */}
+        <div ref={leftColRef} style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           {doc && showTimeline && (
-            <div style={{ flex: "0 0 32%", minHeight: 180, maxHeight: 380, position: "relative", minWidth: 0 }}>
-              <TimelineBand />
-            </div>
+            <>
+              <div
+                style={{
+                  flex: `0 0 ${timelineHeight}px`,
+                  minHeight: TIMELINE_MIN,
+                  maxHeight: `calc(100% - ${CANVAS_MIN}px)`,
+                  position: "relative",
+                  minWidth: 0,
+                }}
+              >
+                <TimelineBand />
+              </div>
+              <div
+                onPointerDown={onDividerDown}
+                onDoubleClick={onDividerReset}
+                title="Drag to resize the timeline · double-click to reset"
+                style={{
+                  height: 8,
+                  flexShrink: 0,
+                  cursor: "row-resize",
+                  background: dividerActive ? "var(--c-accent)" : "var(--c-border)",
+                  borderTop: "1px solid var(--c-bg)",
+                  borderBottom: "1px solid var(--c-bg)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  position: "relative",
+                  zIndex: 5,
+                  transition: "background 0.12s",
+                  touchAction: "none",
+                }}
+              >
+                <div
+                  style={{
+                    width: 48,
+                    height: 3,
+                    borderRadius: 2,
+                    background: dividerActive ? "#fff" : "var(--c-text-dim)",
+                    opacity: dividerActive ? 0.9 : 0.55,
+                  }}
+                />
+              </div>
+            </>
           )}
-          <div style={{ flex: 1, position: "relative", minWidth: 0 }}>
+          <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
           {doc ? (
             <>
               {/* Key the graph on the active file so switching tabs fully
