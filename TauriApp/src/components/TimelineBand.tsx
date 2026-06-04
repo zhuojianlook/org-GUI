@@ -842,7 +842,14 @@ export default function TimelineBand() {
           baseTime = cur.timeOfDay;
         } else {
           const node = doc?.nodes.find((n) => n.id === sel.nodeId);
-          const isoNow = node ? (sel.isDeadline ? node.deadline : node.scheduled) : null;
+          // A Google-Calendar event keeps its time in the :org-gcal: drawer
+          // (node.timestamp), not SCHEDULED — so fall back to it, else the
+          // arrow keys have no base to nudge from and do nothing.
+          const isoNow = node
+            ? sel.isDeadline
+              ? node.deadline
+              : node.scheduled ?? node.timestamp
+            : null;
           const parsed = parseOrgDate(isoNow);
           if (!parsed) return cur; // nothing to nudge from
           baseMs = startOfDay(parsed).getTime();
