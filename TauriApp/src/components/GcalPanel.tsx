@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
 import { useOrgStore } from "../store/useOrgStore";
 import {
   gcalInstall,
@@ -149,17 +148,6 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const onPickFile = async () => {
-    const path = await save({
-      defaultPath: cfg.file || "google-calendar.org",
-      filters: [{ name: "Org files", extensions: ["org"] }],
-    });
-    if (typeof path === "string") {
-      const p = path.endsWith(".org") ? path : `${path}.org`;
-      set({ file: p });
-    }
-  };
-
   // Which OAuth client this sync will use. When the build ships a first-party
   // client and the user hasn't opted into their own, we use the built-in one
   // and the user never sees a client id/secret field.
@@ -172,7 +160,7 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
   const calsToSync = cfg.selectedCalendars.length ? cfg.selectedCalendars : account ? [account] : [];
 
   const haveCreds = !!effClientId && !!effClientSecret;
-  const canSync = haveCreds && !!account && !!cfg.file.trim() && calsToSync.length > 0;
+  const canSync = haveCreds && !!account && !!currentFile && calsToSync.length > 0;
 
   // Pull the account's calendar list (after sign-in) to populate the picker,
   // and stash the id→{name,colour} map for the timeline's per-calendar tags.
@@ -209,6 +197,12 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
   };
 
   const onSync = async () => {
+    // Calendar events sync into whatever .org file is the active tab.
+    const target = (currentFile ?? "").trim();
+    if (!target) {
+      setErr("Open an .org file first — calendar events sync into the current tab.");
+      return;
+    }
     setBusy("sync");
     setErr("");
     setMsg(
@@ -224,13 +218,13 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
       const ghostIds = Object.keys(useOrgStore.getState().gcalGhosts);
       if (cfg.twoWay && ghostIds.length > 0) {
         setMsg(`Pushing ${ghostIds.length} moved event(s) to Google…`);
-        await gcalPush(effClientId, effClientSecret, account, ghostIds, cfg.file.trim());
+        await gcalPush(effClientId, effClientSecret, account, ghostIds, target);
         useOrgStore.getState().clearGcalGhosts();
       }
       setMsg("Syncing…");
-      await gcalSync(effClientId, effClientSecret, account, calsToSync, cfg.file.trim(), cfg.twoWay);
+      await gcalSync(effClientId, effClientSecret, account, calsToSync, target, cfg.twoWay);
       setMsg("Synced. Opening the calendar file…");
-      await loadFile(cfg.file.trim());
+      await loadFile(target);
       // Anything left (e.g. a one-way fetch reconciled them) is resolved.
       useOrgStore.getState().clearGcalGhosts();
       await refreshStatus();
@@ -377,17 +371,22 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
             style={input}
           />
         </Field>
-        <Field label="Target .org file (events are written here)">
-          <div style={{ display: "flex", gap: 6 }}>
-            <input
-              value={cfg.file}
-              onChange={(e) => set({ file: e.target.value })}
-              placeholder="/path/to/google-calendar.org"
-              style={{ ...input, flex: 1 }}
-            />
-            <button onClick={onPickFile} style={secondaryBtn}>
-              Browse…
-            </button>
+        <Field label="Target .org file (the open tab — events sync here)">
+          <div
+            style={{
+              ...input,
+              display: "flex",
+              alignItems: "center",
+              fontFamily: "ui-monospace, monospace",
+              fontSize: 12,
+              color: currentFile ? "var(--c-text)" : "var(--c-red)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={currentFile ?? undefined}
+          >
+            {currentFile ?? "No .org file open — open a tab first"}
           </div>
         </Field>
 
