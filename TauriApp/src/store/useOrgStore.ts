@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { ask } from "@tauri-apps/plugin-dialog";
 import {
   Mutator,
   OrgDoc,
@@ -163,6 +162,21 @@ function saveBoxes(file: string | null, boxes: CanvasBox[]) {
   } catch {
     /* non-fatal */
   }
+}
+
+/** A button in the in-app confirmation modal. `value` is returned by confirm()
+ *  when clicked; `kind` drives the button styling. */
+export interface ConfirmOption {
+  label: string;
+  value: string;
+  kind?: "primary" | "danger" | "default";
+}
+/** A pending confirmation request rendered by the themed ConfirmModal. */
+export interface ConfirmRequest {
+  title: string;
+  message: string;
+  options: ConfirmOption[];
+  resolve: (value: string | null) => void; // null = dismissed (Esc / backdrop)
 }
 
 /** Preset palette for region boxes. New boxes cycle through it so several
@@ -382,30 +396,20 @@ function readGcalCreds(): { clientId: string; clientSecret: string; account: str
   };
 }
 
-/** Archiving a Google-Calendar-linked task: ask whether to also delete the
- *  event from Google. If we DON'T, org-gcal re-imports the event on the next
- *  sync (resurrecting it), so deleting is usually what the user wants — but
- *  it's destructive, so the non-destructive "keep" is the default (Escape /
- *  cancel). Returns true iff the user opted to delete the Google event. */
-async function askDeleteGcalOnArchive(title: string): Promise<boolean> {
-  const msg =
-    `"${title}" is on Google Calendar.\n\n` +
-    `Delete the calendar event from Google too?\n\n` +
-    `If you keep it, Google will re-add this task to your file on the next ` +
-    `calendar sync.`;
-  try {
-    if (IN_TAURI) {
-      return await ask(msg, {
-        title: "Archive calendar task",
-        kind: "warning",
-        okLabel: "Delete from Google",
-        cancelLabel: "Keep on Google",
-      });
-    }
-    return typeof window !== "undefined" ? window.confirm(msg) : false;
-  } catch {
-    return false;
-  }
+/** Delete the node's Google Calendar event (and strip its gcal properties),
+ *  returning the heading's begin in the reloaded doc so a following archive /
+ *  delete targets the right entry. The heading line itself is untouched (only
+ *  the PROPERTIES drawer below it changes), so begin is normally stable; the
+ *  title fallback is belt-and-braces. Throws "not-signed-in" when creds are
+ *  missing so the caller can abort without half-doing the operation. */
+async function gcalDeleteAndResolveBegin(node: OrgNode, file: string): Promise<number> {
+  const { clientId, clientSecret, account } = readGcalCreds();
+  if (!clientId || !clientSecret || !account) throw new Error("not-signed-in");
+  const after = await apiGcalUnsync(clientId, clientSecret, account, file, node.begin);
+  const match =
+    after.nodes.find((n) => n.begin === node.begin) ??
+    after.nodes.find((n) => n.title === node.title);
+  return match ? match.begin : node.begin;
 }
 
 /** Tag names that are DERIVED from a Google calendar (a calendar's summary).
@@ -632,6 +636,8 @@ interface OrgState {
    *  workflow don't interfere with bulk gestures. */
   multiSelected: Set<string>;
   updateChannel: UpdateChannel;
+  /** Pending in-app confirmation (themed modal). Null when none is open. */
+  confirmRequest: ConfirmRequest | null;
   contextMenu: ContextMenuState | null;
   dropTargetId: string | null;
   editBegin: number; // subtree the Emacs sidebar narrows to (0 = whole file)
@@ -734,6 +740,11 @@ interface OrgState {
   setUpdateChannel: (c: UpdateChannel) => void;
   openContextMenu: (x: number, y: number, nodeId: string) => void;
   closeContextMenu: () => void;
+  /** Open the themed confirmation modal and resolve with the clicked option's
+   *  value (or null if dismissed via Esc / backdrop). */
+  confirm: (req: Omit<ConfirmRequest, "resolve">) => Promise<string | null>;
+  /** Resolve the open confirmation with VALUE and close it. */
+  resolveConfirm: (value: string | null) => void;
   setDropTarget: (id: string | null) => void;
   reorder: (node: OrgNode, delta: number) => Promise<void>;
   refile: (node: OrgNode, targetBegin: number) => Promise<void>;
@@ -780,6 +791,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   gcalSyncError: null,
   multiSelected: new Set<string>(),
   updateChannel: loadUpdateChannel(),
+  confirmRequest: null,
   contextMenu: null,
   dropTargetId: null,
   editBegin: 0,
@@ -1458,6 +1470,20 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   openContextMenu: (x, y, nodeId) => set({ contextMenu: { x, y, nodeId } }),
   closeContextMenu: () => set({ contextMenu: null }),
 
+  confirm: (req) =>
+    new Promise<string | null>((resolve) => {
+      // If a confirm is somehow already open, dismiss it first so its awaiter
+      // isn't left hanging.
+      const existing = get().confirmRequest;
+      if (existing) existing.resolve(null);
+      set({ confirmRequest: { ...req, resolve } });
+    }),
+  resolveConfirm: (value) => {
+    const req = get().confirmRequest;
+    set({ confirmRequest: null });
+    if (req) req.resolve(value);
+  },
+
   setRootPosition: (index, x, y) =>
     set((s) => {
       const rootPositions = { ...s.rootPositions, [index]: { x, y } };
@@ -1543,31 +1569,32 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     // re-imports it on the next sync (it reappears in the active file). Offer
     // to delete the Google event first so the archive actually sticks.
     if (node.calendarId) {
-      const alsoDelete = await askDeleteGcalOnArchive(node.title ?? "This task");
-      if (alsoDelete) {
-        const { clientId, clientSecret, account } = readGcalCreds();
-        if (!clientId || !clientSecret || !account) {
-          set({
-            error:
-              "Sign in to Google Calendar first (open the 🗓 panel) to delete the event — the task was NOT archived.",
-          });
-          return;
-        }
+      const choice = await get().confirm({
+        title: "Archive calendar task",
+        message:
+          `"${node.title ?? "This task"}" is on Google Calendar.\n\n` +
+          `Archiving moves it to your archive file, but the calendar event stays ` +
+          `on Google and will be re-imported on the next sync. Delete the ` +
+          `calendar event too?`,
+        options: [
+          { label: "Delete from Google & archive", value: "delete", kind: "danger" },
+          { label: "Keep on Google & archive", value: "keep", kind: "default" },
+          { label: "Cancel", value: "cancel", kind: "default" },
+        ],
+      });
+      if (choice === "cancel" || choice === null) return;
+      if (choice === "delete") {
         set({ saving: true, error: null });
         try {
           if (node.orgId) get().clearGcalGhost(node.orgId);
-          // Deletes the event on Google and strips the gcal properties. The
-          // heading line itself is untouched, so `begin` stays valid; re-derive
-          // it from the returned doc as a guard in case positions shifted.
-          const afterUnsync = await apiGcalUnsync(clientId, clientSecret, account, file, begin);
-          const match =
-            afterUnsync.nodes.find((n) => n.begin === begin) ??
-            afterUnsync.nodes.find((n) => n.title === node.title);
-          if (match) begin = match.begin;
+          begin = await gcalDeleteAndResolveBegin(node, file);
         } catch (e) {
           set({
-            error: `Couldn't delete the Google event — the task was NOT archived: ${String(e)}`,
             saving: false,
+            error:
+              String(e).includes("not-signed-in")
+                ? "Sign in to Google Calendar first (open the 🗓 panel) to delete the event — the task was NOT archived."
+                : `Couldn't delete the Google event — the task was NOT archived: ${String(e)}`,
           });
           return;
         }
@@ -1740,9 +1767,44 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   removeNode: async (node) => {
     const { file, doc } = get();
     if (!file || !doc) return;
+    let begin = node.begin;
+    // Deleting a Google-Calendar-linked task locally leaves the event on
+    // Google — and org-gcal re-imports it on the next sync. Offer to delete
+    // the calendar event too so the deletion sticks.
+    if (node.calendarId) {
+      const choice = await get().confirm({
+        title: "Delete calendar task",
+        message:
+          `"${node.title ?? "This task"}" is on Google Calendar.\n\n` +
+          `Deleting it here removes the task from this file, but the calendar ` +
+          `event stays on Google and will be re-imported on the next sync. ` +
+          `Delete the calendar event too?`,
+        options: [
+          { label: "Delete everywhere", value: "delete", kind: "danger" },
+          { label: "Delete here only", value: "keep", kind: "default" },
+          { label: "Cancel", value: "cancel", kind: "default" },
+        ],
+      });
+      if (choice === "cancel" || choice === null) return;
+      if (choice === "delete") {
+        set({ saving: true, error: null });
+        try {
+          if (node.orgId) get().clearGcalGhost(node.orgId);
+          begin = await gcalDeleteAndResolveBegin(node, file);
+        } catch (e) {
+          set({
+            saving: false,
+            error: String(e).includes("not-signed-in")
+              ? "Sign in to Google Calendar first (open the 🗓 panel) to delete the event — nothing was deleted."
+              : `Couldn't delete the Google event — nothing was deleted: ${String(e)}`,
+          });
+          return;
+        }
+      }
+    }
     set({ saving: true, error: null });
     try {
-      const newDoc = await apiDeleteNode(file, node.begin);
+      const newDoc = await apiDeleteNode(file, begin);
       set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });

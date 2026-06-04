@@ -9,6 +9,7 @@ import EmacsTerminal from "./components/EmacsTerminal";
 import AgendaPanel from "./components/AgendaPanel";
 import TimelineBand from "./components/TimelineBand";
 import ContextMenu from "./components/ContextMenu";
+import ConfirmModal from "./components/ConfirmModal";
 import ErrorToast from "./components/ErrorToast";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
 import GcalPanel from "./components/GcalPanel";
@@ -331,6 +332,7 @@ export default function App() {
       {showSetup && <PrereqsModal onClose={() => setShowSetup(false)} />}
       {showGcal && <GcalPanel onClose={() => setShowGcal(false)} />}
       <ContextMenu />
+      <ConfirmModal />
       <ErrorToast />
     </div>
   );
