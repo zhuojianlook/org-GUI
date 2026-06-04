@@ -425,11 +425,17 @@ export default function TimelineBand() {
       }
       // Plain active TIMESTAMP, but ONLY when it carries a duration (a range).
       // Multi-day events (<a>--<b>) live here because org's SCHEDULED keeps
-      // only the start of a `--` range. Single-point timestamps are skipped
-      // so date-only notes don't flood the band.
+      // only the start of a `--` range. Plain SINGLE-point timestamps are
+      // normally skipped so date-only notes don't flood the band — EXCEPT for
+      // Google Calendar events, whose canonical time lives in the :org-gcal:
+      // drawer as a plain timestamp (no SCHEDULED line). A task just added to
+      // the calendar, or an imported all-day / single-point event, must still
+      // appear; without this it would vanish from the timeline the moment it
+      // was added to Google even though it exists on the calendar.
       const tsEnd = parseOrgDate(n.timestampEnd);
       const ts = parseOrgDate(n.timestamp);
-      if (ts && tsEnd) {
+      const alreadyPlotted = !!parseOrgDate(n.scheduled) || !!parseOrgDate(n.deadline);
+      if (ts && (tsEnd || (n.calendarId && !alreadyPlotted))) {
         out.push({
           ms: startOfDay(ts).getTime(),
           deadline: false,
@@ -439,7 +445,7 @@ export default function TimelineBand() {
           tagsAll: tags,
           timeOfDay: timeOfDayFromIso(n.timestamp),
           iso: n.timestamp ?? "",
-          msEnd: startOfDay(tsEnd).getTime(),
+          msEnd: tsEnd ? startOfDay(tsEnd).getTime() : null,
           timeOfDayEnd: timeOfDayFromIso(n.timestampEnd),
           kind: "timestamp",
         });
