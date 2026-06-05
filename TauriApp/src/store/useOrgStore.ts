@@ -2078,14 +2078,25 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       set({ saving: true, error: null });
       try {
         if (node.orgId) get().clearGcalGhost(node.orgId);
-        const newDoc = await apiGcalDelete(
-          node.entryId,
-          clientId,
-          clientSecret,
-          account,
-          file,
-          deleteOnGoogle,
-        );
+        let newDoc;
+        if (deleteOnGoogle) {
+          // Delete on Google by entry-id, then remove the local copy.
+          newDoc = await apiGcalDelete(
+            node.entryId,
+            clientId,
+            clientSecret,
+            account,
+            file,
+            true,
+          );
+        } else {
+          // "Delete here only" — remove THIS exact heading by its (title-guarded)
+          // position, NOT by entry-id. A glitch-duplicated calendar event shares
+          // its entry-id with the real one, so an entry-id lookup would hit the
+          // wrong (first) copy and leave the duplicate you clicked behind. The
+          // Google event is untouched (it re-imports on the next sync).
+          newDoc = await apiDeleteNode(file, node.begin, node.title ?? "");
+        }
         set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
       } catch (e) {
         set({ error: `Couldn't delete the calendar task: ${String(e)}`, saving: false });
