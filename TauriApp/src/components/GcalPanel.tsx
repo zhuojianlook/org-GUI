@@ -222,7 +222,10 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
         useOrgStore.getState().clearGcalGhosts();
       }
       setMsg("Syncing…");
-      await gcalSync(effClientId, effClientSecret, account, calsToSync, target, cfg.twoWay);
+      const synced = await gcalSync(effClientId, effClientSecret, account, calsToSync, target, cfg.twoWay);
+      // How many calendar events actually landed in the file? Turns a vague
+      // "it says it synced but I see nothing" into an actionable signal.
+      const eventCount = synced.nodes.filter((n) => n.calendarId).length;
       setMsg("Synced. Opening the calendar file…");
       await loadFile(target);
       // Anything left (e.g. a one-way fetch reconciled them) is resolved.
@@ -230,7 +233,11 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
       await refreshStatus();
       // Refresh the picker (also captures any newly-created calendars).
       void fetchCalendars();
-      setMsg("Synced — events are on the timeline.");
+      setMsg(
+        eventCount > 0
+          ? `Synced — ${eventCount} calendar event${eventCount === 1 ? "" : "s"} in this file (on the timeline now).`
+          : "Synced, but no calendar events were written. Check the calendars selected below are ticked, and that your events fall within the next year / past 6 months.",
+      );
     } catch (e) {
       setErr(String(e));
       setMsg("");

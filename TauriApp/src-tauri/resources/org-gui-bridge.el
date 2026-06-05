@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.86")
+(defconst org-gui-bridge-version "0.2.87")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1384,6 +1384,11 @@ browser consent; later calls reuse the stored token."
     ;; are forced off so the headless daemon can't hang on a y/n.
     (setq org-gcal-managed-post-at-point-update-existing 'always-push
           org-gcal-remove-api-cancelled-events nil)
+    ;; Fetch a generous time window so events aren't silently missed. org-gcal's
+    ;; default window (~30 days each way) can exclude events the user expects to
+    ;; see and makes a sync look like it "did nothing".
+    (setq org-gcal-up-days 365
+          org-gcal-down-days 180)
     (let ((res (cond
                 ((and twp (fboundp 'org-gcal-sync)) (org-gcal-sync))
                 ((fboundp 'org-gcal-fetch) (org-gcal-fetch))
