@@ -250,6 +250,64 @@ export default function TimelineGraph() {
     migratedFileRef.current = file;
   }, [file, boxes, nodes, byId, boxMembers, boxContaining, updateBoxMembers]);
 
+  // First calendar import → its own region. A fresh calendar sync drops a big
+  // batch of events on the canvas, which is messy. The FIRST time a file has a
+  // bulk of calendar nodes that aren't in any region yet, wrap them in a single
+  // "📅 Calendar" region so they're contained and movable as a unit. Runs once
+  // per file (after the legacy backfill, so nodes already in a region are left
+  // alone), and only for a BULK (≥ 4) — so adding a single task to the calendar
+  // later never creates or joins this region.
+  const calRegionFileRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!file || nodes.length === 0) return;
+    const calFlag = `org-gui:calRegionDone:${file}`;
+    if (calRegionFileRef.current === file || localStorage.getItem(calFlag)) {
+      calRegionFileRef.current = file;
+      return;
+    }
+    // Wait until the legacy backfill has run so existing-region nodes are
+    // already claimed and excluded below.
+    if (!localStorage.getItem(`org-gui:boxMembersMigrated:${file}`)) return;
+    const cand = nodes.filter((nd) => {
+      if (nd.type === "box") return false;
+      const org = byId.get(nd.id);
+      return !!org && !org.parent && !!org.calendarId && !boxMembers[nodeStableKey(org)];
+    });
+    if (cand.length < 4) return; // not a bulk import — leave single adds loose
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const nd of cand) {
+      const w = nd.width ?? nd.measured?.width ?? 240;
+      const h = nd.height ?? nd.measured?.height ?? 64;
+      minX = Math.min(minX, nd.position.x);
+      minY = Math.min(minY, nd.position.y);
+      maxX = Math.max(maxX, nd.position.x + w);
+      maxY = Math.max(maxY, nd.position.y + h);
+    }
+    const PAD = 30;
+    const id = addBox({
+      x: minX - PAD,
+      y: minY - PAD - 8,
+      w: maxX - minX + 2 * PAD,
+      h: maxY - minY + 2 * PAD + 8,
+      label: "📅 Calendar",
+    });
+    const assigns: Record<string, string> = {};
+    for (const nd of cand) {
+      const org = byId.get(nd.id);
+      if (org) assigns[nodeStableKey(org)] = id;
+    }
+    updateBoxMembers(assigns);
+    try {
+      localStorage.setItem(calFlag, "1");
+    } catch {
+      /* non-fatal */
+    }
+    calRegionFileRef.current = file;
+  }, [file, nodes, byId, boxMembers, addBox, updateBoxMembers]);
+
   useEffect(() => {
     if (layout) setEdges([...layout.edges, ...depEdges]);
   }, [layout, depEdges, setEdges]);
