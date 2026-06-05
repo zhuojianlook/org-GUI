@@ -98,14 +98,17 @@ function nodeHeight(n: OrgNode, tableCollapsed: Set<string>): number {
 
 /**
  * Layout: top-level ("root") nodes are placed at a free, user-draggable
- * position (keyed by stable root index). Descendants are computed relative to
- * their root — stacked below in document order, indented by depth, with
- * compact variable-height spacing — so children aren't freely movable.
+ * position (keyed by the root's STABLE key — nodeStableKey — so a saved
+ * position follows that heading rather than its buffer ordinal; deleting an
+ * earlier root no longer makes the rest inherit each other's positions).
+ * Descendants are computed relative to their root — stacked below in document
+ * order, indented by depth, with compact variable-height spacing — so children
+ * aren't freely movable.
  */
 export function buildLayout(
   doc: OrgDoc,
   expanded: Set<string>,
-  rootPositions: Record<number, { x: number; y: number }>,
+  rootPositions: Record<string, { x: number; y: number }>,
   tableCollapsed: Set<string>,
 ): LayoutResult {
   const nodes = doc.nodes;
@@ -127,10 +130,6 @@ export function buildLayout(
     rootOfCache.set(id, r);
     return r;
   };
-
-  const rootIndex = new Map<string, number>();
-  let ri = 0;
-  for (const n of nodes) if (!n.parent) rootIndex.set(n.id, ri++);
 
   // Visibility: roots always; a child shows only when its parent is expanded.
   const visibleIds = new Set<string>();
@@ -166,8 +165,7 @@ export function buildLayout(
   let runY = 0;
   visible.forEach((n) => {
     const r = rootOf(n.id);
-    const rIdx = rootIndex.get(r)!;
-    const anchor = rootPositions[rIdx] ?? { x: 0, y: defaultAnchorY.get(r) ?? 0 };
+    const anchor = rootPositions[nodeStableKey(byId.get(r)!)] ?? { x: 0, y: defaultAnchorY.get(r) ?? 0 };
     if (r !== curRoot) {
       curRoot = r;
       runY = 0;

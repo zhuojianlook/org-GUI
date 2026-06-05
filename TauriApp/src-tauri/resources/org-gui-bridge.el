@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.92")
+(defconst org-gui-bridge-version "0.2.93")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run

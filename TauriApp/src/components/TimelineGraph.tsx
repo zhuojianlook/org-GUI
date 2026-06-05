@@ -101,15 +101,6 @@ export default function TimelineGraph() {
     });
     return m;
   }, [doc]);
-  const rootIndexById = useMemo(() => {
-    const m = new Map<string, number>();
-    let i = 0;
-    doc?.nodes.forEach((n) => {
-      if (!n.parent) m.set(n.id, i++);
-    });
-    return m;
-  }, [doc]);
-
   // Dependency arrows (prerequisite → dependent), resolved from each node's
   // DEPENDS_ON org IDs to currently-visible node ids. Always shown; only
   // editable in dep mode.
@@ -650,17 +641,16 @@ export default function TimelineGraph() {
           const dx = node.position.x - ds.bx;
           const dy = node.position.y - ds.by;
           for (const m of ds.members) {
-            const mi = rootIndexById.get(m.id);
-            if (mi !== undefined) setRootPosition(mi, m.sx + dx, m.sy + dy);
+            const mo = byId.get(m.id);
+            if (mo) setRootPosition(nodeStableKey(mo), m.sx + dx, m.sy + dy);
           }
           updateBox(node.id, { x: node.position.x, y: node.position.y });
           return;
         }
         if (ds.kind === "root") {
-          const idx = rootIndexById.get(node.id);
-          if (idx === undefined) return;
           const org = byId.get(node.id);
-          const key = org ? nodeStableKey(org) : null;
+          if (!org) return;
+          const key = nodeStableKey(org);
           // Where the cursor "wants" the node (unclamped follow position) and
           // which region that lands in.
           const cur = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
@@ -682,17 +672,17 @@ export default function TimelineGraph() {
             if (beyond || intoOther) {
               // Left ds.box → land where the cursor wants; join the region the
               // cursor is over (or no region if it's empty canvas).
-              setRootPosition(idx, want.x, want.y);
-              if (key) updateBoxMembers({ [key]: wantBox?.id ?? null });
+              setRootPosition(key, want.x, want.y);
+              updateBoxMembers({ [key]: wantBox?.id ?? null });
             } else {
               // Stayed inside ds.box → keep the clamped position, membership as-is.
-              setRootPosition(idx, node.position.x, node.position.y);
+              setRootPosition(key, node.position.x, node.position.y);
             }
           } else {
             // The node was free. Dropping it inside a region joins that region.
-            setRootPosition(idx, node.position.x, node.position.y);
+            setRootPosition(key, node.position.x, node.position.y);
             const dropBox = boxContaining(node.position.x + ds.w / 2, node.position.y + ds.h / 2);
-            if (key) updateBoxMembers({ [key]: dropBox?.id ?? null });
+            updateBoxMembers({ [key]: dropBox?.id ?? null });
           }
           return;
         }

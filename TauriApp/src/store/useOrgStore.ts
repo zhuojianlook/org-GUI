@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { nodeStableKey } from "../utils/layout";
 import {
   Mutator,
   OrgDoc,
@@ -93,9 +94,10 @@ function saveOpenTabs(tabs: string[]) {
 }
 
 // Remember where the user dragged the top-level ("root") nodes, per file, so the
-// canvas layout survives reloads, view toggles, and app restarts. Keyed by root
-// index (stable across edits as long as roots aren't reordered/removed).
-type RootPositions = Record<number, { x: number; y: number }>;
+// canvas layout survives reloads, view toggles, and app restarts. Keyed by the
+// root's STABLE key (nodeStableKey) so a position follows its heading — deleting
+// an earlier root no longer makes the rest jump to each other's saved spots.
+type RootPositions = Record<string, { x: number; y: number }>;
 const POS_KEY = (file: string) => `org-gui:pos:${file}`;
 
 function loadPositions(file: string | null): RootPositions {
@@ -106,6 +108,24 @@ function loadPositions(file: string | null): RootPositions {
   } catch {
     return {};
   }
+}
+
+// One-time migration: positions used to be keyed by root INDEX ("0","1",…).
+// Convert any such legacy map to stable-key form using the freshly parsed doc's
+// root order (best effort — same mapping the old code would have applied), so a
+// user's existing canvas layout is preserved after the switch.
+function migratePositions(stored: RootPositions, doc: OrgDoc): RootPositions {
+  const keys = Object.keys(stored);
+  if (keys.length === 0) return stored;
+  // Already stable-key form? (new keys are "id:…"/"t:…", never pure numbers.)
+  if (keys.some((k) => !/^\d+$/.test(k))) return stored;
+  const roots = doc.nodes.filter((n) => !n.parent);
+  const out: RootPositions = {};
+  for (const [k, v] of Object.entries(stored)) {
+    const root = roots[Number(k)];
+    if (root) out[nodeStableKey(root)] = v;
+  }
+  return out;
 }
 
 function savePositions(file: string | null, positions: RootPositions) {
@@ -637,7 +657,7 @@ interface OrgState {
   /** Transient "flash" ring on a single node (used by timeline-double-click focus). */
   flashId: string | null;
   expanded: Set<string>;
-  rootPositions: Record<number, { x: number; y: number }>;
+  rootPositions: Record<string, { x: number; y: number }>;
   /** User-drawn region boxes on the canvas (per file). */
   boxes: CanvasBox[];
   /** Explicit region membership: node stable-key → box id (per file). */
@@ -725,7 +745,7 @@ interface OrgState {
   expandAll: () => void;
   /** Collapse to top-level only (hide all children) — persisted per file. */
   collapseAll: () => void;
-  setRootPosition: (index: number, x: number, y: number) => void;
+  setRootPosition: (key: string, x: number, y: number) => void;
   /** Toggle region-drawing mode (drag on the pane to draw a box). */
   setBoxDrawMode: (on: boolean) => void;
   /** Create a region box from a flow-coordinate rectangle. Returns its id. */
@@ -895,7 +915,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         loadingFile: null,
         emacsOk: true,
         expanded,
-        rootPositions: loadPositions(file),
+        rootPositions: migratePositions(loadPositions(file), doc),
         boxes: loadBoxes(file),
         boxMembers: loadBoxMembers(file),
         boxDrawMode: false,
@@ -1556,9 +1576,9 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     if (req) req.resolve(value);
   },
 
-  setRootPosition: (index, x, y) =>
+  setRootPosition: (key, x, y) =>
     set((s) => {
-      const rootPositions = { ...s.rootPositions, [index]: { x, y } };
+      const rootPositions = { ...s.rootPositions, [key]: { x, y } };
       savePositions(s.file, rootPositions);
       return { rootPositions };
     }),
@@ -1780,7 +1800,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         loading: false,
         selectedId: null,
         expanded: loadExpanded(file) ?? new Set<string>(),
-        rootPositions: loadPositions(file),
+        rootPositions: migratePositions(loadPositions(file), doc),
         boxes: loadBoxes(file),
         boxMembers: loadBoxMembers(file),
         boxDrawMode: false,
