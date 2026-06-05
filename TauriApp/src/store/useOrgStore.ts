@@ -164,6 +164,34 @@ function saveBoxes(file: string | null, boxes: CanvasBox[]) {
   }
 }
 
+// EXPLICIT region membership: a map from a node's stable key (nodeStableKey)
+// to the id of the box it belongs to. Persisted per file. Membership is
+// deliberate (set when a box is drawn around a node, or a node is dragged into
+// one) and keyed on stable identity — so deleting other nodes, or a calendar
+// sync inserting fresh headings, never silently re-assigns regions the way the
+// old geometric "whatever box the centre sits in" rule did.
+const BOX_MEMBERS_KEY = (file: string) => `org-gui:boxMembers:${file}`;
+
+function loadBoxMembers(file: string | null): Record<string, string> {
+  if (!file) return {};
+  try {
+    const raw = localStorage.getItem(BOX_MEMBERS_KEY(file));
+    const m = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    return m && typeof m === "object" ? m : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveBoxMembers(file: string | null, m: Record<string, string>) {
+  if (!file) return;
+  try {
+    localStorage.setItem(BOX_MEMBERS_KEY(file), JSON.stringify(m));
+  } catch {
+    /* non-fatal */
+  }
+}
+
 /** A button in the in-app confirmation modal. `value` is returned by confirm()
  *  when clicked; `kind` drives the button styling. */
 export interface ConfirmOption {
@@ -612,6 +640,8 @@ interface OrgState {
   rootPositions: Record<number, { x: number; y: number }>;
   /** User-drawn region boxes on the canvas (per file). */
   boxes: CanvasBox[];
+  /** Explicit region membership: node stable-key → box id (per file). */
+  boxMembers: Record<string, string>;
   /** When true, dragging on the canvas pane draws a new region box instead of
    *  panning. Mutually exclusive with depMode / scheduleMode. */
   boxDrawMode: boolean;
@@ -704,6 +734,9 @@ interface OrgState {
   updateBox: (id: string, patch: Partial<Omit<CanvasBox, "id">>) => void;
   /** Delete a region box (its member nodes simply become free again). */
   removeBox: (id: string) => void;
+  /** Set/clear explicit region membership for one or more node stable-keys.
+   *  A null value removes that node from any region. */
+  updateBoxMembers: (updates: Record<string, string | null>) => void;
   addMilestone: (iso: string, label?: string) => string;
   updateMilestone: (id: string, patch: Partial<Pick<Milestone, "iso" | "label" | "color">>) => void;
   removeMilestone: (id: string) => void;
@@ -781,6 +814,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   expanded: new Set<string>(),
   rootPositions: {},
   boxes: [],
+  boxMembers: {},
   boxDrawMode: false,
   milestones: [],
   timelineView: { zoom: "fit", centerMs: Date.now() },
@@ -863,6 +897,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         expanded,
         rootPositions: loadPositions(file),
         boxes: loadBoxes(file),
+        boxMembers: loadBoxMembers(file),
         boxDrawMode: false,
         milestones: loadMilestones(file),
         timelineView: loadTimelineView(file),
@@ -971,6 +1006,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         expanded: new Set<string>(),
         rootPositions: {},
         boxes: [],
+        boxMembers: {},
         boxDrawMode: false,
         milestones: [],
         tagColors: {},
@@ -1142,7 +1178,25 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   removeBox: (id) => {
     const next = get().boxes.filter((b) => b.id !== id);
     saveBoxes(get().file, next);
-    set({ boxes: next });
+    // Drop any membership that pointed at the deleted box (its nodes are freed).
+    const members = get().boxMembers;
+    let changed = false;
+    const nextMembers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(members)) {
+      if (v === id) changed = true;
+      else nextMembers[k] = v;
+    }
+    if (changed) saveBoxMembers(get().file, nextMembers);
+    set({ boxes: next, ...(changed ? { boxMembers: nextMembers } : {}) });
+  },
+  updateBoxMembers: (updates) => {
+    const next = { ...get().boxMembers };
+    for (const [k, v] of Object.entries(updates)) {
+      if (v == null) delete next[k];
+      else next[k] = v;
+    }
+    saveBoxMembers(get().file, next);
+    set({ boxMembers: next });
   },
 
   setConnectDrag: (from, hover, valid) => set({ connectFrom: from, connectHover: hover, connectValid: valid }),
@@ -1728,6 +1782,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         expanded: loadExpanded(file) ?? new Set<string>(),
         rootPositions: loadPositions(file),
         boxes: loadBoxes(file),
+        boxMembers: loadBoxMembers(file),
         boxDrawMode: false,
         milestones: loadMilestones(file),
         timelineView: loadTimelineView(file),

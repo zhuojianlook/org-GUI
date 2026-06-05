@@ -3,6 +3,20 @@ import { OrgDoc, OrgNode } from "../api/org";
 import { findTableBlocks } from "./orgTable";
 import { parseOrgDate } from "./time";
 
+/**
+ * A STABLE identity for a node that survives buffer-position shifts (edits,
+ * deletes, calendar sync inserting headings). The visible node `id` is
+ * `n<begin>` — fine within one parse, but it changes the moment text above the
+ * heading is added/removed, which makes anything keyed on it (region
+ * membership, saved positions) jump to the wrong node after an edit. Prefer the
+ * org/gcal id; fall back to the title (good enough for top-level headings, which
+ * are what regions/positions key on). Used by region membership + (later) saved
+ * positions so they follow the node, not its byte offset.
+ */
+export function nodeStableKey(n: { orgId?: string | null; title?: string | null }): string {
+  return n.orgId ? `id:${n.orgId}` : `t:${n.title ?? ""}`;
+}
+
 export const INDENT_X = 30; // horizontal indent per heading level
 export const NODE_GAP = 6; // vertical gap between stacked nodes
 export const ROOT_GAP = 28; // extra vertical gap between top-level subtrees

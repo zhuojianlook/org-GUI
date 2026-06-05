@@ -15,7 +15,7 @@ import {
 } from "@xyflow/react";
 import { useOrgStore, type CanvasBox } from "../store/useOrgStore";
 import { wouldCreateCycle } from "../api/org";
-import { buildLayout, INDENT_X, type OrgNodeView } from "../utils/layout";
+import { buildLayout, INDENT_X, nodeStableKey, type OrgNodeView } from "../utils/layout";
 import OrgNode, { levelColor } from "./OrgNode";
 import BoxNode from "./BoxNode";
 import TreeEdge from "./TreeEdge";
@@ -75,6 +75,8 @@ export default function TimelineGraph() {
   const boxDrawMode = useOrgStore((s) => s.boxDrawMode);
   const addBox = useOrgStore((s) => s.addBox);
   const updateBox = useOrgStore((s) => s.updateBox);
+  const boxMembers = useOrgStore((s) => s.boxMembers);
+  const updateBoxMembers = useOrgStore((s) => s.updateBoxMembers);
   const setDropTarget = useOrgStore((s) => s.setDropTarget);
   const reorder = useOrgStore((s) => s.reorder);
   const refile = useOrgStore((s) => s.refile);
@@ -175,24 +177,34 @@ export default function TimelineGraph() {
     [boxes],
   );
 
+  // The box a node EXPLICITLY belongs to (from boxMembers), or null. Validates
+  // the box still exists so a membership pointing at a since-deleted box is
+  // ignored. This is the SOLE source of truth for membership now — geometry is
+  // only consulted when a box is drawn or a node is dropped, never on every
+  // reparse, so deleting nodes / syncing the calendar can't reshuffle regions.
+  const memberBoxOf = useCallback(
+    (org: { orgId: string | null; title: string | null } | undefined): CanvasBox | null => {
+      if (!org) return null;
+      const id = boxMembers[nodeStableKey(org)];
+      if (!id) return null;
+      return boxes.find((b) => b.id === id) ?? null;
+    },
+    [boxMembers, boxes],
+  );
+
   // The full node set fed to React Flow: the region boxes (rendered beneath the
-  // org nodes) plus the org nodes, where each root node that currently sits
-  // inside a box gets a rectangular `extent` hard-clamping it to that box so it
-  // cannot be dragged out (except via the deliberate breakout handled on drop).
+  // org nodes) plus the org nodes, where each root node that belongs to a box
+  // gets a rectangular `extent` hard-clamping it to that box so it cannot be
+  // dragged out (except via the deliberate breakout handled on drop).
   const displayNodes = useMemo<Node[]>(() => {
     if (!layout) return [];
-    const sizeOf = (n: Node) => ({
-      w: n.width ?? n.measured?.width ?? 240,
-      h: n.height ?? n.measured?.height ?? 64,
-    });
     const orgNodes: Node[] = layout.nodes.map((n) => {
       const org = byId.get(n.id);
       // Only top-level (root) nodes are freely positioned, so only they can be
       // "contained". Children are laid out relative to their parent and snap
       // back, so an extent would just fight the reorder/refile gesture.
       if (!org || org.parent) return n.extent ? { ...n, extent: undefined } : n;
-      const { w, h } = sizeOf(n);
-      const b = boxContaining(n.position.x + w / 2, n.position.y + h / 2);
+      const b = memberBoxOf(org);
       if (!b) return n.extent ? { ...n, extent: undefined } : n;
       // Raw box rectangle — React Flow's clampPosition subtracts the node's
       // own width/height when clamping, so the node's FULL rect is what stays
@@ -219,7 +231,7 @@ export default function TimelineGraph() {
       style: { width: b.w, height: b.h, pointerEvents: "none" },
     }));
     return [...boxNodes, ...orgNodes];
-  }, [layout, boxes, byId, boxContaining, depMode, scheduleMode, boxDrawMode]);
+  }, [layout, boxes, byId, memberBoxOf, depMode, scheduleMode, boxDrawMode]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -435,19 +447,32 @@ export default function TimelineGraph() {
         // Convert the two screen corners to flow coordinates and normalise.
         const a = rf.screenToFlowPosition({ x: startX, y: startY });
         const b = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY });
-        addBox({
-          x: Math.min(a.x, b.x),
-          y: Math.min(a.y, b.y),
-          w: Math.abs(a.x - b.x),
-          h: Math.abs(a.y - b.y),
-        });
+        const x = Math.min(a.x, b.x);
+        const y = Math.min(a.y, b.y);
+        const w = Math.abs(a.x - b.x);
+        const h = Math.abs(a.y - b.y);
+        const id = addBox({ x, y, w, h });
+        // Explicitly assign every root node whose centre falls inside the new
+        // box — this is the ONLY time geometry decides membership.
+        const assigns: Record<string, string> = {};
+        for (const nd of rf.getNodes()) {
+          if (nd.type === "box") continue;
+          const org = byId.get(nd.id);
+          if (!org || org.parent) continue;
+          const nw = nd.width ?? nd.measured?.width ?? 240;
+          const nh = nd.height ?? nd.measured?.height ?? 64;
+          const cx = nd.position.x + nw / 2;
+          const cy = nd.position.y + nh / 2;
+          if (cx >= x && cx <= x + w && cy >= y && cy <= y + h) assigns[nodeStableKey(org)] = id;
+        }
+        if (Object.keys(assigns).length) updateBoxMembers(assigns);
       };
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
     };
     el.addEventListener("pointerdown", onDown, true);
     return () => el.removeEventListener("pointerdown", onDown, true);
-  }, [boxDrawMode, rf, addBox]);
+  }, [boxDrawMode, rf, addBox, byId, updateBoxMembers]);
 
   // Cross-component focus: the TimelineBand dispatches "orggui:focusNode" when
   // a date tick is double-clicked. Pan the React Flow viewport to that node and
@@ -515,13 +540,11 @@ export default function TimelineGraph() {
         // Region box drag: snapshot the box origin + the nodes it currently
         // contains so we can move them all in lockstep.
         if (node.type === "box") {
+          // Members of this box = nodes EXPLICITLY assigned to it (boxMembers).
           const members = nodes
             .filter((nd) => {
               const o = byId.get(nd.id);
-              if (!o || o.parent) return false;
-              const w = nd.width ?? nd.measured?.width ?? 240;
-              const h = nd.height ?? nd.measured?.height ?? 64;
-              return boxContaining(nd.position.x + w / 2, nd.position.y + h / 2)?.id === node.id;
+              return !!o && !o.parent && memberBoxOf(o)?.id === node.id;
             })
             .map((nd) => ({ id: nd.id, sx: nd.position.x, sy: nd.position.y }));
           dragRef.current = { kind: "box", id: node.id, bx: node.position.x, by: node.position.y, members };
@@ -536,7 +559,7 @@ export default function TimelineGraph() {
             .map((nd) => ({ id: nd.id, sx: nd.position.x, sy: nd.position.y }));
           const w = node.width ?? node.measured?.width ?? 240;
           const h = node.height ?? node.measured?.height ?? 64;
-          const box = boxContaining(node.position.x + w / 2, node.position.y + h / 2);
+          const box = memberBoxOf(org);
           const startCursor = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
           dragRef.current = {
             kind: "root",
@@ -636,25 +659,40 @@ export default function TimelineGraph() {
         if (ds.kind === "root") {
           const idx = rootIndexById.get(node.id);
           if (idx === undefined) return;
+          const org = byId.get(node.id);
+          const key = org ? nodeStableKey(org) : null;
+          // Where the cursor "wants" the node (unclamped follow position) and
+          // which region that lands in.
+          const cur = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+          const want = { x: cur.x - ds.grabDx, y: cur.y - ds.grabDy };
+          const wantBox = boxContaining(want.x + ds.w / 2, want.y + ds.h / 2);
           if (ds.box) {
-            // The node started inside a region and was hard-clamped to it
-            // (React Flow `extent`). Decide whether the user deliberately
-            // dragged it OUT: compute where the cursor "wants" the node
-            // (unclamped) and break out only if that lands well beyond the
-            // boundary. Otherwise keep it clamped inside (it stays a member).
-            const cur = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-            const want = { x: cur.x - ds.grabDx, y: cur.y - ds.grabDy };
+            // The node belonged to ds.box and was hard-clamped to it. Leaving
+            // requires a deliberate pull: either well PAST the box edge, OR
+            // onto a DIFFERENT region (drag-between-regions).
+            const b = ds.box;
             const cx = want.x + ds.w / 2;
             const cy = want.y + ds.h / 2;
-            const b = ds.box;
-            const out =
+            const beyond =
               cx < b.x - BREAKOUT ||
               cx > b.x + b.w + BREAKOUT ||
               cy < b.y - BREAKOUT ||
               cy > b.y + b.h + BREAKOUT;
-            setRootPosition(idx, out ? want.x : node.position.x, out ? want.y : node.position.y);
+            const intoOther = !!wantBox && wantBox.id !== b.id;
+            if (beyond || intoOther) {
+              // Left ds.box → land where the cursor wants; join the region the
+              // cursor is over (or no region if it's empty canvas).
+              setRootPosition(idx, want.x, want.y);
+              if (key) updateBoxMembers({ [key]: wantBox?.id ?? null });
+            } else {
+              // Stayed inside ds.box → keep the clamped position, membership as-is.
+              setRootPosition(idx, node.position.x, node.position.y);
+            }
           } else {
+            // The node was free. Dropping it inside a region joins that region.
             setRootPosition(idx, node.position.x, node.position.y);
+            const dropBox = boxContaining(node.position.x + ds.w / 2, node.position.y + ds.h / 2);
+            if (key) updateBoxMembers({ [key]: dropBox?.id ?? null });
           }
           return;
         }
