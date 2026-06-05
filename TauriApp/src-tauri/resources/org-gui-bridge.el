@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.94")
+(defconst org-gui-bridge-version "0.2.95")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -167,6 +167,10 @@ planning lines and property drawers."
      (cons 'raw (org-gui--s raw))
      (cons 'category (org-gui--s category))
      (cons 'orgId (org-gui--s org-id))
+     ;; The org-gcal :entry-id: — a STABLE identity for a calendar event used to
+     ;; relocate it for delete/unsync even if the buffer position drifted (the
+     ;; file is shared via Dropbox / the user's own org-gcal).
+     (cons 'entryId (org-gui--s (org-entry-get nil "entry-id")))
      (cons 'dependsOn (vconcat (and deps-raw (split-string deps-raw "[ ]+" t))))
      (cons 'deadlineColor (org-gui--s deadline-color))
      (cons 'calendarId (org-gui--s calendar-id))
@@ -1619,6 +1623,45 @@ drawer are left intact, so the task stays on the timeline as a plain org entry
          (dolist (p '("calendar-id" "entry-id" "ETag" "org-gcal-managed"))
            (ignore-errors (org-entry-delete nil p))))
        (org-gui--refresh-cookies))
+      (save-buffer)
+      (org-gui--doc-json f))))
+
+(defun org-gui-gcal-delete (file entry-id client-id client-secret account delete-on-google)
+  "Delete the org subtree whose :entry-id: equals ENTRY-ID. The entry is located
+BY ENTRY-ID (not buffer position), so a stale position — e.g. after the shared
+file changed on disk via Dropbox or the user's own org-gcal — can't make the
+delete hit a NEIGHBOURING calendar event. When DELETE-ON-GOOGLE is truthy, the
+Google Calendar event is deleted first so it won't re-import. Returns the doc."
+  (let ((f (expand-file-name file))
+        (del (and delete-on-google (member delete-on-google '("t" "1" "true" t)))))
+    (with-current-buffer (org-gui--visit f)
+      (org-with-wide-buffer
+       (let ((pos (org-find-property "entry-id" entry-id)))
+         (unless pos
+           (error "Calendar event not found (entry-id %s) — it may already be gone" entry-id))
+         (goto-char pos)
+         (org-back-to-heading t)
+         (when del
+           (unless (org-gui--gcal-load)
+             (error "org-gcal is not installed yet"))
+           (setq org-gcal-client-id client-id org-gcal-client-secret client-secret)
+           (let* ((token (and account (fboundp 'oauth2-auto-access-token-sync)
+                              (oauth2-auto-access-token-sync account 'org-gcal)))
+                  (eid (org-entry-get nil "entry-id"))
+                  (cal (or (org-entry-get nil "calendar-id")
+                           (and eid (cadr (split-string eid "/")))))
+                  (event-id (and eid (car (split-string eid "/")))))
+             (unless (and token (stringp token))
+               (error "Not signed in to Google — open the calendar panel and sign in first"))
+             (when (and cal event-id)
+               (let* ((url (format "https://www.googleapis.com/calendar/v3/calendars/%s/events/%s"
+                                   (url-hexify-string cal) (url-hexify-string event-id)))
+                      (code (car (org-gui--gcal-api "DELETE" url token))))
+                 ;; 404/410 = already gone on Google; treat as success.
+                 (unless (member code '("200" "204" "404" "410"))
+                   (error "Google refused to delete the event (HTTP %s)" code))))))
+         (org-cut-subtree)
+         (org-gui--refresh-cookies)))
       (save-buffer)
       (org-gui--doc-json f))))
 

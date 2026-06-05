@@ -33,6 +33,9 @@ export interface OrgNode {
   raw: string | null;
   category: string | null;
   orgId: string | null;
+  /** org-gcal :entry-id: — stable identity used to relocate a calendar event
+   *  for delete/unsync even if its buffer position drifted. Null for non-gcal. */
+  entryId: string | null;
   dependsOn: string[]; // org IDs of prerequisite nodes (this node depends on them)
   /** Optional CSS color from :DEADLINE_COLOR: property, overriding the default red. */
   deadlineColor: string | null;
@@ -430,7 +433,7 @@ function emptyNode(begin: number, level: number, parent: string | null, title: s
     scheduledEnd: null, deadlineEnd: null, timestampEnd: null,
     rawScheduled: null, rawDeadline: null, rawClosed: null,
     raw: `${"*".repeat(level)} ${title}`,
-    category: "Demo", orgId: null, dependsOn: [], deadlineColor: null,
+    category: "Demo", orgId: null, entryId: null, dependsOn: [], deadlineColor: null,
     calendarId: null, body: null,
   };
 }
@@ -859,6 +862,25 @@ export const gcalUnsync = (
 ): Promise<OrgDoc> =>
   IN_TAURI
     ? orgCall<OrgDoc>("org-gui-gcal-unsync", [file, String(begin), clientId, clientSecret, account], 60)
+    : Promise.reject(new Error("Desktop only"));
+
+/** Delete a calendar-linked subtree located by its org-gcal ENTRYID (not buffer
+ *  position, so a stale position can't hit a neighbour). DELETEONGOOGLE also
+ *  removes the Google event. Returns the reparsed doc. */
+export const gcalDelete = (
+  entryId: string,
+  clientId: string,
+  clientSecret: string,
+  account: string,
+  file: string,
+  deleteOnGoogle: boolean,
+): Promise<OrgDoc> =>
+  IN_TAURI
+    ? orgCall<OrgDoc>(
+        "org-gui-gcal-delete",
+        [file, entryId, clientId, clientSecret, account, deleteOnGoogle ? "t" : "nil"],
+        60,
+      )
     : Promise.reject(new Error("Desktop only"));
 
 /** Move the calendar event at BEGIN to a DIFFERENT Google calendar (events.move;

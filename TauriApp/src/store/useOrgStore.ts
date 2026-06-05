@@ -27,6 +27,7 @@ import {
   gcalPush as apiGcalPush,
   gcalCreate as apiGcalCreate,
   gcalUnsync as apiGcalUnsync,
+  gcalDelete as apiGcalDelete,
   gcalSwitch as apiGcalSwitch,
   incompleteDeps,
   validateScheduleAgainstDeps,
@@ -1860,11 +1861,13 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   removeNode: async (node) => {
     const { file, doc } = get();
     if (!file || !doc) return;
-    let begin = node.begin;
-    // Deleting a Google-Calendar-linked task locally leaves the event on
-    // Google — and org-gcal re-imports it on the next sync. Offer to delete
-    // the calendar event too so the deletion sticks.
-    if (node.calendarId) {
+    // A Google-Calendar-linked task is deleted by its STABLE entry-id (not its
+    // buffer position): the shared file can change on disk (Dropbox / the user's
+    // own org-gcal) between parses, and with tightly-packed calendar events a
+    // stale position would otherwise land the delete on a NEIGHBOURING event —
+    // unsyncing/deleting the wrong one. Offer to remove the Google event too so
+    // the deletion sticks (else it re-imports on the next sync).
+    if (node.calendarId && node.entryId) {
       const choice = await get().confirm({
         title: "Delete calendar task",
         message:
@@ -1879,25 +1882,35 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         ],
       });
       if (choice === "cancel" || choice === null) return;
-      if (choice === "delete") {
-        set({ saving: true, error: null });
-        try {
-          if (node.orgId) get().clearGcalGhost(node.orgId);
-          begin = await gcalDeleteAndResolveBegin(node, file);
-        } catch (e) {
-          set({
-            saving: false,
-            error: String(e).includes("not-signed-in")
-              ? "Sign in to Google Calendar first (open the 🗓 panel) to delete the event — nothing was deleted."
-              : `Couldn't delete the Google event — nothing was deleted: ${String(e)}`,
-          });
-          return;
-        }
+      const deleteOnGoogle = choice === "delete";
+      const { clientId, clientSecret, account } = readGcalCreds();
+      if (deleteOnGoogle && (!clientId || !clientSecret || !account)) {
+        set({
+          error:
+            "Sign in to Google Calendar first (open the 🗓 panel) to delete the event — nothing was deleted.",
+        });
+        return;
       }
+      set({ saving: true, error: null });
+      try {
+        if (node.orgId) get().clearGcalGhost(node.orgId);
+        const newDoc = await apiGcalDelete(
+          node.entryId,
+          clientId,
+          clientSecret,
+          account,
+          file,
+          deleteOnGoogle,
+        );
+        set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
+      } catch (e) {
+        set({ error: `Couldn't delete the calendar task: ${String(e)}`, saving: false });
+      }
+      return;
     }
     set({ saving: true, error: null });
     try {
-      const newDoc = await apiDeleteNode(file, begin);
+      const newDoc = await apiDeleteNode(file, node.begin);
       set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
