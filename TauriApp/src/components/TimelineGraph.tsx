@@ -603,9 +603,29 @@ export default function TimelineGraph() {
   // trigger a brief flash highlight so the eye finds it.
   useEffect(() => {
     const onFocus = (e: Event) => {
-      const ce = e as CustomEvent<{ id: string }>;
+      const ce = e as CustomEvent<{ id: string; place?: boolean }>;
       const id = ce.detail?.id;
       if (!id) return;
+      // place:true → a brand-new top-level heading should APPEAR at the centre
+      // of the current view (so the user doesn't have to drag it in), rather
+      // than panning the camera off to wherever it was appended.
+      if (ce.detail?.place) {
+        const org = byId.get(id);
+        const rect = wrapRef.current?.getBoundingClientRect();
+        if (org && !org.parent && rect) {
+          const c = rf.screenToFlowPosition({
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+          });
+          const node = rf.getNode(id);
+          const w = node?.measured?.width ?? node?.width ?? 220;
+          const h = node?.measured?.height ?? node?.height ?? 60;
+          setRootPosition(nodeStableKey(org), c.x - w / 2, c.y - h / 2);
+          select(id);
+          flashNode(id);
+          return;
+        }
+      }
       const node = rf.getNode(id);
       if (!node) return;
       const w = (node.width ?? node.measured?.width ?? 220);
@@ -618,7 +638,7 @@ export default function TimelineGraph() {
     };
     window.addEventListener("orggui:focusNode", onFocus as EventListener);
     return () => window.removeEventListener("orggui:focusNode", onFocus as EventListener);
-  }, [rf, select, flashNode]);
+  }, [rf, select, flashNode, byId, setRootPosition]);
 
   if (!doc) return null;
 

@@ -15,6 +15,7 @@ import {
   reorderNode as apiReorderNode,
   refileNode as apiRefileNode,
   startTask as apiStartTask,
+  setTodo as apiSetTodo,
   archiveNode as apiArchiveNode,
   toggleCheckbox as apiToggleCheckbox,
   addDependency as apiAddDependency,
@@ -589,6 +590,25 @@ function saveShowTimeline(v: boolean) {
   }
 }
 
+// Whether clicking "▶ Start" on a task also schedules it for today (which pins
+// it onto the timeline). Off by default — not every task you begin needs to
+// appear on the timeline. Persisted globally so the choice sticks.
+const AUTO_SCHED_START_KEY = "org-gui:autoScheduleOnStart";
+function loadAutoScheduleOnStart(): boolean {
+  try {
+    return localStorage.getItem(AUTO_SCHED_START_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+function saveAutoScheduleOnStart(v: boolean) {
+  try {
+    localStorage.setItem(AUTO_SCHED_START_KEY, v ? "true" : "false");
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // Update channel — which manifest URL the "Check for updates" button reads from.
 // Persisted globally (not per-file) so users opt in once.
 export type UpdateChannel = "stable" | "experimental";
@@ -706,6 +726,7 @@ interface OrgState {
   tagFilter: string | null; // when set, only nodes carrying this tag stay sharp
   tagAuraEnabled: boolean; // global toggle for the metaball halo overlay
   showTimeline: boolean; // top-of-window calendar timeline visibility
+  autoScheduleOnStart: boolean; // ▶ Start also schedules the task for today
   /** Currently-selected timeline chip (single click on a chip). Arrow keys
    *  nudge this chip's scheduled or deadline date. Esc clears. */
   timelineSelectedChip: { nodeId: string; isDeadline: boolean } | null;
@@ -806,6 +827,7 @@ interface OrgState {
   setTagFilter: (tag: string | null) => void;
   setTagAuraEnabled: (v: boolean) => void;
   setShowTimeline: (v: boolean) => void;
+  setAutoScheduleOnStart: (v: boolean) => void;
   setTimelineSelectedChip: (chip: { nodeId: string; isDeadline: boolean } | null) => void;
   scheduleNode: (node: OrgNode, dateStr: string, kind: "scheduled" | "deadline") => Promise<void>;
   /** Move a Google-calendar event LOCALLY (rewrite its body timestamp in
@@ -884,6 +906,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   tagFilter: null,
   tagAuraEnabled: loadTagAuraEnabled(),
   showTimeline: loadShowTimeline(),
+  autoScheduleOnStart: loadAutoScheduleOnStart(),
   timelineSelectedChip: null,
   gcalGhosts: {},
   gcalSyncing: false,
@@ -1365,6 +1388,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ showTimeline: v });
   },
 
+  setAutoScheduleOnStart: (v) => {
+    saveAutoScheduleOnStart(v);
+    set({ autoScheduleOnStart: v });
+  },
+
   setTimelineSelectedChip: (chip) => set({ timelineSelectedChip: chip }),
 
   /**
@@ -1702,7 +1730,12 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     }
     set({ saving: true, error: null });
     try {
-      const newDoc = await apiStartTask(file, node.begin);
+      // Auto-schedule on Start is opt-in: by default starting a task only flips
+      // it to STRT (org-gui-set-todo) and leaves it OFF the timeline. With the
+      // setting on, also schedule it for today (org-gui-start).
+      const newDoc = get().autoScheduleOnStart
+        ? await apiStartTask(file, node.begin)
+        : await apiSetTodo(file, node.begin, "STRT");
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
@@ -1901,11 +1934,15 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       // headings get appended after the last root and would otherwise drop
       // off-screen — the user had to hunt for them; this surfaces them.
       if (sel) {
-        // Defer one tick so the layout has been rebuilt with the new node
-        // before TimelineGraph's focus listener queries rf.getNode(sel).
+        // A brand-new TOP-LEVEL heading is placed at the current canvas viewport
+        // centre (place:true) so the user doesn't have to drag it in from the
+        // default append position. Child headings keep the pan-to-parent
+        // behaviour. Defer one tick so the layout has been rebuilt with the new
+        // node before TimelineGraph's listener queries rf.getNode(sel).
+        const place = !!child && !child.parent;
         requestAnimationFrame(() => {
           window.dispatchEvent(
-            new CustomEvent("orggui:focusNode", { detail: { id: sel } }),
+            new CustomEvent("orggui:focusNode", { detail: { id: sel, place } }),
           );
         });
       }

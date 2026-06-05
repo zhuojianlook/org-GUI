@@ -51,6 +51,8 @@ export default function Toolbar() {
   const setUpdateChannel = useOrgStore((s) => s.setUpdateChannel);
   const showTimeline = useOrgStore((s) => s.showTimeline);
   const setShowTimeline = useOrgStore((s) => s.setShowTimeline);
+  const autoScheduleOnStart = useOrgStore((s) => s.autoScheduleOnStart);
+  const setAutoScheduleOnStart = useOrgStore((s) => s.setAutoScheduleOnStart);
 
   const [updateState, setUpdateState] = useState<UpdateState>("idle");
   const [updatePct, setUpdatePct] = useState(0);
@@ -401,6 +403,18 @@ export default function Toolbar() {
                 window.alert(`Could not restart daemon: ${String(e)}`);
               }
             }}
+          />
+          <Divider />
+          <div style={{ padding: "6px 10px 2px 10px", fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--c-text-dim)", fontWeight: 700 }}>
+            Preferences
+          </div>
+          <MenuItem
+            label={`${autoScheduleOnStart ? "☑" : "☐"} Auto-schedule on Start`}
+            titleAttr={
+              "When on, clicking ▶ Start also schedules the task for today (puts it " +
+              "on the timeline). When off, Start just marks it STRT."
+            }
+            onClick={() => setAutoScheduleOnStart(!autoScheduleOnStart)}
           />
           <Divider />
           <div style={{ padding: "6px 10px 2px 10px", fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--c-text-dim)", fontWeight: 700 }}>
