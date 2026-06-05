@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useOrgStore, gcalCalendarTagSet } from "../store/useOrgStore";
 import { setDeadlineColor, setTags } from "../api/org";
+import { nodeStableKey } from "../utils/layout";
 
 interface MenuItem {
   label: string;
@@ -129,7 +130,7 @@ export default function ContextMenu() {
 
   if (!menu || !node) return null;
 
-  const isExpanded = expanded.has(node.id);
+  const isExpanded = expanded.has(nodeStableKey(node));
   const hasDeadline = !!node.deadline;
   const items: MenuItem[] = [
     {

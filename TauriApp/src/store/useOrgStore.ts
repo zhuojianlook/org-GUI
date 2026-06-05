@@ -618,16 +618,33 @@ function autoExpandForDeps(doc: OrgDoc): Set<string> {
     }
   }
 
+  // Keyed by STABLE key (nodeStableKey), not n<begin> id, so the expanded set
+  // survives buffer-position shifts from edits.
   const expanded = new Set<string>();
   for (const id of participating) {
     let cur = byId.get(id);
     cur = cur?.parent ? byId.get(cur.parent) : undefined;
     while (cur) {
-      expanded.add(cur.id);
+      expanded.add(nodeStableKey(cur));
       cur = cur.parent ? byId.get(cur.parent) : undefined;
     }
   }
   return expanded;
+}
+
+// One-time migration of the persisted expanded set from old n<begin> ids to
+// stable keys, using the freshly parsed doc to map id → stable key.
+function migrateExpanded(stored: Set<string> | null, doc: OrgDoc): Set<string> | null {
+  if (!stored || stored.size === 0) return stored;
+  const arr = [...stored];
+  if (!arr.some((k) => /^n\d+$/.test(k))) return stored; // already stable-key form
+  const byId = new Map(doc.nodes.map((n) => [n.id, n] as const));
+  const out = new Set<string>();
+  for (const k of arr) {
+    const node = byId.get(k);
+    out.add(node ? nodeStableKey(node) : k);
+  }
+  return out;
 }
 
 /** Right-click context menu, anchored at the cursor. */
@@ -747,6 +764,9 @@ interface OrgState {
   /** Collapse to top-level only (hide all children) — persisted per file. */
   collapseAll: () => void;
   setRootPosition: (key: string, x: number, y: number) => void;
+  /** Pin several root positions at once (by stable key) — used when region
+   *  membership is assigned so members keep a fixed spot inside their box. */
+  setRootPositions: (updates: Record<string, { x: number; y: number }>) => void;
   /** Toggle region-drawing mode (drag on the pane to draw a box). */
   setBoxDrawMode: (on: boolean) => void;
   /** Create a region box from a flow-coordinate rectangle. Returns its id. */
@@ -902,7 +922,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       // flight, the more recent click owns loadingFile — drop this stale
       // result so we don't suddenly swap to an old target.
       if (get().loadingFile !== file) return;
-      const saved = loadExpanded(file);
+      const saved = migrateExpanded(loadExpanded(file), doc);
       const expanded = saved ?? autoExpandForDeps(doc);
       if (!saved) saveExpanded(file, expanded);
       // Tag + colour imported Google-Calendar events by their calendar.
@@ -1255,9 +1275,13 @@ export const useOrgStore = create<OrgState>((set, get) => ({
 
   toggleExpand: (id) =>
     set((s) => {
+      // Callers pass the node's (begin-based) id; toggle its STABLE key so the
+      // expansion sticks to the heading, not its buffer position.
+      const node = s.doc?.nodes.find((n) => n.id === id);
+      const key = node ? nodeStableKey(node) : id;
       const e = new Set(s.expanded);
-      if (e.has(id)) e.delete(id);
-      else e.add(id);
+      if (e.has(key)) e.delete(key);
+      else e.add(key);
       saveExpanded(s.file, e);
       return { expanded: e };
     }),
@@ -1265,7 +1289,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   expandAll: () =>
     set((s) => {
       if (!s.doc) return {};
-      const e = new Set(s.doc.nodes.map((n) => n.id));
+      const e = new Set(s.doc.nodes.map((n) => nodeStableKey(n)));
       saveExpanded(s.file, e);
       return { expanded: e };
     }),
@@ -1583,6 +1607,13 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       savePositions(s.file, rootPositions);
       return { rootPositions };
     }),
+  setRootPositions: (updates) =>
+    set((s) => {
+      if (Object.keys(updates).length === 0) return {};
+      const rootPositions = { ...s.rootPositions, ...updates };
+      savePositions(s.file, rootPositions);
+      return { rootPositions };
+    }),
 
   addMilestone: (iso, label = "Milestone") => {
     const id = `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -1800,7 +1831,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         doc: reapplyGcalTags(doc),
         loading: false,
         selectedId: null,
-        expanded: loadExpanded(file) ?? new Set<string>(),
+        expanded: migrateExpanded(loadExpanded(file), doc) ?? new Set<string>(),
         rootPositions: migratePositions(loadPositions(file), doc),
         boxes: loadBoxes(file),
         boxMembers: loadBoxMembers(file),

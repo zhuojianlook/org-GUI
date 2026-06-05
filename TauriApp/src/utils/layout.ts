@@ -132,10 +132,14 @@ export function buildLayout(
   };
 
   // Visibility: roots always; a child shows only when its parent is expanded.
+  // `expanded` holds STABLE keys (nodeStableKey), not n<begin> ids, so an edit
+  // that shifts buffer positions (e.g. adding a TODO keyword) doesn't silently
+  // collapse everything below it.
   const visibleIds = new Set<string>();
   const visible: OrgNode[] = [];
   for (const n of nodes) {
-    const vis = !n.parent || (visibleIds.has(n.parent) && expanded.has(n.parent));
+    const parent = n.parent ? byId.get(n.parent) : undefined;
+    const vis = !n.parent || (visibleIds.has(n.parent) && !!parent && expanded.has(nodeStableKey(parent)));
     if (vis) {
       visibleIds.add(n.id);
       visible.push(n);
@@ -179,7 +183,7 @@ export function buildLayout(
         org: n,
         dated: hasOwnDate(n),
         hasChildren: childCount > 0,
-        expanded: expanded.has(n.id),
+        expanded: expanded.has(nodeStableKey(n)),
         childCount,
       } as OrgNodeView,
       zIndex: 10,

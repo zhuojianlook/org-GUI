@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.2.96"
+version = "0.2.97"
 description = "org-GUI — a visual GUI wrapper around Emacs org-mode"
 authors = ["Zhuojian Look"]
 license = "MIT"

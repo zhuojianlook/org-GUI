@@ -64,6 +64,7 @@ export default function TimelineGraph() {
   const tagFilter = useOrgStore((s) => s.tagFilter);
   const rootPositions = useOrgStore((s) => s.rootPositions);
   const setRootPosition = useOrgStore((s) => s.setRootPosition);
+  const setRootPositions = useOrgStore((s) => s.setRootPositions);
   const boxes = useOrgStore((s) => s.boxes);
   const boxDrawMode = useOrgStore((s) => s.boxDrawMode);
   const addBox = useOrgStore((s) => s.addBox);
@@ -230,6 +231,7 @@ export default function TimelineGraph() {
       return;
     }
     const assigns: Record<string, string> = {};
+    const pins: Record<string, { x: number; y: number }> = {};
     for (const nd of nodes) {
       if (nd.type === "box") continue;
       const org = byId.get(nd.id);
@@ -239,16 +241,23 @@ export default function TimelineGraph() {
       const w = nd.width ?? nd.measured?.width ?? 240;
       const h = nd.height ?? nd.measured?.height ?? 64;
       const b = boxContaining(nd.position.x + w / 2, nd.position.y + h / 2);
-      if (b) assigns[key] = b.id;
+      if (b) {
+        assigns[key] = b.id;
+        // Pin the member's current spot so a later reflow can't drift it out.
+        if (!rootPositions[key]) pins[key] = { x: nd.position.x, y: nd.position.y };
+      }
     }
-    if (Object.keys(assigns).length) updateBoxMembers(assigns);
+    if (Object.keys(assigns).length) {
+      setRootPositions(pins);
+      updateBoxMembers(assigns);
+    }
     try {
       localStorage.setItem(flag, "1");
     } catch {
       /* non-fatal */
     }
     migratedFileRef.current = file;
-  }, [file, boxes, nodes, byId, boxMembers, boxContaining, updateBoxMembers]);
+  }, [file, boxes, nodes, byId, boxMembers, boxContaining, updateBoxMembers, setRootPositions, rootPositions]);
 
   // First calendar import → its own region. A fresh calendar sync drops a big
   // batch of events on the canvas, which is messy. The FIRST time a file has a
@@ -295,10 +304,17 @@ export default function TimelineGraph() {
       label: "📅 Calendar",
     });
     const assigns: Record<string, string> = {};
+    const pins: Record<string, { x: number; y: number }> = {};
     for (const nd of cand) {
       const org = byId.get(nd.id);
-      if (org) assigns[nodeStableKey(org)] = id;
+      if (!org) continue;
+      const key = nodeStableKey(org);
+      assigns[key] = id;
+      // Pin each event's spot so the region's contents stay put when the layout
+      // reflows (e.g. after an edit elsewhere).
+      if (!rootPositions[key]) pins[key] = { x: nd.position.x, y: nd.position.y };
     }
+    setRootPositions(pins);
     updateBoxMembers(assigns);
     try {
       localStorage.setItem(calFlag, "1");
@@ -306,7 +322,7 @@ export default function TimelineGraph() {
       /* non-fatal */
     }
     calRegionFileRef.current = file;
-  }, [file, nodes, byId, boxMembers, addBox, updateBoxMembers]);
+  }, [file, nodes, byId, boxMembers, addBox, updateBoxMembers, setRootPositions, rootPositions]);
 
   useEffect(() => {
     if (layout) setEdges([...layout.edges, ...depEdges]);
