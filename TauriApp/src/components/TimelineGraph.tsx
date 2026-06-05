@@ -80,6 +80,7 @@ export default function TimelineGraph() {
   const setScheduleDragNode = useOrgStore((s) => s.setScheduleDragNode);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const setTodayDropActive = useOrgStore((s) => s.setTodayDropActive);
+  const todayDropActive = useOrgStore((s) => s.todayDropActive);
   const addDependency = useOrgStore((s) => s.addDependency);
   const setConnectDrag = useOrgStore((s) => s.setConnectDrag);
   const rf = useReactFlow();
@@ -677,6 +678,11 @@ export default function TimelineGraph() {
       edges={edges}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
+      // Stop React Flow's edge-of-pane auto-pan while a node is held over the
+      // Today drop zone — the cursor sits past the canvas's right edge there,
+      // which would otherwise scroll the canvas indefinitely. The auto-pan loop
+      // re-reads this flag every frame, so flipping it mid-drag halts the pan.
+      autoPanOnNodeDrag={!todayDropActive}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onPaneClick={() => select(null)}
