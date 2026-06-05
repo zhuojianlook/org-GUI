@@ -702,7 +702,21 @@ export default function TimelineGraph() {
           const node = rf.getNode(id);
           const w = node?.measured?.width ?? node?.width ?? 220;
           const h = node?.measured?.height ?? node?.height ?? 60;
-          setRootPosition(nodeStableKey(org), c.x - w / 2, c.y - h / 2);
+          let px = c.x - w / 2;
+          let py = c.y - h / 2;
+          // Cascade if another node already sits at the target spot, so creating
+          // several headings in a row fans them out instead of stacking them.
+          const others = rf.getNodes().filter((n) => n.id !== id && n.type !== "box");
+          let guard = 0;
+          while (
+            guard < 40 &&
+            others.some((n) => Math.abs(n.position.x - px) < 14 && Math.abs(n.position.y - py) < 14)
+          ) {
+            px += 28;
+            py += 28;
+            guard++;
+          }
+          setRootPosition(nodeStableKey(org), px, py);
           select(id);
           flashNode(id);
           return;

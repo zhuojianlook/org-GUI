@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.103")
+(defconst org-gui-bridge-version "0.2.104")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1008,6 +1008,15 @@ Returns the freshly parsed document."
            (goto-char (point-max))
            (unless (bolp) (insert "\n"))
            (insert "* " title "\n")))
+       ;; Point now sits just past the inserted heading line — step back onto it
+       ;; and stamp a unique :ID:. Without this, every heading the GUI creates is
+       ;; titled "New heading" and (lacking an id) shares ONE title-based stable
+       ;; key, so they all pile onto a single canvas position and drag together.
+       ;; An id also lets a heading keep its position when you rename it.
+       (forward-line -1)
+       (org-back-to-heading t)
+       (unless (org-entry-get nil "ID")
+         (org-entry-put nil "ID" (org-id-new)))
        (org-gui--refresh-cookies)) ; new child → parent's cookie gains a slot
       (save-buffer)
       (org-gui--doc-json file))))
