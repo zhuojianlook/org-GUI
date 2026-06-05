@@ -81,6 +81,7 @@ export default function TimelineGraph() {
   const depMode = useOrgStore((s) => s.depMode);
   const scheduleMode = useOrgStore((s) => s.scheduleMode);
   const setScheduleDragNode = useOrgStore((s) => s.setScheduleDragNode);
+  const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const addDependency = useOrgStore((s) => s.addDependency);
   const setConnectDrag = useOrgStore((s) => s.setConnectDrag);
   const rf = useReactFlow();
@@ -603,6 +604,24 @@ export default function TimelineGraph() {
         const ds = dragRef.current;
         dragRef.current = null;
         if (!ds) return;
+        // Released over the "Today" panel's drop zone? → schedule for today and
+        // snap the node back (don't move it on the canvas).
+        if (
+          ds.kind !== "box" &&
+          document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-today-dropzone]")
+        ) {
+          const org = byId.get(node.id);
+          if (org) {
+            const t = new Date();
+            const iso = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(
+              t.getDate(),
+            ).padStart(2, "0")}`;
+            void scheduleNode(org, iso, "scheduled");
+          }
+          setDropTarget(null);
+          setNodes(displayNodes); // snap back
+          return;
+        }
         if (ds.kind === "box") {
           // Persist the box's new origin and each member's new position.
           const dx = node.position.x - ds.bx;

@@ -45,7 +45,7 @@ import {
 // (null = collapsed, graph full-width). "details" is the same DetailPanel
 // inspector that used to be always-visible; making it a tab lets the user
 // reclaim the canvas width when not editing field-level metadata.
-export type PanelTab = "emacs" | "agenda" | "details" | null;
+export type PanelTab = "emacs" | "agenda" | "details" | "today" | null;
 
 // Persist the last-opened file so the desktop app can reopen it on startup.
 const LAST_FILE_KEY = "org-gui:lastFile";

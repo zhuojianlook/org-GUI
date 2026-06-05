@@ -7,6 +7,7 @@ import TimelineGraph from "./components/TimelineGraph";
 import DetailPanel from "./components/DetailPanel";
 import EmacsTerminal from "./components/EmacsTerminal";
 import AgendaPanel from "./components/AgendaPanel";
+import TodayPanel from "./components/TodayPanel";
 import TimelineBand from "./components/TimelineBand";
 import ContextMenu from "./components/ContextMenu";
 import ConfirmModal from "./components/ConfirmModal";
@@ -311,6 +312,7 @@ export default function App() {
             <AgendaPanel />
           </div>
         )}
+        {doc && panel === "today" && <TodayPanel />}
         {doc && panel === "details" && <DetailPanel />}
 
         {/* Vertical tab rail on the far right to pull panels in/out. Details
@@ -318,6 +320,11 @@ export default function App() {
             otherwise. */}
         {doc && (
           <div style={{ display: "flex", flexDirection: "column", flexShrink: 0, borderLeft: "1px solid var(--c-border)", background: "var(--c-surface)" }}>
+            <TabRailButton
+              label="Today"
+              active={panel === "today"}
+              onClick={() => setPanel(panel === "today" ? null : "today")}
+            />
             <TabRailButton
               label="Details"
               active={panel === "details"}
