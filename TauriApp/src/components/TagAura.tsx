@@ -42,6 +42,10 @@ export default function TagAura() {
 
     const buckets = new Map<string, Halo[]>();
     for (const fn of flowNodes) {
+      // Skip nodes hidden by a collapsed region — otherwise their halo/MST
+      // filaments keep glowing over the compact region bar even though the
+      // node card itself is gone.
+      if (fn.hidden) continue;
       const org = nodeById.get(fn.id);
       if (!org) continue;
       const tags = (org.tagsAll ?? []).filter((t) => tagColors[t]);
