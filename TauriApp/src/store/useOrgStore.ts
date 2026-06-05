@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { nodeStableKey } from "../utils/layout";
+import { nodeStableKey, normalizeStableKey } from "../utils/layout";
 import {
   Mutator,
   OrgDoc,
@@ -118,15 +118,22 @@ function loadPositions(file: string | null): RootPositions {
 function migratePositions(stored: RootPositions, doc: OrgDoc): RootPositions {
   const keys = Object.keys(stored);
   if (keys.length === 0) return stored;
-  // Already stable-key form? (new keys are "id:…"/"t:…", never pure numbers.)
-  if (keys.some((k) => !/^\d+$/.test(k))) return stored;
-  const roots = doc.nodes.filter((n) => !n.parent);
-  const out: RootPositions = {};
-  for (const [k, v] of Object.entries(stored)) {
-    const root = roots[Number(k)];
-    if (root) out[nodeStableKey(root)] = v;
+  let working = stored;
+  // Legacy form: positions used to be keyed by root INDEX ("0","1",…). Convert
+  // to stable-key form using the freshly parsed doc's root order.
+  if (!keys.some((k) => !/^\d+$/.test(k))) {
+    const roots = doc.nodes.filter((n) => !n.parent);
+    const out: RootPositions = {};
+    for (const [k, v] of Object.entries(stored)) {
+      const root = roots[Number(k)];
+      if (root) out[nodeStableKey(root)] = v;
+    }
+    working = out;
   }
-  return out;
+  // Normalise any `t:` keys that still embed a statistics cookie (idempotent).
+  const norm: RootPositions = {};
+  for (const [k, v] of Object.entries(working)) norm[normalizeStableKey(k)] = v;
+  return norm;
 }
 
 function savePositions(file: string | null, positions: RootPositions) {
@@ -201,7 +208,12 @@ function loadBoxMembers(file: string | null): Record<string, string> {
   try {
     const raw = localStorage.getItem(BOX_MEMBERS_KEY(file));
     const m = raw ? (JSON.parse(raw) as Record<string, string>) : {};
-    return m && typeof m === "object" ? m : {};
+    if (!m || typeof m !== "object") return {};
+    // Normalise any `t:` key that still embeds a statistics cookie so membership
+    // survives a child-TODO toggle rewriting the parent's `[n/m]` cookie.
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(m)) out[normalizeStableKey(k)] = v;
+    return out;
   } catch {
     return {};
   }
@@ -640,12 +652,13 @@ function autoExpandForDeps(doc: OrgDoc): Set<string> {
 function migrateExpanded(stored: Set<string> | null, doc: OrgDoc): Set<string> | null {
   if (!stored || stored.size === 0) return stored;
   const arr = [...stored];
-  if (!arr.some((k) => /^n\d+$/.test(k))) return stored; // already stable-key form
   const byId = new Map(doc.nodes.map((n) => [n.id, n] as const));
   const out = new Set<string>();
   for (const k of arr) {
-    const node = byId.get(k);
-    out.add(node ? nodeStableKey(node) : k);
+    // Legacy `n<begin>` id → stable key; then strip any statistics cookie that a
+    // saved `t:` key may still embed (both steps idempotent for current keys).
+    const node = /^n\d+$/.test(k) ? byId.get(k) : undefined;
+    out.add(node ? nodeStableKey(node) : normalizeStableKey(k));
   }
   return out;
 }

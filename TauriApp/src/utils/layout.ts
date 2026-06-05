@@ -13,8 +13,30 @@ import { parseOrgDate } from "./time";
  * are what regions/positions key on). Used by region membership + (later) saved
  * positions so they follow the node, not its byte offset.
  */
+// Org statistics cookies embedded in a heading: [/] [%] [n/m] [n%]. These are
+// auto-rewritten by Emacs whenever a *child's* TODO state changes (e.g.
+// completing a sub-task flips the parent's `[0/1]` to `[1/1]`), so they must NOT
+// be part of a heading's stable identity — otherwise toggling a nested TODO
+// silently changes the parent's `t:title` key and the parent loses its saved
+// position / region membership / expansion all at once.
+const STATS_COOKIE_RE = /\[(?:\d*%|\d*\/\d*)\]/g;
+function stripStatsCookies(s: string): string {
+  return s.replace(STATS_COOKIE_RE, "").replace(/\s+/g, " ").trim();
+}
+
 export function nodeStableKey(n: { orgId?: string | null; title?: string | null }): string {
-  return n.orgId ? `id:${n.orgId}` : `t:${n.title ?? ""}`;
+  return n.orgId ? `id:${n.orgId}` : `t:${stripStatsCookies(n.title ?? "")}`;
+}
+
+/**
+ * Normalise a previously-persisted stable key so older saved keys (which may
+ * embed a statistics cookie in their `t:` title portion) map onto the
+ * cookie-stripped form `nodeStableKey` now produces. Idempotent; leaves `id:`
+ * keys untouched. Used by the position / membership / expansion migrations so a
+ * user's existing canvas survives this change without a one-time reset.
+ */
+export function normalizeStableKey(key: string): string {
+  return key.startsWith("t:") ? `t:${stripStatsCookies(key.slice(2))}` : key;
 }
 
 export const INDENT_X = 30; // horizontal indent per heading level
