@@ -750,20 +750,37 @@ export default function TimelineGraph() {
     return out;
   };
 
-  // A valid drop target: another header at the SAME level as the child's
-  // current parent (so the child keeps its depth), not self/descendant/parent.
+  // A valid drop target: ANY other org heading the dragged node overlaps that
+  // isn't itself, its current parent (a no-op), or one of its own descendants
+  // (which would orphan the subtree). Org-refile adjusts the moved subtree's
+  // level automatically, so we DON'T require the target to match the old
+  // parent's depth — that constraint silently swallowed most drops. When the
+  // node overlaps several headings we pick the one it overlaps MOST, so the
+  // result is predictable instead of "first in node order".
   const findTarget = (node: Node, ds: Extract<DragState, { kind: "child" }>): Node | null => {
-    const inter = rf.getIntersectingNodes(node);
-    return (
-      inter.find(
+    const candidates = rf
+      .getIntersectingNodes(node)
+      .filter(
         (nd) =>
           nd.type === "org" &&
           nd.id !== node.id &&
           nd.id !== ds.parentId &&
-          !ds.descSet.has(nd.id) &&
-          byId.get(nd.id)?.level === ds.parentLevel,
-      ) ?? null
-    );
+          !ds.descSet.has(nd.id),
+      );
+    if (candidates.length === 0) return null;
+    const rectOf = (n: Node) => {
+      const w = n.width ?? n.measured?.width ?? 220;
+      const h = n.height ?? n.measured?.height ?? 40;
+      return { x: n.position.x, y: n.position.y, w, h };
+    };
+    const a = rectOf(node);
+    const overlap = (n: Node) => {
+      const b = rectOf(n);
+      const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+      const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+      return ix * iy;
+    };
+    return candidates.reduce((best, n) => (overlap(n) > overlap(best) ? n : best));
   };
 
   return (
@@ -936,6 +953,11 @@ export default function TimelineGraph() {
         if (t && org) {
           const tgt = byId.get(t.id);
           if (tgt) {
+            // Snap the dragged node back to its laid-out spot IMMEDIATELY, then
+            // let the refile re-render it under its new parent. Without this the
+            // node hovers at the drop point during the async round-trip, reading
+            // as a duplicate until the new doc arrives.
+            setNodes(displayNodes);
             refile(org, tgt);
             return;
           }
@@ -947,6 +969,7 @@ export default function TimelineGraph() {
           const targetIndex = others.filter((s) => s.y < node.position.y).length;
           const delta = targetIndex - ds.origIndex;
           if (delta !== 0 && org) {
+            setNodes(displayNodes); // snap back before the async reorder
             reorder(org, delta);
             return;
           }

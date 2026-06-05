@@ -2094,7 +2094,10 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     }
     set({ saving: true, error: null });
     try {
-      const newDoc = await apiDeleteNode(file, node.begin);
+      // Pass the title so the bridge can verify the begin still points at this
+      // heading (and abort instead of cutting the wrong subtree if the file
+      // shifted on disk since the last parse).
+      const newDoc = await apiDeleteNode(file, node.begin, node.title ?? "");
       set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });

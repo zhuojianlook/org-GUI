@@ -1011,9 +1011,9 @@ export const addHeading = (file: string, parentBegin: number, title: string) =>
     ? orgCall<OrgDoc>("org-gui-add-heading", [file, String(parentBegin), title])
     : Promise.resolve(mockAdd(parentBegin, title));
 
-export const deleteNode = (file: string, begin: number) =>
+export const deleteNode = (file: string, begin: number, title = "") =>
   IN_TAURI
-    ? orgCall<OrgDoc>("org-gui-delete", [file, String(begin)])
+    ? orgCall<OrgDoc>("org-gui-delete", [file, String(begin), title])
     : Promise.resolve(mockDelete(begin));
 
 /** Toggle the INDEX-th checkbox in a node's body, refresh its cookie, save. */

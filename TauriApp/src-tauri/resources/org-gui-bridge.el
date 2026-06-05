@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.107")
+(defconst org-gui-bridge-version "0.2.108")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1061,13 +1061,15 @@ Returns the freshly parsed document."
       (save-buffer)
       (org-gui--doc-json file))))
 
-(defun org-gui-delete (file begin)
-  "Delete the subtree of the heading at BEGIN. Returns the parsed document."
+(defun org-gui-delete (file begin &optional title)
+  "Delete the subtree of the heading at BEGIN. TITLE (optional) is the heading
+the GUI meant to delete; when supplied it guards against a stale BEGIN landing
+on the wrong heading after an external edit (relocating to the unique heading
+with that title, or aborting). Returns the parsed document."
   (let ((begin (org-gui--num begin)))
     (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
-       (goto-char (min begin (point-max)))
-       (org-back-to-heading t)
+       (goto-char (org-gui--resolve-heading begin title))
        (org-cut-subtree)
        (org-gui--refresh-cookies)) ; parent loses a slot
       (save-buffer)

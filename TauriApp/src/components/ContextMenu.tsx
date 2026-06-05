@@ -155,7 +155,7 @@ export default function ContextMenu() {
       onClick: () => select(node.id),
     },
     {
-      label: "🏷 Add tag…",
+      label: "🏷 Add / remove tags…",
       onClick: () => setMode("tag"),
       keepOpen: true,
       divider: true,
@@ -405,6 +405,66 @@ export default function ContextMenu() {
               })
             )}
           </div>
+        </div>
+      )}
+      {/* Current removable tags — shown right in the MAIN menu so removing a tag
+          is one click (no need to dig into the "Add tag…" sub-view). Calendar
+          📅 tags aren't real heading tags and can't be removed here. */}
+      {mode === "main" && ownTags.filter((t) => !calTagSet.has(t)).length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 4,
+            padding: "6px 8px",
+            marginBottom: 2,
+            borderBottom: "1px solid var(--c-border)",
+          }}
+        >
+          {ownTags
+            .filter((t) => !calTagSet.has(t))
+            .map((t) => {
+              const c = tagColors[t];
+              return (
+                <span
+                  key={`m-own-${t}`}
+                  title={`Click × to remove :${t}:`}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 3,
+                    padding: "1px 3px 1px 6px",
+                    borderRadius: 9,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    fontFamily: "ui-monospace, monospace",
+                    background: c ? `${c}33` : "var(--c-surface2)",
+                    border: `1px solid ${c ? `${c}99` : "var(--c-border)"}`,
+                    color: "var(--c-text)",
+                  }}
+                >
+                  {t}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeTag(t);
+                    }}
+                    title={`Remove :${t}:`}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      color: "var(--c-text-dim)",
+                      cursor: "pointer",
+                      fontSize: 13,
+                      lineHeight: 1,
+                      padding: "0 1px",
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
+              );
+            })}
         </div>
       )}
       {mode === "main" && items.map((it, i) => (
