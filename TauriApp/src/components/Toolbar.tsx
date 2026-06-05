@@ -44,6 +44,8 @@ export default function Toolbar() {
   const setDepMode = useOrgStore((s) => s.setDepMode);
   const boxDrawMode = useOrgStore((s) => s.boxDrawMode);
   const setBoxDrawMode = useOrgStore((s) => s.setBoxDrawMode);
+  const expandAll = useOrgStore((s) => s.expandAll);
+  const collapseAll = useOrgStore((s) => s.collapseAll);
   const tagFilter = useOrgStore((s) => s.tagFilter);
   const updateChannel = useOrgStore((s) => s.updateChannel);
   const setUpdateChannel = useOrgStore((s) => s.setUpdateChannel);
@@ -218,6 +220,22 @@ export default function Toolbar() {
         disabled={!doc}
       >
         + Heading
+      </button>
+      <button
+        onClick={() => expandAll()}
+        title="Expand every node (show all children)"
+        style={btn}
+        disabled={!doc}
+      >
+        ⊞ Expand
+      </button>
+      <button
+        onClick={() => collapseAll()}
+        title="Collapse to top-level headings only"
+        style={btn}
+        disabled={!doc}
+      >
+        ⊟ Collapse
       </button>
 
       <Separator />

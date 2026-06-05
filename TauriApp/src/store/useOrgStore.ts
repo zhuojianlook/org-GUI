@@ -691,6 +691,10 @@ interface OrgState {
   removeDependency: (fromNode: OrgNode, toNode: OrgNode) => Promise<void>;
   editInEmacs: (node: OrgNode) => void;
   toggleExpand: (id: string) => void;
+  /** Expand every node (show all children) — persisted per file. */
+  expandAll: () => void;
+  /** Collapse to top-level only (hide all children) — persisted per file. */
+  collapseAll: () => void;
   setRootPosition: (index: number, x: number, y: number) => void;
   /** Toggle region-drawing mode (drag on the pane to draw a box). */
   setBoxDrawMode: (on: boolean) => void;
@@ -1179,6 +1183,20 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const e = new Set(s.expanded);
       if (e.has(id)) e.delete(id);
       else e.add(id);
+      saveExpanded(s.file, e);
+      return { expanded: e };
+    }),
+
+  expandAll: () =>
+    set((s) => {
+      if (!s.doc) return {};
+      const e = new Set(s.doc.nodes.map((n) => n.id));
+      saveExpanded(s.file, e);
+      return { expanded: e };
+    }),
+  collapseAll: () =>
+    set((s) => {
+      const e = new Set<string>();
       saveExpanded(s.file, e);
       return { expanded: e };
     }),
