@@ -1618,17 +1618,35 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     }
     try {
       const { events } = await apiGcalPeek(clientId, clientSecret, account, cals);
-      // Compare on the EVENT-ID portion of "<eventId>/<calId>" so a difference
-      // in how the calendar id is spelled never causes a false "new".
-      const eid = (s: string) => s.split("/")[0];
+      // Reduce each id to the BASE Google event id:
+      //   "<eventId>/<calId>"               → drop the calendar id
+      //   "<baseId>_<instanceTimestamp>"    → drop the recurring-instance suffix
+      // A recurring series materialises one heading PER occurrence in the file,
+      // while events.list(singleEvents) returns FUTURE occurrences too — those
+      // share the base id but differ in the "_<timestamp>" suffix, so without
+      // this they'd be flagged "new" forever. Base ids never contain "_"
+      // (base32hex), so the first underscore is always the instance separator.
+      const baseId = (s: string) => s.split("/")[0].split("_")[0];
       const have = new Set(
         doc.nodes
           .map((n) => n.entryId)
           .filter((id): id is string => !!id)
-          .map(eid),
+          .map(baseId),
       );
-      const fresh = events.filter((e) => e.id && !have.has(eid(e.id)));
-      set({ gcalNewCount: fresh.length, gcalNewTitles: fresh.slice(0, 6).map((e) => e.summary) });
+      const fresh = events.filter((e) => e.id && !have.has(baseId(e.id)));
+      // De-dupe the survivors by base id so a brand-new recurring series counts
+      // once, not once per future occurrence.
+      const seenFresh = new Set<string>();
+      const uniqueFresh = fresh.filter((e) => {
+        const b = baseId(e.id);
+        if (seenFresh.has(b)) return false;
+        seenFresh.add(b);
+        return true;
+      });
+      set({
+        gcalNewCount: uniqueFresh.length,
+        gcalNewTitles: uniqueFresh.slice(0, 6).map((e) => e.summary),
+      });
     } catch {
       // Background check — swallow (offline, token expired, etc.).
     }
