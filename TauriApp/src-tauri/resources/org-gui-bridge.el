@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.90")
+(defconst org-gui-bridge-version "0.2.91")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1389,6 +1389,19 @@ browser consent; later calls reuse the stored token."
     ;; see and makes a sync look like it "did nothing".
     (setq org-gcal-up-days 365
           org-gcal-down-days 180)
+    ;; Force a FULL fetch into the (current-tab) target file. org-gcal caches a
+    ;; per-CALENDAR sync token (NOT per-file), persisted to disk. Once a calendar
+    ;; has been fetched into ANY file, a later fetch into a DIFFERENT file is
+    ;; INCREMENTAL — Google returns only events changed since that token, which
+    ;; is usually nothing — so the existing events NEVER land in the newly
+    ;; targeted file. That's the "sync says OK but the tab stays empty" bug.
+    ;; Drop the tokens for the calendars we're about to sync so org-gcal pulls
+    ;; each calendar's whole window into the current tab every time.
+    (when (boundp 'org-gcal--sync-tokens)
+      (setq org-gcal--sync-tokens
+            (seq-remove (lambda (e) (member (car e) ids)) org-gcal--sync-tokens))
+      (when (fboundp 'persist-save)
+        (ignore-errors (persist-save 'org-gcal--sync-tokens))))
     (let ((res (cond
                 ((and twp (fboundp 'org-gcal-sync)) (org-gcal-sync))
                 ((fboundp 'org-gcal-fetch) (org-gcal-fetch))
