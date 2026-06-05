@@ -18,6 +18,7 @@ export default function TodayPanel() {
   const doc = useOrgStore((s) => s.doc);
   const select = useOrgStore((s) => s.select);
   const flashNode = useOrgStore((s) => s.flashNode);
+  const dropActive = useOrgStore((s) => s.todayDropActive);
 
   const { overdue, scheduledToday, dueToday } = useMemo(() => {
     const todayMs = startOfDay(new Date()).getTime();
@@ -162,19 +163,30 @@ export default function TodayPanel() {
       <div
         data-today-dropzone
         style={{
-          border: "2px dashed var(--c-accent)",
+          border: `2px dashed var(--c-accent)`,
           borderRadius: 8,
           padding: "14px 12px",
           textAlign: "center",
-          color: "var(--c-text-dim)",
+          color: dropActive ? "var(--c-text)" : "var(--c-text-dim)",
           fontSize: 12,
-          background: "color-mix(in srgb, var(--c-accent) 8%, transparent)",
+          background: dropActive
+            ? "color-mix(in srgb, var(--c-accent) 28%, transparent)"
+            : "color-mix(in srgb, var(--c-accent) 8%, transparent)",
+          boxShadow: dropActive ? "0 0 0 3px color-mix(in srgb, var(--c-accent) 35%, transparent)" : "none",
+          transform: dropActive ? "scale(1.02)" : "none",
+          transition: "background 0.1s, box-shadow 0.1s, transform 0.1s, color 0.1s",
           lineHeight: 1.4,
         }}
       >
-        ⬇ Drag a task from the canvas here
-        <br />
-        to schedule it for <b style={{ color: "var(--c-text)" }}>today</b>
+        {dropActive ? (
+          <span style={{ fontWeight: 700 }}>⤵ Release to schedule for today</span>
+        ) : (
+          <>
+            ⬇ Drag a task from the canvas here
+            <br />
+            to schedule it for <b style={{ color: "var(--c-text)" }}>today</b>
+          </>
+        )}
       </div>
 
       {total === 0 ? (

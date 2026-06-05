@@ -153,6 +153,9 @@ export interface CanvasBox {
   /** CSS colour for the dotted border + label chip. Falls back to a default. */
   color?: string;
   label?: string;
+  /** When true the region is compacted to a single header bar and its member
+   *  nodes are hidden, to save canvas space. */
+  collapsed?: boolean;
 }
 const BOX_KEY = (file: string) => `org-gui:boxes:${file}`;
 
@@ -710,6 +713,9 @@ interface OrgState {
   dropTargetId: string | null;
   editBegin: number; // subtree the Emacs sidebar narrows to (0 = whole file)
   panel: PanelTab; // right-side pull-out panel
+  // True while a canvas node is being dragged over the Today panel's drop zone,
+  // so the zone can highlight itself as a live drop target.
+  todayDropActive: boolean;
   depMode: boolean; // dependency-drawing mode in the graph
   // Open files in the top tab strip. The active tab is whichever path
   // equals `file`. Order matches user insertion (most recent open last).
@@ -748,6 +754,7 @@ interface OrgState {
   highlightBlockers: (node: OrgNode) => void;
   flashNode: (id: string) => void;
   setPanel: (p: PanelTab) => void;
+  setTodayDropActive: (v: boolean) => void;
   setDepMode: (on: boolean) => void;
   setScheduleMode: (on: boolean) => void;
   setScheduleDragNode: (id: string | null) => void;
@@ -875,6 +882,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   dropTargetId: null,
   editBegin: 0,
   panel: null,
+  todayDropActive: false,
   depMode: false,
   openTabs: loadOpenTabs(),
   loadingFile: null,
@@ -1169,6 +1177,10 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     // opening the Agenda (to show the latest scheduled items).
     const needsReload = (prev === "emacs" && p !== "emacs") || p === "agenda";
     if (needsReload && get().file) get().reload();
+  },
+
+  setTodayDropActive: (v) => {
+    if (get().todayDropActive !== v) set({ todayDropActive: v });
   },
 
   // Dependency mode is a graph overlay; entering it collapses the pull-out so

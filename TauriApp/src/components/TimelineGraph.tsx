@@ -79,6 +79,7 @@ export default function TimelineGraph() {
   const scheduleMode = useOrgStore((s) => s.scheduleMode);
   const setScheduleDragNode = useOrgStore((s) => s.setScheduleDragNode);
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
+  const setTodayDropActive = useOrgStore((s) => s.setTodayDropActive);
   const addDependency = useOrgStore((s) => s.addDependency);
   const setConnectDrag = useOrgStore((s) => s.setConnectDrag);
   const rf = useReactFlow();
@@ -178,6 +179,25 @@ export default function TimelineGraph() {
     [boxMembers, boxes],
   );
 
+  // Ids of org nodes hidden because the region their ROOT belongs to is
+  // collapsed (the whole subtree disappears, not just the heading). Shared by
+  // displayNodes (to hide the nodes) and the edges effect (to drop edges that
+  // would otherwise dangle to an invisible endpoint).
+  const collapsedHiddenIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!layout) return ids;
+    const rootOf = (id: string) => {
+      let n = byId.get(id);
+      while (n?.parent) n = byId.get(n.parent);
+      return n;
+    };
+    for (const n of layout.nodes) {
+      const root = rootOf(n.id);
+      if (root && memberBoxOf(root)?.collapsed) ids.add(n.id);
+    }
+    return ids;
+  }, [layout, byId, memberBoxOf]);
+
   // The full node set fed to React Flow: the region boxes (rendered beneath the
   // org nodes) plus the org nodes. Region membership is metadata only — nodes
   // are NOT hard-clamped to their box, so you can freely drag a node from one
@@ -185,11 +205,20 @@ export default function TimelineGraph() {
   // (re)assigned on drop. (Dragging a box still carries its members along.)
   const displayNodes = useMemo<Node[]>(() => {
     if (!layout) return [];
+    // Member count per box (for the collapsed bar's "(N)" badge).
+    const memberCount: Record<string, number> = {};
+    for (const n of layout.nodes) {
+      const org = byId.get(n.id);
+      if (!org || org.parent) continue;
+      const b = memberBoxOf(org);
+      if (b) memberCount[b.id] = (memberCount[b.id] ?? 0) + 1;
+    }
+    const COLLAPSED_H = 30;
     const boxNodes: Node[] = boxes.map((b) => ({
       id: b.id,
       type: "box",
       position: { x: b.x, y: b.y },
-      data: { box: b },
+      data: { box: b, memberCount: memberCount[b.id] ?? 0 },
       draggable: !depMode && !scheduleMode && !boxDrawMode,
       selectable: false,
       deletable: false,
@@ -198,17 +227,25 @@ export default function TimelineGraph() {
       // pointerEvents:none on the wrapper makes the box interior click-through
       // (nodes inside stay interactive, panning works); the BoxNode re-enables
       // events only on its border strips / header / buttons.
-      style: { width: b.w, height: b.h, pointerEvents: "none" },
+      style: { width: b.w, height: b.collapsed ? COLLAPSED_H : b.h, pointerEvents: "none" },
     }));
-    // Clear any `extent` left over from the old hard-clamp build so existing
-    // members become freely draggable again.
-    const orgNodes = layout.nodes.map((n) => (n.extent ? { ...n, extent: undefined } : n));
+    // A node is hidden when the region its ROOT belongs to is collapsed (so the
+    // whole subtree disappears, not just the heading). Clear any leftover extent.
+    const orgNodes = layout.nodes.map((n) => {
+      if (collapsedHiddenIds.has(n.id)) return { ...n, hidden: true, extent: undefined };
+      return n.hidden || n.extent ? { ...n, hidden: false, extent: undefined } : n;
+    });
     return [...boxNodes, ...orgNodes];
-  }, [layout, boxes, depMode, scheduleMode, boxDrawMode]);
+  }, [layout, boxes, byId, memberBoxOf, collapsedHiddenIds, depMode, scheduleMode, boxDrawMode]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const dragRef = useRef<DragState | null>(null);
+  // Whether the in-flight node drag is currently over the Today panel's drop
+  // zone. Tracked continuously during onNodeDrag (where the event coordinates
+  // are reliable) so the drop decision in onNodeDragStop doesn't depend on the
+  // stop event's coordinates, and so the zone can highlight as a live target.
+  const overTodayRef = useRef(false);
   // Rubber-band rectangle (screen coords) while drawing a new region box.
   const [drawRect, setDrawRect] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
@@ -325,8 +362,14 @@ export default function TimelineGraph() {
   }, [file, nodes, byId, boxMembers, addBox, updateBoxMembers, setRootPositions, rootPositions]);
 
   useEffect(() => {
-    if (layout) setEdges([...layout.edges, ...depEdges]);
-  }, [layout, depEdges, setEdges]);
+    if (!layout) return;
+    // Drop any edge touching a node hidden by a collapsed region so it doesn't
+    // dangle to where the now-invisible node used to be.
+    const all = [...layout.edges, ...depEdges].filter(
+      (e) => !collapsedHiddenIds.has(e.source) && !collapsedHiddenIds.has(e.target),
+    );
+    setEdges(all);
+  }, [layout, depEdges, collapsedHiddenIds, setEdges]);
 
   // Manual drag-to-connect for dependency mode. We use NATIVE capture-phase
   // listeners on the wrapper (not React's synthetic onPointerDownCapture) so the
@@ -671,9 +714,20 @@ export default function TimelineGraph() {
           };
         }
       }}
-      onNodeDrag={(_e, node) => {
+      onNodeDrag={(e, node) => {
         const ds = dragRef.current;
         if (!ds || ds.id !== node.id) return;
+        // Live-track whether we're hovering the Today drop zone (non-box drags
+        // only). Uses the move event's coordinates, which are always present.
+        if (ds.kind !== "box") {
+          const over = !!document
+            .elementFromPoint(e.clientX, e.clientY)
+            ?.closest("[data-today-dropzone]");
+          if (over !== overTodayRef.current) {
+            overTodayRef.current = over;
+            setTodayDropActive(over);
+          }
+        }
         if (ds.kind === "box") {
           // Move every member node by the same delta as the box. Clear each
           // member's `extent` for the duration of the move — otherwise React
@@ -707,12 +761,18 @@ export default function TimelineGraph() {
       onNodeDragStop={(e, node) => {
         const ds = dragRef.current;
         dragRef.current = null;
+        // Always clear the Today drop-zone highlight when any drag ends.
+        const wasOverToday = overTodayRef.current;
+        overTodayRef.current = false;
+        setTodayDropActive(false);
         if (!ds) return;
         // Released over the "Today" panel's drop zone? → schedule for today and
-        // snap the node back (don't move it on the canvas).
+        // snap the node back (don't move it on the canvas). Trust the hover
+        // tracked during the drag, with a fresh hit-test as a fallback.
         if (
           ds.kind !== "box" &&
-          document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-today-dropzone]")
+          (wasOverToday ||
+            document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-today-dropzone]"))
         ) {
           const org = byId.get(node.id);
           if (org) {

@@ -25,7 +25,7 @@ const EDGE = 12; // px thickness of the grabbable border strips
 const DEFAULT_COLOR = "#8ab4f8";
 
 export default function BoxNode({ id, data }: NodeProps) {
-  const box = (data as { box: CanvasBox }).box;
+  const { box, memberCount = 0 } = data as { box: CanvasBox; memberCount?: number };
   const color = box.color || DEFAULT_COLOR;
   const updateBox = useOrgStore((s) => s.updateBox);
   const removeBox = useOrgStore((s) => s.removeBox);
@@ -34,6 +34,15 @@ export default function BoxNode({ id, data }: NodeProps) {
   const [hover, setHover] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draftLabel, setDraftLabel] = useState(box.label ?? "");
+
+  const collapsed = !!box.collapsed;
+  // Swallow the pointerdown so a click on the chevron toggles instead of
+  // starting a box drag (the bar / header chip are move handles).
+  const toggleCollapse = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    updateBox(id, { collapsed: !box.collapsed });
+  };
+  const swallow = (e: React.PointerEvent) => e.stopPropagation();
 
   // Drag the bottom-right grip to resize. Pointer moves are in screen pixels;
   // divide by the current zoom to convert to flow units (the box geometry is
@@ -69,6 +78,124 @@ export default function BoxNode({ id, data }: NodeProps) {
     pointerEvents: "auto",
     cursor: "move",
   };
+
+  // ── Collapsed: render a single compact header bar (label + member count) and
+  //    let TimelineGraph hide the member nodes, to reclaim canvas space. ──────
+  if (collapsed) {
+    return (
+      <div
+        className="box-move-handle"
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        title="Drag to move · click ▸ to expand"
+        style={{
+          width: "100%",
+          height: "100%",
+          boxSizing: "border-box",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "0 8px",
+          border: `2px dashed ${color}`,
+          borderRadius: 8,
+          background: `${color}26`,
+          pointerEvents: "auto",
+          cursor: "move",
+          overflow: "hidden",
+        }}
+      >
+        <button
+          onClick={toggleCollapse}
+          onPointerDown={swallow}
+          title="Expand region"
+          style={{
+            border: "none",
+            background: color,
+            color: "#1c1c1e",
+            borderRadius: 4,
+            font: "700 11px system-ui, sans-serif",
+            width: 18,
+            height: 18,
+            lineHeight: "18px",
+            padding: 0,
+            cursor: "pointer",
+            flexShrink: 0,
+          }}
+        >
+          ▸
+        </button>
+        {editing ? (
+          <input
+            autoFocus
+            value={draftLabel}
+            onChange={(e) => setDraftLabel(e.target.value)}
+            onBlur={commitLabel}
+            onPointerDown={swallow}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitLabel();
+              else if (e.key === "Escape") {
+                setDraftLabel(box.label ?? "");
+                setEditing(false);
+              }
+            }}
+            placeholder="Region name…"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              font: "600 11px system-ui, sans-serif",
+              color: "var(--c-text)",
+              background: "transparent",
+              border: "none",
+              outline: "none",
+            }}
+          />
+        ) : (
+          <span
+            onDoubleClick={() => {
+              setDraftLabel(box.label ?? "");
+              setEditing(true);
+            }}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              font: "600 11px system-ui, sans-serif",
+              color: "var(--c-text)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {box.label || "Region"}
+          </span>
+        )}
+        <span style={{ font: "600 10px system-ui, sans-serif", color: "var(--c-text-dim)", flexShrink: 0 }}>
+          {memberCount} item{memberCount === 1 ? "" : "s"}
+        </span>
+        {hover && (
+          <button
+            title="Delete this region (its nodes are freed)"
+            onClick={() => removeBox(id)}
+            onPointerDown={swallow}
+            style={{
+              width: 16,
+              height: 16,
+              borderRadius: 4,
+              border: "none",
+              background: "#d96459",
+              color: "#fff",
+              font: "700 11px system-ui, sans-serif",
+              lineHeight: "16px",
+              padding: 0,
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -138,6 +265,9 @@ export default function BoxNode({ id, data }: NodeProps) {
             position: "absolute",
             top: -13,
             left: 8,
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
             pointerEvents: "auto",
             cursor: "move",
             font: "600 11px system-ui, sans-serif",
@@ -152,7 +282,15 @@ export default function BoxNode({ id, data }: NodeProps) {
             boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
           }}
         >
-          {box.label || "Region"}
+          <span
+            onClick={toggleCollapse}
+            onPointerDown={swallow}
+            title="Collapse region"
+            style={{ cursor: "pointer", lineHeight: 1, flexShrink: 0 }}
+          >
+            ▾
+          </span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{box.label || "Region"}</span>
         </div>
       )}
 
