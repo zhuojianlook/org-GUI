@@ -8,6 +8,7 @@ import DetailPanel from "./components/DetailPanel";
 import EmacsTerminal from "./components/EmacsTerminal";
 import AgendaPanel from "./components/AgendaPanel";
 import TodayPanel from "./components/TodayPanel";
+import OnHoldPanel from "./components/OnHoldPanel";
 import TimelineBand from "./components/TimelineBand";
 import ContextMenu from "./components/ContextMenu";
 import ConfirmModal from "./components/ConfirmModal";
@@ -313,6 +314,7 @@ export default function App() {
           </div>
         )}
         {doc && panel === "today" && <TodayPanel />}
+        {doc && panel === "hold" && <OnHoldPanel />}
         {doc && panel === "details" && <DetailPanel />}
 
         {/* Vertical tab rail on the far right to pull panels in/out. Details
@@ -324,6 +326,11 @@ export default function App() {
               label="Today"
               active={panel === "today"}
               onClick={() => setPanel(panel === "today" ? null : "today")}
+            />
+            <TabRailButton
+              label="On Hold"
+              active={panel === "hold"}
+              onClick={() => setPanel(panel === "hold" ? null : "hold")}
             />
             <TabRailButton
               label="Details"
