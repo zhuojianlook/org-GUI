@@ -936,7 +936,7 @@ export default function TimelineGraph() {
         if (t && org) {
           const tgt = byId.get(t.id);
           if (tgt) {
-            refile(org, tgt.begin);
+            refile(org, tgt);
             return;
           }
         }

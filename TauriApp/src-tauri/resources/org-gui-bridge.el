@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.106")
+(defconst org-gui-bridge-version "0.2.107")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -675,20 +675,60 @@ heading isn't accidentally demoted into body text."
   "Move the subtree at BEGIN down among its siblings (org M-down)."
   (org-gui--with-heading file begin (lambda () (ignore-errors (org-move-subtree-down)))))
 
-(defun org-gui-refile (file begin target-begin)
+(defun org-gui--resolve-heading (begin expected-title)
+  "Resolve the position of the heading the GUI INTENDS to act on.
+Trust BEGIN when the heading there still matches EXPECTED-TITLE (or no title was
+supplied). Otherwise the file shifted on disk since the GUI parsed it — org-gcal,
+Dropbox or another Emacs edited it — so a raw buffer position now points at the
+WRONG heading (e.g. a neighbouring calendar event). Relocate to the UNIQUE
+heading titled EXPECTED-TITLE, or signal an error so the caller ABORTS rather
+than silently mutating the wrong subtree. Leaves point on the resolved heading."
+  (let ((expected (and (stringp expected-title)
+                       (not (string-empty-p expected-title))
+                       expected-title)))
+    (goto-char (min (max 1 begin) (point-max)))
+    (let ((at (and (ignore-errors (org-back-to-heading t) t)
+                   (org-get-heading t t t t))))
+      (cond
+       ((and at (or (null expected) (string= at expected)))
+        (point))
+       ((null expected)
+        (error "Couldn't locate the heading — refresh the file and try again"))
+       (t
+        (let (matches)
+          (goto-char (point-min))
+          (while (re-search-forward "^\\*+[ \t]" nil t)
+            (when (string= (org-get-heading t t t t) expected)
+              (push (line-beginning-position) matches)))
+          (cond
+           ((= (length matches) 1)
+            (goto-char (car matches))
+            (point))
+           ((> (length matches) 1)
+            (error "\"%s\" appears more than once and the file moved — refresh and try again" expected))
+           (t
+            (error "\"%s\" not found — the file changed on disk; refresh and try again" expected)))))))))
+
+(defun org-gui-refile (file begin target-begin &optional src-title tgt-title)
   "Move the subtree at BEGIN to become a child of the heading at TARGET-BEGIN.
-Uses org-refile so levels are adjusted automatically. Returns the doc."
+SRC-TITLE / TGT-TITLE are the titles the GUI saw; when supplied they guard
+against a stale BEGIN landing on the wrong heading after an external edit (a
+mismatch aborts instead of corrupting the file). Uses org-refile so levels
+adjust automatically. Returns the doc."
   (let ((begin (org-gui--num begin))
         (target-begin (org-gui--num target-begin)))
     (with-current-buffer (org-gui--visit file)
       (org-with-wide-buffer
-       (goto-char (min target-begin (point-max)))
-       (org-back-to-heading t)
-       (let ((tpos (point))
-             (theading (org-get-heading t t t t)))
-         (goto-char (min begin (point-max)))
-         (org-back-to-heading t)
-         (org-refile nil nil (list theading file nil tpos)))
+       (let* ((spos (org-gui--resolve-heading begin src-title))
+              ;; A MARKER, not an int: if the source is BEFORE the target,
+              ;; cutting it would otherwise shift the target's position out from
+              ;; under us. The marker tracks the target heading across the cut.
+              (tpos (copy-marker (org-gui--resolve-heading target-begin tgt-title))))
+         (goto-char tpos)
+         (let ((theading (org-get-heading t t t t)))
+           (goto-char spos)
+           (org-refile nil nil (list theading file nil tpos)))
+         (set-marker tpos nil))
        (org-gui--refresh-cookies)) ; both old and new parents recount
       (save-buffer)
       (org-gui--doc-json file))))

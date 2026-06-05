@@ -974,9 +974,21 @@ export const reorderNode = (file: string, begin: number, delta: number) =>
     ? orgCall<OrgDoc>("org-gui-reorder", [file, String(begin), String(delta)])
     : Promise.resolve(mockReorder(begin, delta));
 
-export const refileNode = (file: string, begin: number, targetBegin: number) =>
+export const refileNode = (
+  file: string,
+  begin: number,
+  targetBegin: number,
+  srcTitle = "",
+  tgtTitle = "",
+) =>
   IN_TAURI
-    ? orgCall<OrgDoc>("org-gui-refile", [file, String(begin), String(targetBegin)])
+    ? orgCall<OrgDoc>("org-gui-refile", [
+        file,
+        String(begin),
+        String(targetBegin),
+        srcTitle,
+        tgtTitle,
+      ])
     : Promise.resolve(mockRefile(begin, targetBegin));
 
 export const getFile = (file: string) =>

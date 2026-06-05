@@ -883,7 +883,7 @@ interface OrgState {
   resolveConfirm: (value: string | null) => void;
   setDropTarget: (id: string | null) => void;
   reorder: (node: OrgNode, delta: number) => Promise<void>;
-  refile: (node: OrgNode, targetBegin: number) => Promise<void>;
+  refile: (node: OrgNode, target: OrgNode) => Promise<void>;
   start: (node: OrgNode) => Promise<void>;
   archive: (node: OrgNode) => Promise<void>;
   edit: (apiFn: Mutator, node: OrgNode, value: string) => Promise<void>;
@@ -1783,12 +1783,21 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     }
   },
 
-  refile: async (node, targetBegin) => {
+  refile: async (node, target) => {
     const { file, doc } = get();
     if (!file || !doc) return;
     set({ saving: true, error: null });
     try {
-      const newDoc = await apiRefileNode(file, node.begin, targetBegin);
+      // Pass the titles the GUI currently shows so the bridge can verify the
+      // begins still point at these headings (and abort, not corrupt, if the
+      // file shifted on disk since the last parse).
+      const newDoc = await apiRefileNode(
+        file,
+        node.begin,
+        target.begin,
+        node.title ?? "",
+        target.title ?? "",
+      );
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
       set({ error: String(e), saving: false });
