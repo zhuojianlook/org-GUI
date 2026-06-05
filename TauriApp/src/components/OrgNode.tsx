@@ -416,9 +416,29 @@ export default function OrgNode({ data }: NodeProps) {
   const sched = started ? scheduledSpans(n) : [];
   const hasPlanning = sched.length > 0 || (!!n.deadline && !n.done);
 
+  // "Scheduled for today" / overdue emphasis: the whole node card pulses so
+  // today's work and overdue tasks jump out on the canvas. Only actionable
+  // (TODO-type, not-done) nodes flash. Overdue (a scheduled OR deadline date
+  // before today) → rapid red; else due/scheduled today → green when started
+  // (STRT), orange when not. Driven off SCHEDULED and DEADLINE.
+  const urgencyClass = ((): string | undefined => {
+    if (n.done || !n.todo) return undefined;
+    const todayMs = startOfDay(new Date()).getTime();
+    const tomorrowMs = todayMs + MS_DAY;
+    const s = parseOrgDate(n.scheduled);
+    const d = parseOrgDate(n.deadline);
+    const sMs = s ? startOfDay(s).getTime() : null;
+    const dMs = d ? startOfDay(d).getTime() : null;
+    if ((sMs != null && sMs < todayMs) || (dMs != null && dMs < todayMs)) return "overdue-flash";
+    const isToday = (ms: number | null) => ms != null && ms >= todayMs && ms < tomorrowMs;
+    if (isToday(sMs) || isToday(dMs))
+      return n.todo === "STRT" ? "today-started-flash" : "today-todo-flash";
+    return undefined;
+  })();
+
   return (
     <div
-      className={flashed ? "node-flash" : undefined}
+      className={[flashed && "node-flash", urgencyClass].filter(Boolean).join(" ") || undefined}
       // Schedule mode drag is handled by TimelineGraph via native pointer
       // events (HTML5 drag-and-drop does not fire reliably inside Tauri's
       // WKWebView). We don't set `draggable` here — doing so would let the

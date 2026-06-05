@@ -114,6 +114,52 @@ body {
   animation: priority-pulse 4s ease-in-out infinite;
 }
 
+/* "Scheduled for today" / overdue node emphasis — the WHOLE node card glows
+   and pulses so today's work and overdue tasks are unmissable on the canvas.
+   Orange = scheduled today, not started; green = scheduled today, started;
+   red (rapid) = overdue. */
+@keyframes today-todo-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px #e0a458, 0 0 14px 3px rgba(224, 164, 88, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 2px #e0a458, 0 0 28px 9px rgba(224, 164, 88, 0.85);
+  }
+}
+.today-todo-flash {
+  animation: today-todo-flash 1.3s ease-in-out infinite;
+  border-color: #e0a458 !important;
+}
+
+@keyframes today-started-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px #98be65, 0 0 14px 3px rgba(152, 190, 101, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 2px #98be65, 0 0 28px 9px rgba(152, 190, 101, 0.85);
+  }
+}
+.today-started-flash {
+  animation: today-started-flash 1.5s ease-in-out infinite;
+  border-color: #98be65 !important;
+}
+
+@keyframes overdue-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px #ff5f56, 0 0 14px 3px rgba(255, 95, 86, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 2.5px #ff5f56, 0 0 32px 10px rgba(255, 95, 86, 0.9);
+  }
+}
+.overdue-flash {
+  animation: overdue-flash 0.5s ease-in-out infinite;
+  border-color: #ff5f56 !important;
+}
+
 /* Theme-match React Flow's zoom/fit-view controls so they don't pop out as
    light-mode buttons against the dark canvas. Sized so they line up with the
    compact minimap (~28px tall buttons in a vertical stack). */
