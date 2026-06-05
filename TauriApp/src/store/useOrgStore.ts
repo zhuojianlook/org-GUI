@@ -676,10 +676,16 @@ function migrateExpanded(stored: Set<string> | null, doc: OrgDoc): Set<string> |
   const byId = new Map(doc.nodes.map((n) => [n.id, n] as const));
   const out = new Set<string>();
   for (const k of arr) {
-    // Legacy `n<begin>` id → stable key; then strip any statistics cookie that a
-    // saved `t:` key may still embed (both steps idempotent for current keys).
-    const node = /^n\d+$/.test(k) ? byId.get(k) : undefined;
-    out.add(node ? nodeStableKey(node) : normalizeStableKey(k));
+    if (/^n\d+$/.test(k)) {
+      // Legacy / stray begin-based id. Convert it to a stable key if it still
+      // resolves to a node in this parse; otherwise DROP it — a stale
+      // "n<begin>" can never match a stable key again and would just pile up.
+      const node = byId.get(k);
+      if (node) out.add(nodeStableKey(node));
+    } else {
+      // Already a stable key — strip any statistics cookie it may embed.
+      out.add(normalizeStableKey(k));
+    }
   }
   return out;
 }
@@ -980,7 +986,10 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       if (get().loadingFile !== file) return;
       const saved = migrateExpanded(loadExpanded(file), doc);
       const expanded = saved ?? autoExpandForDeps(doc);
-      if (!saved) saveExpanded(file, expanded);
+      // Always re-persist: this writes back the normalised set (legacy n<begin>
+      // ids converted/dropped, cookies stripped) so the on-disk format heals
+      // itself and the expansion reliably restores on the next launch.
+      saveExpanded(file, expanded);
       // Tag + colour imported Google-Calendar events by their calendar.
       const mergedTagColors = applyGcalCalendarTags(doc, loadTagColors(file));
       // Atomic swap: every piece of per-file state lands in a single
@@ -1208,7 +1217,10 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       let cur: OrgNode | undefined = byId.get(id);
       cur = cur?.parent ? byId.get(cur.parent) : undefined;
       while (cur) {
-        exp.add(cur.id);
+        // STABLE key — never the n<begin> id. A begin-based key would (a) not
+        // match the layout's visibility check and (b) poison the persisted
+        // expansion set so it can't survive a re-parse / restart.
+        exp.add(nodeStableKey(cur));
         cur = cur.parent ? byId.get(cur.parent) : undefined;
       }
     };
@@ -1931,7 +1943,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       let expanded = get().expanded;
       if (parentNode) {
         expanded = new Set(expanded);
-        expanded.add(parentNode.id);
+        expanded.add(nodeStableKey(parentNode)); // STABLE key, not n<begin>
         saveExpanded(file, expanded);
       }
       set({ doc: reapplyGcalTags(newDoc), expanded, saving: false });
@@ -1991,9 +2003,14 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const matches = newDoc.nodes.filter((n) => n.title === placeholder);
       const child = matches.length ? matches[matches.length - 1] : null;
       const sel = child ? child.id : null;
-      // Expand the parent so the new child node is visible.
+      // Expand the parent so the new child node is visible — by STABLE key, and
+      // persist it so the parent stays open across a restart.
       const expanded = new Set(get().expanded);
-      if (child?.parent) expanded.add(child.parent);
+      if (child?.parent) {
+        const parent = newDoc.nodes.find((n) => n.id === child.parent);
+        if (parent) expanded.add(nodeStableKey(parent));
+      }
+      saveExpanded(file, expanded);
       set({ doc: reapplyGcalTags(newDoc), selectedId: sel, expanded, saving: false });
       // Pan the React Flow viewport to the new node and flash it. Top-level
       // headings get appended after the last root and would otherwise drop
