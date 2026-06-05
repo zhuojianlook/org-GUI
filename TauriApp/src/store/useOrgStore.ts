@@ -27,6 +27,7 @@ import {
   gcalMove as apiGcalMove,
   gcalPush as apiGcalPush,
   gcalCreate as apiGcalCreate,
+  gcalPeek as apiGcalPeek,
   gcalUnsync as apiGcalUnsync,
   gcalDelete as apiGcalDelete,
   gcalSwitch as apiGcalSwitch,
@@ -750,6 +751,11 @@ interface OrgState {
   // True while a canvas node is being dragged over the Today panel's drop zone,
   // so the zone can highlight itself as a live drop target.
   todayDropActive: boolean;
+  // Background "new events on Google" check: how many events exist in the sync
+  // window on Google that aren't yet imported into the current file, plus a few
+  // of their titles for the badge tooltip. Drives the "N new — Sync" badge.
+  gcalNewCount: number;
+  gcalNewTitles: string[];
   depMode: boolean; // dependency-drawing mode in the graph
   // Open files in the top tab strip. The active tab is whichever path
   // equals `file`. Order matches user insertion (most recent open last).
@@ -846,6 +852,10 @@ interface OrgState {
   clearGcalGhosts: () => void;
   /** Push all pending local moves to Google (two-way sync), then clear ghosts. */
   syncGcalNow: () => Promise<void>;
+  /** Background read-only check: how many Google events in the sync window are
+   *  not yet in the current file. Sets gcalNewCount/gcalNewTitles. Silent on
+   *  any error (not signed in / offline) so it never nags. */
+  checkGcalNew: () => Promise<void>;
   /** Add a (timed/scheduled) task to Google Calendar CALENDARID as a new event. */
   addNodeToGcal: (node: OrgNode, calendarId: string) => Promise<void>;
   /** Remove a calendar event from Google + detach the org entry (keeps task). */
@@ -911,6 +921,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   gcalGhosts: {},
   gcalSyncing: false,
   gcalSyncError: null,
+  gcalNewCount: 0,
+  gcalNewTitles: [],
   multiSelected: new Set<string>(),
   updateChannel: loadUpdateChannel(),
   confirmRequest: null,
@@ -1584,6 +1596,41 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       await get().loadFile(syncFile);
     } catch (e) {
       set({ gcalSyncing: false, gcalSyncError: String(e) });
+    }
+  },
+
+  checkGcalNew: async () => {
+    const { doc } = get();
+    if (!doc) return;
+    const { clientId, clientSecret, account } = readGcalCreds();
+    let selected: string[] = [];
+    try {
+      const raw = localStorage.getItem("org-gui:gcal:config");
+      if (raw) selected = JSON.parse(raw).selectedCalendars ?? [];
+    } catch {
+      /* ignore */
+    }
+    const cals = selected.length ? selected : account ? [account] : [];
+    // Not configured / not signed in → no badge, no nag.
+    if (!clientId || !clientSecret || !account || cals.length === 0) {
+      if (get().gcalNewCount !== 0) set({ gcalNewCount: 0, gcalNewTitles: [] });
+      return;
+    }
+    try {
+      const { events } = await apiGcalPeek(clientId, clientSecret, account, cals);
+      // Compare on the EVENT-ID portion of "<eventId>/<calId>" so a difference
+      // in how the calendar id is spelled never causes a false "new".
+      const eid = (s: string) => s.split("/")[0];
+      const have = new Set(
+        doc.nodes
+          .map((n) => n.entryId)
+          .filter((id): id is string => !!id)
+          .map(eid),
+      );
+      const fresh = events.filter((e) => e.id && !have.has(eid(e.id)));
+      set({ gcalNewCount: fresh.length, gcalNewTitles: fresh.slice(0, 6).map((e) => e.summary) });
+    } catch {
+      // Background check — swallow (offline, token expired, etc.).
     }
   },
 

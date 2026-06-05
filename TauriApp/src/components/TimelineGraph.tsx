@@ -356,11 +356,92 @@ export default function TimelineGraph() {
     updateBoxMembers(assigns);
     try {
       localStorage.setItem(calFlag, "1");
+      // Remember which box is THE calendar region so later syncs can drop their
+      // brand-new web events straight into it (see the next effect).
+      localStorage.setItem(`org-gui:calRegionBoxId:${file}`, id);
     } catch {
       /* non-fatal */
     }
     calRegionFileRef.current = file;
   }, [file, nodes, byId, boxMembers, addBox, updateBoxMembers, setRootPositions, rootPositions]);
+
+  // Subsequent syncs: drop BRAND-NEW Google web events into the existing
+  // "📅 Calendar" region automatically, so the canvas stays tidy. "Brand-new"
+  // means a heading whose stable key we've never seen in this file before — so
+  // an event YOU added to Google from one of your own trees (a pre-existing
+  // node that merely gained a calendar-id) is NOT pulled in, matching the
+  // earlier preference. Only genuine web imports join the region.
+  useEffect(() => {
+    if (!file || nodes.length === 0) return;
+    const seenK = `org-gui:gcalSeen:${file}`;
+    let seen: Set<string>;
+    let firstTime = false;
+    try {
+      const raw = localStorage.getItem(seenK);
+      if (raw) seen = new Set<string>(JSON.parse(raw));
+      else {
+        seen = new Set<string>();
+        firstTime = true;
+      }
+    } catch {
+      seen = new Set<string>();
+      firstTime = true;
+    }
+
+    const currentKeys: string[] = [];
+    const fresh: { key: string }[] = [];
+    for (const nd of nodes) {
+      if (nd.type === "box") continue;
+      const org = byId.get(nd.id);
+      if (!org) continue;
+      const key = nodeStableKey(org);
+      currentKeys.push(key);
+      if (!firstTime && !seen.has(key) && !org.parent && !!org.calendarId && !boxMembers[key]) {
+        fresh.push({ key });
+      }
+    }
+
+    // Assign the new web events to the calendar region (found by stored id, or
+    // by its "📅 Calendar" label for users who made the region pre-upgrade).
+    if (fresh.length > 0) {
+      const storedId = localStorage.getItem(`org-gui:calRegionBoxId:${file}`);
+      const box =
+        (storedId ? boxes.find((b) => b.id === storedId) : null) ??
+        boxes.find((b) => b.label === "📅 Calendar") ??
+        null;
+      if (box) {
+        try {
+          localStorage.setItem(`org-gui:calRegionBoxId:${file}`, box.id);
+        } catch {
+          /* non-fatal */
+        }
+        let existing = 0;
+        for (const k of Object.keys(boxMembers)) if (boxMembers[k] === box.id) existing++;
+        const assigns: Record<string, string | null> = {};
+        const pins: Record<string, { x: number; y: number }> = {};
+        fresh.forEach(({ key }, i) => {
+          assigns[key] = box.id;
+          // Stack the newcomers inside the box, below current members.
+          pins[key] = { x: box.x + 16, y: box.y + 36 + (existing + i) * 34 };
+        });
+        setRootPositions(pins);
+        updateBoxMembers(assigns);
+        const neededH = 36 + (existing + fresh.length) * 34 + 24;
+        if (neededH > box.h) updateBox(box.id, { h: neededH });
+      }
+    }
+
+    // Record everything we've seen now (monotonic), so future syncs can tell
+    // what's genuinely new.
+    if (firstTime || fresh.length > 0 || currentKeys.some((k) => !seen.has(k))) {
+      for (const k of currentKeys) seen.add(k);
+      try {
+        localStorage.setItem(seenK, JSON.stringify([...seen]));
+      } catch {
+        /* non-fatal */
+      }
+    }
+  }, [file, nodes, byId, boxMembers, boxes, setRootPositions, updateBoxMembers, updateBox]);
 
   useEffect(() => {
     if (!layout) return;

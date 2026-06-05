@@ -53,6 +53,8 @@ export default function Toolbar() {
   const setShowTimeline = useOrgStore((s) => s.setShowTimeline);
   const autoScheduleOnStart = useOrgStore((s) => s.autoScheduleOnStart);
   const setAutoScheduleOnStart = useOrgStore((s) => s.setAutoScheduleOnStart);
+  const gcalNewCount = useOrgStore((s) => s.gcalNewCount);
+  const gcalNewTitles = useOrgStore((s) => s.gcalNewTitles);
 
   const [updateState, setUpdateState] = useState<UpdateState>("idle");
   const [updatePct, setUpdatePct] = useState(0);
@@ -335,6 +337,32 @@ export default function Toolbar() {
       >
         {emacsOk === null ? "Emacs ?" : emacsOk ? "Emacs ●" : "Emacs ✕"}
       </span>
+
+      {/* ── "New on Google" badge — appears when a background check finds events
+            on Google not yet in this file. Click to open the 🗓 panel & sync. ── */}
+      {gcalNewCount > 0 && (
+        <button
+          onClick={() => window.dispatchEvent(new CustomEvent("orggui:openGcal"))}
+          title={
+            `${gcalNewCount} calendar event${gcalNewCount === 1 ? "" : "s"} on Google not yet in this file` +
+            (gcalNewTitles.length ? `:\n• ${gcalNewTitles.join("\n• ")}` : "") +
+            `\n\nClick to open Google Calendar and sync.`
+          }
+          style={{
+            ...btn,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            background: "#e0a458",
+            color: "#1c1c1e",
+            border: "1px solid #e0a458",
+            fontWeight: 700,
+            animation: "orggui-newpulse 1.6s ease-in-out infinite",
+          }}
+        >
+          🗓 {gcalNewCount} new — Sync
+        </button>
+      )}
 
       {/* ── System menu (⚙) ── */}
       <button

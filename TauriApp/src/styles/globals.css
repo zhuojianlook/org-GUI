@@ -160,6 +160,18 @@ body {
   border-color: #ff5f56 !important;
 }
 
+/* Soft pulse for the "N new on Google — Sync" toolbar badge so it draws the
+   eye without being obnoxious. */
+@keyframes orggui-newpulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(224, 164, 88, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(224, 164, 88, 0.45);
+  }
+}
+
 /* Theme-match React Flow's zoom/fit-view controls so they don't pop out as
    light-mode buttons against the dark canvas. Sized so they line up with the
    compact minimap (~28px tall buttons in a vertical stack). */

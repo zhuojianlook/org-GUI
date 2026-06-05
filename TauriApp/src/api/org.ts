@@ -831,6 +831,27 @@ export const gcalSync = (
       )
     : Promise.reject(new Error("Desktop only"));
 
+/** READ-ONLY peek at Google: list events in the sync window for the given
+ *  calendars WITHOUT writing the org file. Each event id is "<eventId>/<calId>"
+ *  to match org-gcal's entry-id, so the caller can diff against what's already
+ *  imported. Used by the background "new events" check. */
+export interface GcalPeekResult {
+  events: { id: string; summary: string }[];
+}
+export const gcalPeek = (
+  clientId: string,
+  clientSecret: string,
+  account: string,
+  calendarIds: string[],
+): Promise<GcalPeekResult> =>
+  IN_TAURI
+    ? orgCall<GcalPeekResult>(
+        "org-gui-gcal-peek",
+        [clientId, clientSecret, account, calendarIds.join(",")],
+        40,
+      )
+    : Promise.resolve({ events: [] });
+
 /** Create a NEW Google Calendar event from the task at BEGIN (assigns it to
  *  CALENDARID, moves its time into the org-gcal drawer, inserts on Google and
  *  stamps the entry). The task becomes a synced calendar event. */

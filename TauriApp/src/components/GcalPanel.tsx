@@ -230,6 +230,10 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
       await loadFile(target);
       // Anything left (e.g. a one-way fetch reconciled them) is resolved.
       useOrgStore.getState().clearGcalGhosts();
+      // Those events are now imported — clear the "new on Google" badge, then
+      // re-check so it reflects reality immediately.
+      useOrgStore.setState({ gcalNewCount: 0, gcalNewTitles: [] });
+      void useOrgStore.getState().checkGcalNew();
       await refreshStatus();
       // Refresh the picker (also captures any newly-created calendars).
       void fetchCalendars();

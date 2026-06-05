@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.102")
+(defconst org-gui-bridge-version "0.2.103")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1755,6 +1755,53 @@ populate the multi-calendar picker."
                           (cons 'color (org-gui--s (alist-get 'backgroundColor c)))
                           (cons 'accessRole (org-gui--s (alist-get 'accessRole c)))))
                   items)))))))
+
+(defun org-gui-gcal-peek (client-id client-secret account calendar-ids)
+  "READ-ONLY peek at Google Calendar — never writes any org file or token.
+For each calendar in CALENDAR-IDS (comma/space separated) list the events in
+the same window org-gcal would sync (down `org-gcal-down-days', up
+`org-gcal-up-days'). Returns JSON {events:[{id,summary}]} where each `id' is
+\"<eventId>/<calId>\" to match org-gcal's entry-id property, so the app can
+diff against what's already imported and badge only the genuinely-new ones.
+Uses the existing OAuth token (refresh only, no browser popup); errors if not
+signed in. Safe to call on a background timer."
+  (unless (org-gui--gcal-load)
+    (error "org-gcal is not installed yet"))
+  (setq org-gcal-client-id client-id org-gcal-client-secret client-secret)
+  (when (fboundp 'org-gcal-reload-client-id-secret)
+    (org-gcal-reload-client-id-secret))
+  (let* ((tok (org-gui--gcal-valid-token account))
+         (ids (split-string (or calendar-ids "") "[ ,]+" t))
+         (up (if (boundp 'org-gcal-up-days) org-gcal-up-days 365))
+         (down (if (boundp 'org-gcal-down-days) org-gcal-down-days 180))
+         (now (current-time))
+         (tmin (format-time-string "%Y-%m-%dT%H:%M:%SZ" (time-subtract now (* down 86400)) t))
+         (tmax (format-time-string "%Y-%m-%dT%H:%M:%SZ" (time-add now (* up 86400)) t))
+         (out '()))
+    (dolist (cid ids)
+      (with-temp-buffer
+        (ignore-errors
+          (call-process "curl" nil t nil "-sS" "--max-time" "25"
+                        "-H" (concat "Authorization: Bearer " tok)
+                        (concat "https://www.googleapis.com/calendar/v3/calendars/"
+                                (url-hexify-string cid) "/events"
+                                "?singleEvents=true&maxResults=2500"
+                                "&timeMin=" (url-hexify-string tmin)
+                                "&timeMax=" (url-hexify-string tmax)
+                                "&fields=items(id,summary,status)")))
+        (goto-char (point-min))
+        (let* ((j (ignore-errors
+                    (json-parse-buffer :object-type 'alist :array-type 'list
+                                       :null-object nil :false-object nil)))
+               (items (and j (alist-get 'items j))))
+          (dolist (it items)
+            (let ((eid (alist-get 'id it))
+                  (status (alist-get 'status it)))
+              (when (and (stringp eid) (not (equal status "cancelled")))
+                (push (list (cons 'id (org-gui--s (concat eid "/" cid)))
+                            (cons 'summary (org-gui--s (or (alist-get 'summary it) ""))))
+                      out)))))))
+    (json-serialize (list (cons 'events (vconcat (nreverse out)))))))
 
 ;;;; ---- Dispatch -----------------------------------------------------------
 ;; The app calls everything through `org-gui-call', which writes the result

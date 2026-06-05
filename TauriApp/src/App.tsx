@@ -146,6 +146,23 @@ export default function App() {
     return () => window.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
+  // Background "new events on Google" check → drives the toolbar badge. Runs
+  // shortly after a file loads, again whenever the window regains focus, and on
+  // a 10-minute timer. All read-only (no file writes); silent on any error.
+  useEffect(() => {
+    if (!file) return;
+    const check = () => void useOrgStore.getState().checkGcalNew();
+    const t = setTimeout(check, 2500);
+    const interval = setInterval(check, 10 * 60 * 1000);
+    const onFocus = () => check();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearTimeout(t);
+      clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [file]);
+
   const pickFile = async () => {
     if (!IN_TAURI) {
       await loadFile("demo.org");
