@@ -9,7 +9,6 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
-  type CoordinateExtent,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -25,12 +24,6 @@ import TagAura from "./TagAura";
 
 const nodeTypes = { org: OrgNode, box: BoxNode };
 const edgeTypes = { tree: TreeEdge, dependency: DependencyEdge };
-
-// How far (in flow units) the cursor must travel PAST a region's edge during a
-// drag before the node "breaks out" and leaves the box on drop. Below this the
-// node stays clamped inside — so a node can't accidentally escape, only via a
-// deliberate drag-and-drop well outside the boundary.
-const BREAKOUT = 64;
 
 type DragState =
   | {
@@ -77,6 +70,7 @@ export default function TimelineGraph() {
   const updateBox = useOrgStore((s) => s.updateBox);
   const boxMembers = useOrgStore((s) => s.boxMembers);
   const updateBoxMembers = useOrgStore((s) => s.updateBoxMembers);
+  const file = useOrgStore((s) => s.file);
   const setDropTarget = useOrgStore((s) => s.setDropTarget);
   const reorder = useOrgStore((s) => s.reorder);
   const refile = useOrgStore((s) => s.refile);
@@ -184,28 +178,12 @@ export default function TimelineGraph() {
   );
 
   // The full node set fed to React Flow: the region boxes (rendered beneath the
-  // org nodes) plus the org nodes, where each root node that belongs to a box
-  // gets a rectangular `extent` hard-clamping it to that box so it cannot be
-  // dragged out (except via the deliberate breakout handled on drop).
+  // org nodes) plus the org nodes. Region membership is metadata only — nodes
+  // are NOT hard-clamped to their box, so you can freely drag a node from one
+  // region into another, or out onto empty canvas; the region it lands on is
+  // (re)assigned on drop. (Dragging a box still carries its members along.)
   const displayNodes = useMemo<Node[]>(() => {
     if (!layout) return [];
-    const orgNodes: Node[] = layout.nodes.map((n) => {
-      const org = byId.get(n.id);
-      // Only top-level (root) nodes are freely positioned, so only they can be
-      // "contained". Children are laid out relative to their parent and snap
-      // back, so an extent would just fight the reorder/refile gesture.
-      if (!org || org.parent) return n.extent ? { ...n, extent: undefined } : n;
-      const b = memberBoxOf(org);
-      if (!b) return n.extent ? { ...n, extent: undefined } : n;
-      // Raw box rectangle — React Flow's clampPosition subtracts the node's
-      // own width/height when clamping, so the node's FULL rect is what stays
-      // inside the box. (Pre-subtracting here would clamp twice.)
-      const ext: CoordinateExtent = [
-        [b.x, b.y],
-        [b.x + b.w, b.y + b.h],
-      ];
-      return { ...n, extent: ext };
-    });
     const boxNodes: Node[] = boxes.map((b) => ({
       id: b.id,
       type: "box",
@@ -221,8 +199,11 @@ export default function TimelineGraph() {
       // events only on its border strips / header / buttons.
       style: { width: b.w, height: b.h, pointerEvents: "none" },
     }));
+    // Clear any `extent` left over from the old hard-clamp build so existing
+    // members become freely draggable again.
+    const orgNodes = layout.nodes.map((n) => (n.extent ? { ...n, extent: undefined } : n));
     return [...boxNodes, ...orgNodes];
-  }, [layout, boxes, byId, memberBoxOf, depMode, scheduleMode, boxDrawMode]);
+  }, [layout, boxes, depMode, scheduleMode, boxDrawMode]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -233,6 +214,41 @@ export default function TimelineGraph() {
   useEffect(() => {
     setNodes(displayNodes);
   }, [displayNodes, setNodes]);
+
+  // Legacy patch: regions created before explicit membership existed have no
+  // recorded members (membership used to be inferred from geometry). Once per
+  // file, backfill membership for every root node whose centre currently sits
+  // inside a box (smallest box wins) so existing regions actually own their
+  // nodes — box-drag carries them, and drag-out/between behaves consistently.
+  // Guarded by a per-file flag so it runs only the first time after upgrading.
+  const migratedFileRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!file || boxes.length === 0 || nodes.length === 0) return;
+    const flag = `org-gui:boxMembersMigrated:${file}`;
+    if (migratedFileRef.current === file || localStorage.getItem(flag)) {
+      migratedFileRef.current = file;
+      return;
+    }
+    const assigns: Record<string, string> = {};
+    for (const nd of nodes) {
+      if (nd.type === "box") continue;
+      const org = byId.get(nd.id);
+      if (!org || org.parent) continue;
+      const key = nodeStableKey(org);
+      if (boxMembers[key]) continue; // already explicitly assigned
+      const w = nd.width ?? nd.measured?.width ?? 240;
+      const h = nd.height ?? nd.measured?.height ?? 64;
+      const b = boxContaining(nd.position.x + w / 2, nd.position.y + h / 2);
+      if (b) assigns[key] = b.id;
+    }
+    if (Object.keys(assigns).length) updateBoxMembers(assigns);
+    try {
+      localStorage.setItem(flag, "1");
+    } catch {
+      /* non-fatal */
+    }
+    migratedFileRef.current = file;
+  }, [file, boxes, nodes, byId, boxMembers, boxContaining, updateBoxMembers]);
 
   useEffect(() => {
     if (layout) setEdges([...layout.edges, ...depEdges]);
@@ -651,39 +667,12 @@ export default function TimelineGraph() {
           const org = byId.get(node.id);
           if (!org) return;
           const key = nodeStableKey(org);
-          // Where the cursor "wants" the node (unclamped follow position) and
-          // which region that lands in.
-          const cur = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-          const want = { x: cur.x - ds.grabDx, y: cur.y - ds.grabDy };
-          const wantBox = boxContaining(want.x + ds.w / 2, want.y + ds.h / 2);
-          if (ds.box) {
-            // The node belonged to ds.box and was hard-clamped to it. Leaving
-            // requires a deliberate pull: either well PAST the box edge, OR
-            // onto a DIFFERENT region (drag-between-regions).
-            const b = ds.box;
-            const cx = want.x + ds.w / 2;
-            const cy = want.y + ds.h / 2;
-            const beyond =
-              cx < b.x - BREAKOUT ||
-              cx > b.x + b.w + BREAKOUT ||
-              cy < b.y - BREAKOUT ||
-              cy > b.y + b.h + BREAKOUT;
-            const intoOther = !!wantBox && wantBox.id !== b.id;
-            if (beyond || intoOther) {
-              // Left ds.box → land where the cursor wants; join the region the
-              // cursor is over (or no region if it's empty canvas).
-              setRootPosition(key, want.x, want.y);
-              updateBoxMembers({ [key]: wantBox?.id ?? null });
-            } else {
-              // Stayed inside ds.box → keep the clamped position, membership as-is.
-              setRootPosition(key, node.position.x, node.position.y);
-            }
-          } else {
-            // The node was free. Dropping it inside a region joins that region.
-            setRootPosition(key, node.position.x, node.position.y);
-            const dropBox = boxContaining(node.position.x + ds.w / 2, node.position.y + ds.h / 2);
-            updateBoxMembers({ [key]: dropBox?.id ?? null });
-          }
+          // The node lands where it was dropped, and (re)joins whichever region
+          // its centre is over — drop it on another box to MOVE it there, or on
+          // empty canvas to take it OUT of all regions.
+          setRootPosition(key, node.position.x, node.position.y);
+          const dropBox = boxContaining(node.position.x + ds.w / 2, node.position.y + ds.h / 2);
+          updateBoxMembers({ [key]: dropBox?.id ?? null });
           return;
         }
         const org = byId.get(node.id);
