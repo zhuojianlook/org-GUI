@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useOrgStore } from "../store/useOrgStore";
 import { parseOrgDate, startOfDay } from "../utils/time";
 import type { OrgNode } from "../api/org";
@@ -81,6 +82,21 @@ export default function TodayPanel() {
     const sx = e.clientX;
     const sy = e.clientY;
     let moved = false;
+    // Suppress text selection + show a grab cursor for the whole gesture.
+    // `userSelect:none` on the row isn't enough — the pointer drags OVER other
+    // text, so selection has to be killed document-wide for the duration.
+    const body = document.body.style;
+    const prevSelect = body.userSelect;
+    const prevWebkit = (body as unknown as { webkitUserSelect: string }).webkitUserSelect;
+    const prevCursor = body.cursor;
+    body.userSelect = "none";
+    (body as unknown as { webkitUserSelect: string }).webkitUserSelect = "none";
+    body.cursor = "grabbing";
+    const restore = () => {
+      body.userSelect = prevSelect;
+      (body as unknown as { webkitUserSelect: string }).webkitUserSelect = prevWebkit;
+      body.cursor = prevCursor;
+    };
     const overSched = (x: number, y: number) => {
       const r = schedRef.current?.getBoundingClientRect();
       return !!r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
@@ -94,6 +110,7 @@ export default function TodayPanel() {
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      restore();
       if (moved) {
         justDraggedRef.current = true;
         if (overSched(ev.clientX, ev.clientY)) void scheduleNode(n, todayIso(), "scheduled");
@@ -362,32 +379,39 @@ export default function TodayPanel() {
         </>
       )}
 
-      {/* Floating chip that follows the cursor while dragging an overdue row. */}
-      {drag != null && (
-        <div
-          style={{
-            position: "fixed",
-            left: drag.x + 12,
-            top: drag.y + 8,
-            zIndex: 10060,
-            pointerEvents: "none",
-            maxWidth: 220,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            background: "var(--c-surface)",
-            border: `1px solid ${drag.over ? "#e0a458" : "var(--c-border)"}`,
-            borderRadius: 6,
-            padding: "4px 8px",
-            fontSize: 12,
-            color: "var(--c-text)",
-            boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
-          }}
-        >
-          {drag.over ? "⤵ " : "↦ "}
-          {drag.title}
-        </div>
-      )}
+      {/* Floating ghost that follows the cursor while dragging an overdue row.
+          Portalled to <body> so the panel's overflow:auto can't clip it and it
+          positions in true viewport coordinates. */}
+      {drag != null &&
+        createPortal(
+          <div
+            style={{
+              position: "fixed",
+              left: drag.x + 12,
+              top: drag.y + 8,
+              zIndex: 10060,
+              pointerEvents: "none",
+              maxWidth: 240,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              background: "var(--c-surface)",
+              border: `1px solid ${drag.over ? "#e0a458" : "var(--c-border)"}`,
+              borderRadius: 6,
+              padding: "4px 8px",
+              fontSize: 12,
+              fontWeight: 600,
+              color: "var(--c-text)",
+              boxShadow: drag.over
+                ? "0 0 0 2px color-mix(in srgb, #e0a458 70%, transparent), 0 6px 18px rgba(0,0,0,0.55)"
+                : "0 6px 18px rgba(0,0,0,0.55)",
+            }}
+          >
+            {drag.over ? "⤵ reschedule to today" : "↦ "}
+            {drag.over ? "" : drag.title}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
