@@ -1,12 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useOrgStore } from "../store/useOrgStore";
 import { parseOrgDate, startOfDay } from "../utils/time";
 import type { OrgNode } from "../api/org";
 
 const MS_DAY = 86_400_000;
-// Custom drag MIME so an overdue row dragged WITHIN the panel can be told apart
-// from anything else.
-const DND_MIME = "application/x-orggui-today-id";
 
 function todayIso(): string {
   const t = new Date();
@@ -23,6 +20,11 @@ function todayIso(): string {
  *  - Each row has an × to UNSCHEDULE it (clears SCHEDULED).
  *  - Overdue rows show how many days late they are, and can be DRAGGED onto the
  *    "Scheduled today" section to reschedule them to today.
+ *
+ * The in-panel drag uses POINTER events (not HTML5 drag-and-drop): the Tauri
+ * webview intercepts native drag-drop at the OS level, so ondragover/ondrop
+ * never fire — the rest of the app drags with pointer events for the same
+ * reason.
  */
 export default function TodayPanel() {
   const doc = useOrgStore((s) => s.doc);
@@ -31,10 +33,13 @@ export default function TodayPanel() {
   const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const dropActive = useOrgStore((s) => s.todayDropActive);
 
-  // True while an overdue row is being dragged inside the panel; used to reveal
-  // the "Scheduled today" drop area even when it's currently empty.
-  const [draggingOverdue, setDraggingOverdue] = useState(false);
-  const [schedDragOver, setSchedDragOver] = useState(false);
+  // Bounding box of the "Scheduled today" section, used as the drop target.
+  const schedRef = useRef<HTMLDivElement>(null);
+  // Set once a drag passes the movement threshold; drives the floating chip and
+  // reveals the drop area even when it's empty. `over` = cursor inside it.
+  const [drag, setDrag] = useState<{ id: string; x: number; y: number; title: string; over: boolean } | null>(null);
+  // True for the instant after a drag so the row's click (focus) is suppressed.
+  const justDraggedRef = useRef(false);
 
   const { overdue, scheduledToday, dueToday } = useMemo(() => {
     const todayMs = startOfDay(new Date()).getTime();
@@ -69,11 +74,35 @@ export default function TodayPanel() {
     window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id } }));
   };
 
-  const byId = useMemo(() => {
-    const m = new Map<string, OrgNode>();
-    for (const n of doc?.nodes ?? []) m.set(n.id, n);
-    return m;
-  }, [doc]);
+  // Pointer-drag an overdue row. On release over the "Scheduled today" box,
+  // reschedule the task to today.
+  const startOverdueDrag = (e: React.PointerEvent, n: OrgNode) => {
+    if (e.button !== 0) return;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    let moved = false;
+    const overSched = (x: number, y: number) => {
+      const r = schedRef.current?.getBoundingClientRect();
+      return !!r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 5) moved = true;
+      if (moved) {
+        setDrag({ id: n.id, x: ev.clientX, y: ev.clientY, title: n.title ?? "(untitled)", over: overSched(ev.clientX, ev.clientY) });
+      }
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (moved) {
+        justDraggedRef.current = true;
+        if (overSched(ev.clientX, ev.clientY)) void scheduleNode(n, todayIso(), "scheduled");
+      }
+      setDrag(null);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
 
   const total = overdue.length + scheduledToday.length + dueToday.length;
 
@@ -91,19 +120,19 @@ export default function TodayPanel() {
       <div
         role="button"
         tabIndex={0}
-        onClick={() => focus(n.id)}
-        draggable={draggable}
-        onDragStart={
+        onPointerDown={draggable ? (e) => startOverdueDrag(e, n) : undefined}
+        onClick={() => {
+          if (justDraggedRef.current) {
+            justDraggedRef.current = false;
+            return;
+          }
+          focus(n.id);
+        }}
+        title={
           draggable
-            ? (e) => {
-                e.dataTransfer.setData(DND_MIME, n.id);
-                e.dataTransfer.effectAllowed = "move";
-                setDraggingOverdue(true);
-              }
-            : undefined
+            ? "Drag onto 'Scheduled today' to reschedule · click to find on canvas"
+            : "Click to find this task on the canvas"
         }
-        onDragEnd={draggable ? () => { setDraggingOverdue(false); setSchedDragOver(false); } : undefined}
-        title={draggable ? "Drag onto 'Scheduled today' to reschedule · click to find on canvas" : "Click to find this task on the canvas"}
         style={{
           display: "flex",
           alignItems: "center",
@@ -118,6 +147,7 @@ export default function TodayPanel() {
           color: "var(--c-text)",
           fontSize: 12.5,
           boxSizing: "border-box",
+          userSelect: "none",
         }}
       >
         <span
@@ -159,7 +189,7 @@ export default function TodayPanel() {
         )}
         {/* × — unschedule (clear SCHEDULED) so it leaves the Today view. */}
         <button
-          draggable={false}
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             void scheduleNode(n, "", "scheduled");
@@ -207,16 +237,6 @@ export default function TodayPanel() {
       {title} ({count})
     </div>
   );
-
-  // Reschedule the dropped overdue task to today.
-  const onSchedDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setSchedDragOver(false);
-    setDraggingOverdue(false);
-    const id = e.dataTransfer.getData(DND_MIME);
-    const n = id ? byId.get(id) : undefined;
-    if (n) void scheduleNode(n, todayIso(), "scheduled");
-  };
 
   return (
     <div
@@ -290,30 +310,23 @@ export default function TodayPanel() {
             </div>
           )}
 
-          {/* "Scheduled today" — also a DROP TARGET for overdue rows. Shown even
-              when empty while an overdue task is being dragged, so there's
-              always somewhere to drop. */}
-          {(scheduledToday.length > 0 || draggingOverdue) && (
+          {/* "Scheduled today" — also the DROP TARGET for overdue rows. Rendered
+              even when empty while a drag is in progress so there's always
+              somewhere to drop. */}
+          {(scheduledToday.length > 0 || drag != null) && (
             <div
-              onDragOver={(e) => {
-                if (e.dataTransfer.types.includes(DND_MIME)) {
-                  e.preventDefault();
-                  setSchedDragOver(true);
-                }
-              }}
-              onDragLeave={() => setSchedDragOver(false)}
-              onDrop={onSchedDrop}
+              ref={schedRef}
               style={{
                 display: "flex",
                 flexDirection: "column",
                 gap: 6,
                 borderRadius: 8,
-                padding: schedDragOver ? 6 : 0,
-                margin: schedDragOver ? -6 : 0,
-                background: schedDragOver
+                padding: drag?.over ? 6 : 0,
+                margin: drag?.over ? -6 : 0,
+                background: drag?.over
                   ? "color-mix(in srgb, #e0a458 18%, transparent)"
                   : "transparent",
-                boxShadow: schedDragOver ? "0 0 0 2px color-mix(in srgb, #e0a458 60%, transparent)" : "none",
+                boxShadow: drag?.over ? "0 0 0 2px color-mix(in srgb, #e0a458 60%, transparent)" : "none",
                 transition: "background 0.1s, box-shadow 0.1s",
               }}
             >
@@ -321,7 +334,7 @@ export default function TodayPanel() {
               {scheduledToday.map((n) => (
                 <Row key={n.id} n={n} />
               ))}
-              {draggingOverdue && (
+              {drag != null && (
                 <div
                   style={{
                     border: "1.5px dashed color-mix(in srgb, #e0a458 70%, transparent)",
@@ -329,7 +342,7 @@ export default function TodayPanel() {
                     padding: "8px",
                     textAlign: "center",
                     fontSize: 11,
-                    color: "var(--c-text-dim)",
+                    color: drag.over ? "var(--c-text)" : "var(--c-text-dim)",
                   }}
                 >
                   ⤵ Drop here to reschedule to today
@@ -347,6 +360,33 @@ export default function TodayPanel() {
             </div>
           )}
         </>
+      )}
+
+      {/* Floating chip that follows the cursor while dragging an overdue row. */}
+      {drag != null && (
+        <div
+          style={{
+            position: "fixed",
+            left: drag.x + 12,
+            top: drag.y + 8,
+            zIndex: 10060,
+            pointerEvents: "none",
+            maxWidth: 220,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            background: "var(--c-surface)",
+            border: `1px solid ${drag.over ? "#e0a458" : "var(--c-border)"}`,
+            borderRadius: 6,
+            padding: "4px 8px",
+            fontSize: 12,
+            color: "var(--c-text)",
+            boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
+          }}
+        >
+          {drag.over ? "⤵ " : "↦ "}
+          {drag.title}
+        </div>
       )}
     </div>
   );
