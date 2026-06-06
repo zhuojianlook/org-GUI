@@ -135,6 +135,7 @@ export default function TodayPanel() {
 
   return (
     <div
+      data-today-panel
       style={{
         width: 340,
         flexShrink: 0,

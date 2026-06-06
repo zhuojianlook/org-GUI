@@ -1518,16 +1518,16 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   unsyncGcalNode: async (node) => {
     const { file } = get();
     if (!file) return;
+    // Don't hard-require sign-in: a node that's merely TAGGED with a calendar
+    // (e.g. a stray :calendar-id: left by the earlier drag glitch, with no real
+    // Google event) just needs its local properties stripped — no Google call.
+    // The bridge only demands a token when the entry is a genuine event.
     const { clientId, clientSecret, account } = readGcalCreds();
-    if (!clientId || !clientSecret || !account) {
-      set({ error: "Sign in to Google Calendar first (open the 🗓 panel)." });
-      return;
-    }
     // A move-ghost keyed on this event no longer applies once it's detached.
     if (node.orgId) get().clearGcalGhost(node.orgId);
     set({ saving: true, error: null });
     try {
-      await apiGcalUnsync(clientId, clientSecret, account, file, node.begin);
+      await apiGcalUnsync(clientId, clientSecret, account, file, node.begin, node.title ?? "");
       set({ saving: false });
       await get().loadFile(file);
     } catch (e) {

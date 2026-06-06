@@ -738,6 +738,17 @@ export default function TimelineGraph() {
 
   if (!doc) return null;
 
+  // Is the cursor over the "Today" side panel? GEOMETRIC test against the
+  // panel's bounding rect — NOT elementFromPoint, because during a node drag the
+  // dragged node sits on top at the cursor, so a hit-test there returns the node
+  // (never the panel) and the drop-zone / auto-pan-stop would never trigger.
+  const overTodayPanel = (clientX: number, clientY: number): boolean => {
+    const el = document.querySelector("[data-today-panel]");
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
+  };
+
   const descendantsOf = (id: string): string[] => {
     const out: string[] = [];
     const stack = [...(childMap.get(id) || [])];
@@ -858,9 +869,7 @@ export default function TimelineGraph() {
         // Live-track whether we're hovering the Today drop zone (non-box drags
         // only). Uses the move event's coordinates, which are always present.
         if (ds.kind !== "box") {
-          const over = !!document
-            .elementFromPoint(e.clientX, e.clientY)
-            ?.closest("[data-today-dropzone]");
+          const over = overTodayPanel(e.clientX, e.clientY);
           if (over !== overTodayRef.current) {
             overTodayRef.current = over;
             setTodayDropActive(over);
@@ -907,11 +916,7 @@ export default function TimelineGraph() {
         // Released over the "Today" panel's drop zone? → schedule for today and
         // snap the node back (don't move it on the canvas). Trust the hover
         // tracked during the drag, with a fresh hit-test as a fallback.
-        if (
-          ds.kind !== "box" &&
-          (wasOverToday ||
-            document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-today-dropzone]"))
-        ) {
+        if (ds.kind !== "box" && (wasOverToday || overTodayPanel(e.clientX, e.clientY))) {
           const org = byId.get(node.id);
           if (org) {
             const t = new Date();

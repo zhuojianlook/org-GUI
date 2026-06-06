@@ -880,9 +880,14 @@ export const gcalUnsync = (
   account: string,
   file: string,
   begin: number,
+  title = "",
 ): Promise<OrgDoc> =>
   IN_TAURI
-    ? orgCall<OrgDoc>("org-gui-gcal-unsync", [file, String(begin), clientId, clientSecret, account], 60)
+    ? orgCall<OrgDoc>(
+        "org-gui-gcal-unsync",
+        [file, String(begin), clientId, clientSecret, account, title],
+        60,
+      )
     : Promise.reject(new Error("Desktop only"));
 
 /** Delete a calendar-linked subtree located by its org-gcal ENTRYID (not buffer

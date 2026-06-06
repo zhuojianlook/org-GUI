@@ -58,6 +58,7 @@ export default function ContextMenu() {
   const editInEmacs = useOrgStore((s) => s.editInEmacs);
   const archive = useOrgStore((s) => s.archive);
   const removeNode = useOrgStore((s) => s.removeNode);
+  const unsyncGcalNode = useOrgStore((s) => s.unsyncGcalNode);
   const toggleExpand = useOrgStore((s) => s.toggleExpand);
   const expanded = useOrgStore((s) => s.expanded);
   const select = useOrgStore((s) => s.select);
@@ -182,6 +183,18 @@ export default function ContextMenu() {
             label: "Clear (use default)",
             onClick: () => edit(setDeadlineColor, node, ""),
             disabled: !node.deadlineColor,
+          },
+        ] as MenuItem[])
+      : []),
+    // Detach from Google Calendar — strips the 📅 calendar-id/entry-id (and
+    // deletes the Google event if it's a real one). Also the way to clear a
+    // calendar tag a node picked up by mistake. Only shown when linked.
+    ...(node.calendarId
+      ? ([
+          {
+            label: "📅✕ Remove calendar tag",
+            onClick: () => unsyncGcalNode(node),
+            divider: true,
           },
         ] as MenuItem[])
       : []),
