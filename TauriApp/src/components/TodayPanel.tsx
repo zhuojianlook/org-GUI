@@ -1,24 +1,40 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useOrgStore } from "../store/useOrgStore";
 import { parseOrgDate, startOfDay } from "../utils/time";
 import type { OrgNode } from "../api/org";
 
 const MS_DAY = 86_400_000;
+// Custom drag MIME so an overdue row dragged WITHIN the panel can be told apart
+// from anything else.
+const DND_MIME = "application/x-orggui-today-id";
+
+function todayIso(): string {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(
+    t.getDate(),
+  ).padStart(2, "0")}`;
+}
 
 /**
- * "Today" panel — a focused view of what needs attention now, plus a drop
- * target for scheduling. Drag any node from the canvas onto the drop zone and
- * release to set its SCHEDULED date to today (the drop is detected in
- * TimelineGraph's onNodeDragStop via the `data-today-dropzone` marker).
+ * "Today" panel — a focused view of what needs attention now.
  *
- * Lists overdue tasks (red), tasks scheduled for today (orange = not started,
- * green = started), and tasks due today — mirroring the canvas node flash.
+ *  - Drag a node from the canvas onto the drop zone to SCHEDULE it for today
+ *    (detected in TimelineGraph.onNodeDragStop via `data-today-dropzone`).
+ *  - Each row has an × to UNSCHEDULE it (clears SCHEDULED).
+ *  - Overdue rows show how many days late they are, and can be DRAGGED onto the
+ *    "Scheduled today" section to reschedule them to today.
  */
 export default function TodayPanel() {
   const doc = useOrgStore((s) => s.doc);
   const select = useOrgStore((s) => s.select);
   const flashNode = useOrgStore((s) => s.flashNode);
+  const scheduleNode = useOrgStore((s) => s.scheduleNode);
   const dropActive = useOrgStore((s) => s.todayDropActive);
+
+  // True while an overdue row is being dragged inside the panel; used to reveal
+  // the "Scheduled today" drop area even when it's currently empty.
+  const [draggingOverdue, setDraggingOverdue] = useState(false);
+  const [schedDragOver, setSchedDragOver] = useState(false);
 
   const { overdue, scheduledToday, dueToday } = useMemo(() => {
     const todayMs = startOfDay(new Date()).getTime();
@@ -53,14 +69,41 @@ export default function TodayPanel() {
     window.dispatchEvent(new CustomEvent("orggui:focusNode", { detail: { id } }));
   };
 
+  const byId = useMemo(() => {
+    const m = new Map<string, OrgNode>();
+    for (const n of doc?.nodes ?? []) m.set(n.id, n);
+    return m;
+  }, [doc]);
+
   const total = overdue.length + scheduledToday.length + dueToday.length;
 
-  const Row = ({ n, suffix }: { n: OrgNode; suffix?: string }) => {
+  const Row = ({
+    n,
+    overdueDays,
+    draggable,
+  }: {
+    n: OrgNode;
+    overdueDays?: number;
+    draggable?: boolean;
+  }) => {
     const started = n.todo === "STRT";
     return (
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => focus(n.id)}
-        title="Click to find this task on the canvas"
+        draggable={draggable}
+        onDragStart={
+          draggable
+            ? (e) => {
+                e.dataTransfer.setData(DND_MIME, n.id);
+                e.dataTransfer.effectAllowed = "move";
+                setDraggingOverdue(true);
+              }
+            : undefined
+        }
+        onDragEnd={draggable ? () => { setDraggingOverdue(false); setSchedDragOver(false); } : undefined}
+        title={draggable ? "Drag onto 'Scheduled today' to reschedule · click to find on canvas" : "Click to find this task on the canvas"}
         style={{
           display: "flex",
           alignItems: "center",
@@ -71,9 +114,10 @@ export default function TodayPanel() {
           border: "1px solid var(--c-border)",
           borderRadius: 6,
           padding: "6px 8px",
-          cursor: "pointer",
+          cursor: draggable ? "grab" : "pointer",
           color: "var(--c-text)",
           fontSize: 12.5,
+          boxSizing: "border-box",
         }}
       >
         <span
@@ -96,41 +140,82 @@ export default function TodayPanel() {
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {n.title ?? "(untitled)"}
         </span>
-        {suffix && (
-          <span style={{ fontSize: 10, color: "var(--c-text-dim)", flexShrink: 0 }}>{suffix}</span>
+        {overdueDays != null && (
+          <span
+            style={{
+              flexShrink: 0,
+              fontSize: 10,
+              fontWeight: 700,
+              color: "#ff5f56",
+              background: "color-mix(in srgb, #ff5f56 16%, transparent)",
+              border: "1px solid color-mix(in srgb, #ff5f56 45%, transparent)",
+              borderRadius: 8,
+              padding: "0 5px",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {overdueDays}d overdue
+          </span>
         )}
-      </button>
+        {/* × — unschedule (clear SCHEDULED) so it leaves the Today view. */}
+        <button
+          draggable={false}
+          onClick={(e) => {
+            e.stopPropagation();
+            void scheduleNode(n, "", "scheduled");
+          }}
+          title="Unschedule (remove its scheduled date)"
+          style={{
+            flexShrink: 0,
+            width: 18,
+            height: 18,
+            lineHeight: "16px",
+            textAlign: "center",
+            borderRadius: 4,
+            border: "1px solid var(--c-border)",
+            background: "transparent",
+            color: "var(--c-text-dim)",
+            cursor: "pointer",
+            fontSize: 13,
+            padding: 0,
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "color-mix(in srgb, #ff5f56 22%, transparent)";
+            e.currentTarget.style.color = "#ff5f56";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "var(--c-text-dim)";
+          }}
+        >
+          ×
+        </button>
+      </div>
     );
   };
 
-  const Section = ({
-    title,
-    color,
-    children,
-    count,
-  }: {
-    title: string;
-    color: string;
-    count: number;
-    children: React.ReactNode;
-  }) => {
-    if (count === 0) return null;
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <div
-          style={{
-            fontSize: 11,
-            fontWeight: 700,
-            letterSpacing: 0.4,
-            textTransform: "uppercase",
-            color,
-          }}
-        >
-          {title} ({count})
-        </div>
-        {children}
-      </div>
-    );
+  const SectionHeader = ({ title, color, count }: { title: string; color: string; count: number }) => (
+    <div
+      style={{
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: 0.4,
+        textTransform: "uppercase",
+        color,
+      }}
+    >
+      {title} ({count})
+    </div>
+  );
+
+  // Reschedule the dropped overdue task to today.
+  const onSchedDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setSchedDragOver(false);
+    setDraggingOverdue(false);
+    const id = e.dataTransfer.getData(DND_MIME);
+    const n = id ? byId.get(id) : undefined;
+    if (n) void scheduleNode(n, todayIso(), "scheduled");
   };
 
   return (
@@ -196,21 +281,71 @@ export default function TodayPanel() {
         </div>
       ) : (
         <>
-          <Section title="Overdue" color="#ff5f56" count={overdue.length}>
-            {overdue.map(({ n, days }) => (
-              <Row key={n.id} n={n} suffix={`${days}d`} />
-            ))}
-          </Section>
-          <Section title="Scheduled today" color="#e0a458" count={scheduledToday.length}>
-            {scheduledToday.map((n) => (
-              <Row key={n.id} n={n} />
-            ))}
-          </Section>
-          <Section title="Due today" color="#5fb3a1" count={dueToday.length}>
-            {dueToday.map((n) => (
-              <Row key={n.id} n={n} suffix="due" />
-            ))}
-          </Section>
+          {overdue.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <SectionHeader title="Overdue" color="#ff5f56" count={overdue.length} />
+              {overdue.map(({ n, days }) => (
+                <Row key={n.id} n={n} overdueDays={days} draggable />
+              ))}
+            </div>
+          )}
+
+          {/* "Scheduled today" — also a DROP TARGET for overdue rows. Shown even
+              when empty while an overdue task is being dragged, so there's
+              always somewhere to drop. */}
+          {(scheduledToday.length > 0 || draggingOverdue) && (
+            <div
+              onDragOver={(e) => {
+                if (e.dataTransfer.types.includes(DND_MIME)) {
+                  e.preventDefault();
+                  setSchedDragOver(true);
+                }
+              }}
+              onDragLeave={() => setSchedDragOver(false)}
+              onDrop={onSchedDrop}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                borderRadius: 8,
+                padding: schedDragOver ? 6 : 0,
+                margin: schedDragOver ? -6 : 0,
+                background: schedDragOver
+                  ? "color-mix(in srgb, #e0a458 18%, transparent)"
+                  : "transparent",
+                boxShadow: schedDragOver ? "0 0 0 2px color-mix(in srgb, #e0a458 60%, transparent)" : "none",
+                transition: "background 0.1s, box-shadow 0.1s",
+              }}
+            >
+              <SectionHeader title="Scheduled today" color="#e0a458" count={scheduledToday.length} />
+              {scheduledToday.map((n) => (
+                <Row key={n.id} n={n} />
+              ))}
+              {draggingOverdue && (
+                <div
+                  style={{
+                    border: "1.5px dashed color-mix(in srgb, #e0a458 70%, transparent)",
+                    borderRadius: 6,
+                    padding: "8px",
+                    textAlign: "center",
+                    fontSize: 11,
+                    color: "var(--c-text-dim)",
+                  }}
+                >
+                  ⤵ Drop here to reschedule to today
+                </div>
+              )}
+            </div>
+          )}
+
+          {dueToday.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <SectionHeader title="Due today" color="#5fb3a1" count={dueToday.length} />
+              {dueToday.map((n) => (
+                <Row key={n.id} n={n} />
+              ))}
+            </div>
+          )}
         </>
       )}
     </div>
