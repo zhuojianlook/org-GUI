@@ -61,6 +61,12 @@ body {
   display: none;
 }
 
+/* Keep the pan/zoom container on its own GPU compositor layer so panning and
+   zooming are composited on the GPU instead of repainted on the CPU. */
+.react-flow__viewport {
+  will-change: transform;
+}
+
 /* Overdue deadline badge flashes red */
 @keyframes deadline-flash {
   0%,
@@ -117,47 +123,60 @@ body {
 /* "Scheduled for today" / overdue node emphasis — the WHOLE node card glows
    and pulses so today's work and overdue tasks are unmissable on the canvas.
    Orange = scheduled today, not started; green = scheduled today, started;
-   red (rapid) = overdue. */
-@keyframes today-todo-flash {
+   red (rapid) = overdue.
+
+   GPU NOTE: these used to animate `box-shadow`, which the browser can NOT
+   composite on the GPU — every frame it repaints the node + its glow on the
+   CPU. With many overdue/today nodes that's continuous, expensive CPU work.
+   Instead we paint a STATIC glow once on an ::after overlay and pulse only its
+   `opacity`, which IS GPU-composited — the animation runs on the compositor
+   (GPU) thread with no per-frame CPU repaint. */
+@keyframes orggui-glow-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 2px #e0a458, 0 0 14px 3px rgba(224, 164, 88, 0.4);
+    opacity: 0.5;
   }
   50% {
-    box-shadow: 0 0 0 2px #e0a458, 0 0 28px 9px rgba(224, 164, 88, 0.85);
+    opacity: 1;
   }
+}
+.today-todo-flash,
+.today-started-flash,
+.overdue-flash {
+  position: relative;
+}
+.today-todo-flash::after,
+.today-started-flash::after,
+.overdue-flash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0.6;
+  /* Promote to its own GPU layer so the opacity pulse never touches the CPU. */
+  will-change: opacity;
+  animation: orggui-glow-pulse 1.3s ease-in-out infinite;
 }
 .today-todo-flash {
-  animation: today-todo-flash 1.3s ease-in-out infinite;
   border-color: #e0a458 !important;
 }
-
-@keyframes today-started-flash {
-  0%,
-  100% {
-    box-shadow: 0 0 0 2px #98be65, 0 0 14px 3px rgba(152, 190, 101, 0.4);
-  }
-  50% {
-    box-shadow: 0 0 0 2px #98be65, 0 0 28px 9px rgba(152, 190, 101, 0.85);
-  }
+.today-todo-flash::after {
+  box-shadow: 0 0 0 2px #e0a458, 0 0 28px 9px rgba(224, 164, 88, 0.85);
 }
 .today-started-flash {
-  animation: today-started-flash 1.5s ease-in-out infinite;
   border-color: #98be65 !important;
 }
-
-@keyframes overdue-flash {
-  0%,
-  100% {
-    box-shadow: 0 0 0 2px #ff5f56, 0 0 14px 3px rgba(255, 95, 86, 0.5);
-  }
-  50% {
-    box-shadow: 0 0 0 2.5px #ff5f56, 0 0 32px 10px rgba(255, 95, 86, 0.9);
-  }
+.today-started-flash::after {
+  box-shadow: 0 0 0 2px #98be65, 0 0 28px 9px rgba(152, 190, 101, 0.85);
+  animation-duration: 1.5s;
 }
 .overdue-flash {
-  animation: overdue-flash 0.5s ease-in-out infinite;
   border-color: #ff5f56 !important;
+}
+.overdue-flash::after {
+  box-shadow: 0 0 0 2.5px #ff5f56, 0 0 32px 10px rgba(255, 95, 86, 0.9);
+  animation-duration: 0.5s;
 }
 
 /* Soft pulse for the "N new on Google — Sync" toolbar badge so it draws the
