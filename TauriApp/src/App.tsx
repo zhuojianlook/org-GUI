@@ -11,6 +11,7 @@ import OnHoldPanel from "./components/OnHoldPanel";
 import TimelineBand from "./components/TimelineBand";
 import ContextMenu from "./components/ContextMenu";
 import ConfirmModal from "./components/ConfirmModal";
+import ErrorBoundary from "./components/ErrorBoundary";
 import ErrorToast from "./components/ErrorToast";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
 // Heavy, on-demand panels are code-split so their libraries (xterm, the
@@ -314,9 +315,11 @@ export default function App() {
               minHeight: 0,
             }}
           >
-            <Suspense fallback={<div style={{ padding: 16, color: "var(--c-text-dim)", fontSize: 12 }}>Loading editor…</div>}>
-              <EmacsTerminal />
-            </Suspense>
+            <ErrorBoundary label="The Emacs editor">
+              <Suspense fallback={<div style={{ padding: 16, color: "var(--c-text-dim)", fontSize: 12 }}>Loading editor…</div>}>
+                <EmacsTerminal />
+              </Suspense>
+            </ErrorBoundary>
           </div>
         )}
         {doc && panel === "agenda" && (
@@ -366,9 +369,11 @@ export default function App() {
       </div>
       {showSetup && <PrereqsModal onClose={() => setShowSetup(false)} />}
       {showGcal && (
-        <Suspense fallback={null}>
-          <GcalPanel onClose={() => setShowGcal(false)} />
-        </Suspense>
+        <ErrorBoundary label="The Google Calendar panel" onReset={() => setShowGcal(false)}>
+          <Suspense fallback={null}>
+            <GcalPanel onClose={() => setShowGcal(false)} />
+          </Suspense>
+        </ErrorBoundary>
       )}
       <ContextMenu />
       <ConfirmModal />
