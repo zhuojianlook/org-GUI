@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { ViewportPortal, useStore } from "@xyflow/react";
 import { useOrgStore } from "../store/useOrgStore";
 
@@ -33,9 +33,20 @@ export default function TagAura() {
   type Halo = { x: number; y: number; w: number; h: number };
   type Group = { tag: string; color: string; halos: Halo[]; edges: [Halo, Halo][] };
 
+  // Last computed groups, reused verbatim while a node is mid-drag so we don't
+  // rebuild every tagged node's MST on every animation frame.
+  const lastGroups = useRef<Group[]>([]);
+
   const groups = useMemo(() => {
     if (!doc) return [] as Group[];
     if (!tagAuraEnabled && tagFilter == null) return [];
+
+    // While the user is dragging a node, React Flow rewrites `s.nodes` every
+    // frame. Recomputing the aura (per-tag halos + Prim's MST) that often is
+    // wasteful and the decorative glow snapping to the new spot on release is
+    // imperceptible — so freeze it during the drag. Returning the SAME array
+    // reference also skips re-rendering the (blur-filtered) SVG entirely.
+    if (flowNodes.some((n) => n.dragging)) return lastGroups.current;
 
     const nodeById = new Map<string, typeof doc.nodes[number]>();
     for (const n of doc.nodes) nodeById.set(n.id, n);
@@ -70,6 +81,7 @@ export default function TagAura() {
         edges: mstEdges(halos),
       });
     }
+    lastGroups.current = out;
     return out;
   }, [doc, flowNodes, tagColors, tagFilter, tagAuraEnabled]);
 

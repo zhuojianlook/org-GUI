@@ -1,11 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, lazy, Suspense } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Toolbar from "./components/Toolbar";
 import TabBar from "./components/TabBar";
 import TimelineGraph from "./components/TimelineGraph";
 import DetailPanel from "./components/DetailPanel";
-import EmacsTerminal from "./components/EmacsTerminal";
 import AgendaPanel from "./components/AgendaPanel";
 import TodayPanel from "./components/TodayPanel";
 import OnHoldPanel from "./components/OnHoldPanel";
@@ -14,7 +13,10 @@ import ContextMenu from "./components/ContextMenu";
 import ConfirmModal from "./components/ConfirmModal";
 import ErrorToast from "./components/ErrorToast";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
-import GcalPanel from "./components/GcalPanel";
+// Heavy, on-demand panels are code-split so their libraries (xterm, the
+// Google-Calendar OAuth flow) aren't parsed at startup — only when first opened.
+const EmacsTerminal = lazy(() => import("./components/EmacsTerminal"));
+const GcalPanel = lazy(() => import("./components/GcalPanel"));
 import { useOrgStore } from "./store/useOrgStore";
 import { IN_TAURI, gcalStatus, gcalInstall } from "./api/org";
 
@@ -312,7 +314,9 @@ export default function App() {
               minHeight: 0,
             }}
           >
-            <EmacsTerminal />
+            <Suspense fallback={<div style={{ padding: 16, color: "var(--c-text-dim)", fontSize: 12 }}>Loading editor…</div>}>
+              <EmacsTerminal />
+            </Suspense>
           </div>
         )}
         {doc && panel === "agenda" && (
@@ -361,7 +365,11 @@ export default function App() {
         )}
       </div>
       {showSetup && <PrereqsModal onClose={() => setShowSetup(false)} />}
-      {showGcal && <GcalPanel onClose={() => setShowGcal(false)} />}
+      {showGcal && (
+        <Suspense fallback={null}>
+          <GcalPanel onClose={() => setShowGcal(false)} />
+        </Suspense>
+      )}
       <ContextMenu />
       <ConfirmModal />
       <ErrorToast />

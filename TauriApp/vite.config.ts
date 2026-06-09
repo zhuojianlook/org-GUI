@@ -13,6 +13,22 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
+  build: {
+    // The app only ever runs in a modern WKWebView / WebView2, so target a
+    // recent baseline — less transpilation, smaller + faster-to-parse output.
+    target: "es2022",
+    chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      output: {
+        // Split the rarely-changing framework code into its own chunks so the
+        // main app chunk stays smaller and these cache across app updates.
+        // xterm + the gcal panel are split separately via React.lazy.
+        manualChunks: {
+          "vendor-flow": ["@xyflow/react"],
+        },
+      },
+    },
+  },
   server: {
     port: parseInt(process.env.PORT || "1420", 10),
     strictPort: false,
