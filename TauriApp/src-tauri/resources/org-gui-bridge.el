@@ -11,7 +11,7 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.113")
+(defconst org-gui-bridge-version "0.2.114")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -845,13 +845,18 @@ frame fully interactive (evil etc.)."
       (org-gui--install-cursor-hooks)
       (run-at-time 0.1 nil #'org-gui--evil-cursor-update)
       (when file
-        (if (> begin 0)
-            (ignore-errors (org-gui-edit-node file begin))
-          (ignore-errors
-            (let ((buf (org-gui--visit file)))
-              (with-current-buffer buf (widen))
-              (org-gui--manage-buffer buf) ; live + on-save cookie refresh
-              (switch-to-buffer buf))))))))
+        ;; Try to narrow to the subtree; if BEGIN is 0 OR the narrowing fails
+        ;; for any reason (stale position, weird heading, …) FALL BACK to the
+        ;; whole file widened. The frame must NEVER be left on *scratch* or a
+        ;; broken buffer — it should always be something the user can edit.
+        (let ((shown (and (> begin 0)
+                          (ignore-errors (org-gui-edit-node file begin) t))))
+          (unless shown
+            (ignore-errors
+              (let ((buf (org-gui--visit file)))
+                (with-current-buffer buf (widen))
+                (org-gui--manage-buffer buf) ; live + on-save cookie refresh
+                (switch-to-buffer buf)))))))))
 
 (defun org-gui-arm-edit (file begin)
   "Arm narrowing for the next new frame (see `org-gui--frame-setup')."
@@ -867,7 +872,16 @@ underlying file (indirect buffers have no file of their own)."
          (base (org-gui--visit file))
          (name "*org-node*"))
     (with-current-buffer base (widen)) ; undo any prior narrowing of the base
-    (when (get-buffer name) (kill-buffer name))
+    ;; Drop any leftover indirect buffer from a prior edit WITHOUT prompting.
+    ;; A modified buffer, or one of the user's `kill-buffer-query-functions',
+    ;; would otherwise pop a yes/no in the NEW frame's minibuffer — the frame
+    ;; then looks frozen (keystrokes go to the prompt, not the node) and only a
+    ;; daemon restart clears it. Bind the query functions away and clear the
+    ;; modified flag so the kill is always silent.
+    (when (get-buffer name)
+      (let ((kill-buffer-query-functions nil))
+        (ignore-errors (with-current-buffer name (set-buffer-modified-p nil)))
+        (ignore-errors (kill-buffer name))))
     (let ((ind (make-indirect-buffer base name t))) ; t = clone (org-mode, etc.)
       (switch-to-buffer ind)
       (with-current-buffer ind

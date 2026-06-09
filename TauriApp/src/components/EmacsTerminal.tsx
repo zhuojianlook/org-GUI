@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -24,9 +24,16 @@ export default function EmacsTerminal() {
   const begin = useOrgStore((s) => s.editBegin); // subtree to narrow to (0 = whole file)
   const refreshDoc = useOrgStore((s) => s.refreshDoc);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Bumping this re-runs the effect: cleanly closes the current emacsclient -t
+  // frame and opens a fresh one. Recovers a wedged frame (e.g. stuck at a
+  // minibuffer prompt) WITHOUT restarting the whole daemon.
+  const [reopenNonce, setReopenNonce] = useState(0);
+  // True once the PTY's frame has exited (so we surface a prominent "Reopen").
+  const [closed, setClosed] = useState(false);
 
   useEffect(() => {
     if (!IN_TAURI || !containerRef.current || !file) return;
+    setClosed(false);
 
     const term = new Terminal({
       fontSize: 13,
@@ -116,7 +123,8 @@ export default function EmacsTerminal() {
         term.write(b64ToBytes(e.payload.data));
       });
       unlistenExit = await listen<number>("emacs-term-exit", () => {
-        term.writeln("\r\n\x1b[2m[emacs frame closed — toggle back to Graph]\x1b[0m");
+        term.writeln("\r\n\x1b[2m[emacs frame closed — click ↻ Reopen]\x1b[0m");
+        setClosed(true);
       });
       if (disposed) return;
       let newId: number;
@@ -171,7 +179,9 @@ export default function EmacsTerminal() {
       // because they were typing.
       refreshDoc();
     };
-  }, [file, begin, refreshDoc]);
+  }, [file, begin, refreshDoc, reopenNonce]);
+
+  const reopen = () => setReopenNonce((n) => n + 1);
 
   if (!IN_TAURI) {
     return (
@@ -196,5 +206,33 @@ export default function EmacsTerminal() {
     );
   }
 
-  return <div ref={containerRef} style={{ height: "100%", width: "100%", background: "#1c1c1e", padding: 4 }} />;
+  return (
+    <div style={{ position: "relative", height: "100%", width: "100%" }}>
+      <div ref={containerRef} style={{ height: "100%", width: "100%", background: "#1c1c1e", padding: 4 }} />
+      {/* Always-available recovery: if the frame ever wedges (e.g. stuck at a
+          minibuffer prompt) or its PTY exits, this re-opens a clean frame
+          without a full daemon restart. Highlighted once the frame has exited. */}
+      <button
+        onClick={reopen}
+        title="Reopen the Emacs editor frame — recovers a stuck/closed frame without restarting the daemon"
+        style={{
+          position: "absolute",
+          top: 8,
+          right: 12,
+          zIndex: 5,
+          font: "600 11px system-ui, sans-serif",
+          padding: "3px 9px",
+          borderRadius: 6,
+          cursor: "pointer",
+          color: closed ? "#1c1c1e" : "#e5e5ea",
+          background: closed ? "#e0a458" : "rgba(40,40,44,0.85)",
+          border: `1px solid ${closed ? "#e0a458" : "rgba(255,255,255,0.18)"}`,
+          boxShadow: "0 1px 4px rgba(0,0,0,0.5)",
+          ...(closed ? { animation: "orggui-newpulse 1.6s ease-in-out infinite" } : {}),
+        }}
+      >
+        ↻ Reopen
+      </button>
+    </div>
+  );
 }
