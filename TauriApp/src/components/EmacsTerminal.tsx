@@ -109,7 +109,18 @@ export default function EmacsTerminal() {
     const REFRESH_INTERVAL_MS = 1000;
     const KEYSTROKE_QUIET_MS = 600;
     let refreshInflight = false;
+    // True only while this app is the focused, visible application. When the
+    // user switches AWAY (⌘-Tab, window occluded/minimised) they're not typing,
+    // so `lastKeystrokeAt` goes stale and the idle timer would otherwise fire an
+    // `org-gui-parse` every second the whole time they're gone. Each parse locks
+    // the daemon's single-threaded elisp loop, so one left running across the
+    // app-switch boundary is exactly what makes the first keystrokes after
+    // returning hang for seconds. Gating on focus keeps the daemon idle while
+    // away; regaining focus counts as activity (below) so the quiet window then
+    // shields the user's first post-return keystrokes from a freshly-fired parse.
+    let appActive = document.hasFocus() && !document.hidden;
     const idleRefresh = window.setInterval(() => {
+      if (!appActive) return;
       if (refreshInflight) return;
       if (Date.now() - lastKeystrokeAt < KEYSTROKE_QUIET_MS) return;
       refreshInflight = true;
@@ -117,6 +128,26 @@ export default function EmacsTerminal() {
         refreshInflight = false;
       });
     }, REFRESH_INTERVAL_MS);
+
+    // Pause refreshes while away; on return, treat it as a keystroke so the next
+    // refresh holds off for KEYSTROKE_QUIET_MS — long enough for the user to
+    // resume typing, which keeps bumping the timer. ⌘-Tab leaves the document
+    // visible but blurs the window, so we watch window focus/blur AND
+    // visibilitychange (occlude/minimise) to cover both ways of leaving.
+    const onAppBlur = () => {
+      appActive = false;
+    };
+    const onAppFocus = () => {
+      appActive = true;
+      lastKeystrokeAt = Date.now();
+    };
+    const onVisibility = () => {
+      if (document.hidden) appActive = false;
+      else onAppFocus();
+    };
+    window.addEventListener("blur", onAppBlur);
+    window.addEventListener("focus", onAppFocus);
+    document.addEventListener("visibilitychange", onVisibility);
 
     (async () => {
       unlistenData = await listen<{ id: number; data: string }>("emacs-term-data", (e) => {
@@ -168,6 +199,9 @@ export default function EmacsTerminal() {
     return () => {
       disposed = true;
       window.clearInterval(idleRefresh);
+      window.removeEventListener("blur", onAppBlur);
+      window.removeEventListener("focus", onAppFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("resize", onResize);
       ro.disconnect();
       if (id != null) invoke("emacs_term_close", { id });
