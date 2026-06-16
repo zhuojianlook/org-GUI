@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { nodeStableKey, normalizeStableKey } from "../utils/layout";
+import { emacsTypingWithin, EDITOR_TYPING_QUIET_MS } from "../utils/editorActivity";
 import {
   Mutator,
   OrgDoc,
@@ -1612,8 +1613,16 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   },
 
   checkGcalNew: async () => {
-    const { doc } = get();
+    const { doc, panel } = get();
     if (!doc) return;
+    // Last-moment guard (the final JS frame before the daemon IPC): the peek
+    // runs curl per-calendar on the single-threaded Emacs daemon the embedded
+    // editor types through. If the user is actively typing in that editor, skip
+    // this round — a missed background badge update is harmless; a frozen
+    // keystroke is not. The App scheduler does an earlier check to retry while
+    // editing; this re-check also catches typing that resumed during the async
+    // gap between that decision and now.
+    if (panel === "emacs" && emacsTypingWithin(EDITOR_TYPING_QUIET_MS)) return;
     const { clientId, clientSecret, account } = readGcalCreds();
     let selected: string[] = [];
     try {

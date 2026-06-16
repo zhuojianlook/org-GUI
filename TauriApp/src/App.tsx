@@ -21,6 +21,7 @@ const EmacsTerminal = lazy(() => import("./components/EmacsTerminal"));
 const GcalPanel = lazy(() => import("./components/GcalPanel"));
 import { useOrgStore } from "./store/useOrgStore";
 import { IN_TAURI, gcalStatus, gcalInstall } from "./api/org";
+import { emacsTypingWithin, EDITOR_TYPING_QUIET_MS } from "./utils/editorActivity";
 
 export default function App() {
   const doc = useOrgStore((s) => s.doc);
@@ -161,19 +162,43 @@ export default function App() {
     return () => window.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
-  // Background "new events on Google" check → drives the toolbar badge. Runs
-  // shortly after a file loads, again whenever the window regains focus, and on
-  // a 10-minute timer. All read-only (no file writes); silent on any error.
+  // Background "new events on Google" check → drives the toolbar badge. It runs
+  // `org-gui-gcal-peek`, which does a synchronous `curl` PER calendar on the
+  // SAME single-threaded Emacs daemon the embedded editor types through — so if
+  // it fires mid-keystroke, typing freezes until curl returns. We therefore
+  // never peek while the user is actively typing in the editor: one clearable
+  // timer, and before each peek we skip + retry if the Emacs panel is open and a
+  // keystroke landed recently. Triggers: shortly after load, on a 10-min timer,
+  // and on window focus (with a grace delay so a return-and-type isn't blocked).
   useEffect(() => {
     if (!file) return;
-    const check = () => void useOrgStore.getState().checkGcalNew();
-    const t = setTimeout(check, 2500);
-    const interval = setInterval(check, 10 * 60 * 1000);
-    const onFocus = () => check();
+    const RETRY_MS = 4000; // re-attempt cadence while suppressed
+    let timer: number | undefined;
+    const run = () => {
+      timer = undefined;
+      // Early gate: if the editor is being typed in, don't even queue the peek —
+      // reschedule. (checkGcalNew re-checks this at the last moment before the
+      // daemon IPC, to also catch typing that resumes during the async gap.)
+      const busyEditing =
+        useOrgStore.getState().panel === "emacs" &&
+        emacsTypingWithin(EDITOR_TYPING_QUIET_MS);
+      if (busyEditing) {
+        schedule(RETRY_MS); // try again once the user pauses
+        return;
+      }
+      void useOrgStore.getState().checkGcalNew();
+    };
+    const schedule = (delay: number) => {
+      if (timer != null) window.clearTimeout(timer);
+      timer = window.setTimeout(run, delay);
+    };
+    schedule(2500); // initial after-load check
+    const interval = window.setInterval(() => schedule(0), 10 * 60 * 1000);
+    const onFocus = () => schedule(1500); // grace on app return before peeking
     window.addEventListener("focus", onFocus);
     return () => {
-      clearTimeout(t);
-      clearInterval(interval);
+      if (timer != null) window.clearTimeout(timer);
+      window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
     };
   }, [file]);

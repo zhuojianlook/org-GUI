@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { IN_TAURI } from "../api/org";
 import { useOrgStore } from "../store/useOrgStore";
+import { markEmacsKeystroke } from "../utils/editorActivity";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -62,6 +63,7 @@ export default function EmacsTerminal() {
     // (new heading), ⌘+Shift+Enter→M-S-RET (new TODO), ⌘+x→M-x, etc.
     const send = (data: string) => {
       lastKeystrokeAt = Date.now();
+      markEmacsKeystroke();
       if (id != null) invoke("emacs_term_write", { id, data });
     };
     term.attachCustomKeyEventHandler((e) => {
@@ -140,6 +142,10 @@ export default function EmacsTerminal() {
     const onAppFocus = () => {
       appActive = true;
       lastKeystrokeAt = Date.now();
+      // Count returning to the editor as activity for the SHARED signal too, so
+      // background daemon callers (the Gcal peek) hold off for the quiet window
+      // and don't freeze the user's first post-return keystroke.
+      markEmacsKeystroke();
     };
     const onVisibility = () => {
       if (document.hidden) appActive = false;
@@ -177,6 +183,7 @@ export default function EmacsTerminal() {
       id = newId;
       term.onData((d) => {
         lastKeystrokeAt = Date.now();
+        markEmacsKeystroke();
         if (id != null) invoke("emacs_term_write", { id, data: d });
       });
       term.onResize(({ cols, rows }) => {

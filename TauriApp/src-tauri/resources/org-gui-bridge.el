@@ -11,7 +11,19 @@
 (require 'org-id)
 (require 'subr-x)
 
-(defconst org-gui-bridge-version "0.2.117")
+;; Diagnostics only — surfaced in the parse payload so the UI can show which
+;; bridge the daemon has. NO LONGER the reload gate (see
+;; `org-gui-bridge--loaded-token'); editing this value does not affect reloads.
+(defconst org-gui-bridge-version "0.2.120")
+
+;; The app (Rust `org_call') writes this to a content-token of the bridge file
+;; right after `load-file', then gates reloads on it: it reloads only when the
+;; token differs. Keep this a plain `defvar' with value nil — `defvar' is a
+;; no-op on an already-bound symbol, so a reload never clobbers the live token,
+;; and a fresh daemon starts at nil so the first call always loads. Do NOT turn
+;; this into a `defconst'/`setq' to a constant, or the reload-storm returns.
+(defvar org-gui-bridge--loaded-token nil
+  "Content token of the bridge file the app last loaded into this daemon.")
 
 ;;;; ---- Safe file visiting --------------------------------------------------
 ;; All reading/editing goes through one entry point so we can (a) refuse to run
@@ -1854,7 +1866,11 @@ signed in. Safe to call on a background timer."
     (dolist (cid ids)
       (with-temp-buffer
         (ignore-errors
-          (call-process "curl" nil t nil "-sS" "--max-time" "25"
+          ;; Short ceiling: this runs on a background timer against the same
+          ;; single-threaded daemon the embedded editor types through, once PER
+          ;; calendar. A long hang here would freeze keystrokes, so cap each
+          ;; fetch low — a missed peek just defers the "new events" badge.
+          (call-process "curl" nil t nil "-sS" "--max-time" "10"
                         "-H" (concat "Authorization: Bearer " tok)
                         (concat "https://www.googleapis.com/calendar/v3/calendars/"
                                 (url-hexify-string cid) "/events"

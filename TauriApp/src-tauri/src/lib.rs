@@ -621,6 +621,34 @@ fn bridge_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not locate org-gui-bridge.el".to_string())
 }
 
+/// A token that identifies the exact bridge file we want the daemon to have
+/// loaded. It is a content hash of the file (app-version-prefixed for readable
+/// logs), so it changes iff the bridge's CONTENTS change — immune to
+/// mtime-preserving installers, and it forces a reload exactly when (and only
+/// when) the bridge actually differs.
+///
+/// The daemon remembers the last token it loaded in `org-gui-bridge--loaded-token`.
+/// Because Rust BOTH writes that variable (right after `load-file`) AND compares
+/// against it, a reload-on-every-call storm is structurally impossible — unlike
+/// the previous design, which compared a hand-maintained `org-gui-bridge-version`
+/// defconst (frozen at 0.2.117) against `CARGO_PKG_VERSION`, so any version bump
+/// made the equality permanently false and re-`load`ed the 1900-line bridge on
+/// every single call, freezing the single-threaded daemon (and the embedded
+/// editor's keystrokes) each time.
+fn bridge_load_token(bridge: &std::path::Path) -> String {
+    use std::hash::{Hash, Hasher};
+    match std::fs::read(bridge) {
+        Ok(bytes) => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            format!("{}-{:x}", env!("CARGO_PKG_VERSION"), h.finish())
+        }
+        // File unreadable (shouldn't happen — we just resolved it): fall back to
+        // the build version. Still Rust-set-and-compared, so still no storm.
+        Err(_) => env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 /// Call a bridge function in the user's running Emacs and return its JSON.
 ///
 /// `func` must name an `org-gui-*` function. The bridge writes its JSON
@@ -654,20 +682,23 @@ async fn org_call(
     let tmp = std::env::temp_dir().join(format!("orggui-{}-{}.json", std::process::id(), n));
 
     let arg_lits: Vec<String> = args.iter().map(|a| elisp_string(a)).collect();
-    // Load the bundled bridge ONLY when the running daemon doesn't already
-    // have the version we ship — checks `org-gui-bridge-version` so an app
-    // upgrade still forces a reload, but routine calls don't spam the
-    // message buffer with "Loading bridge.el…done" on every invocation.
+    // Load the bundled bridge ONLY when the running daemon doesn't already have
+    // THIS bridge (matched by content token). The `setq` runs after `load-file`
+    // inside the same `unless`, so once loaded, every later call's `equal` is
+    // true and we skip the reload — no more "Loading bridge.el…done" on every
+    // invocation freezing the daemon. See `bridge_load_token`.
+    let token = bridge_load_token(&bridge);
     let elisp = format!(
         "(progn (unless (and (featurep 'org-gui-bridge) \
-            (equal (bound-and-true-p org-gui-bridge-version) {})) \
-          (load-file {})) \
-        (org-gui-call {} #'{} {}))",
-        elisp_string(env!("CARGO_PKG_VERSION")),
-        elisp_string(&bridge.to_string_lossy()),
-        elisp_string(&tmp.to_string_lossy()),
-        func,
-        arg_lits.join(" "),
+            (equal (bound-and-true-p org-gui-bridge--loaded-token) {token})) \
+          (load-file {path}) \
+          (setq org-gui-bridge--loaded-token {token})) \
+        (org-gui-call {tmp} #'{func} {args}))",
+        token = elisp_string(&token),
+        path = elisp_string(&bridge.to_string_lossy()),
+        tmp = elisp_string(&tmp.to_string_lossy()),
+        func = func,
+        args = arg_lits.join(" "),
     );
 
     let bin = emacsclient_bin();
@@ -995,15 +1026,20 @@ async fn emacs_term_open(
     // user would then see the entire file instead of just the node. With no
     // file arg, our hook's buffer choice is the one that sticks.
     let bridge = bridge_path(&app)?;
+    // Same content-token reload guard as org_call (see `bridge_load_token`): load
+    // the bridge only if the daemon doesn't already have this exact file, and
+    // record the token so subsequent calls skip the reload.
+    let token = bridge_load_token(&bridge);
     let arm = format!(
         "(progn (unless (and (featurep 'org-gui-bridge) \
-            (equal (bound-and-true-p org-gui-bridge-version) {})) \
-          (load-file {})) \
-        (org-gui-arm-edit {} {}))",
-        elisp_string(env!("CARGO_PKG_VERSION")),
-        elisp_string(&bridge.to_string_lossy()),
-        elisp_string(&file),
-        begin,
+            (equal (bound-and-true-p org-gui-bridge--loaded-token) {token})) \
+          (load-file {path}) \
+          (setq org-gui-bridge--loaded-token {token})) \
+        (org-gui-arm-edit {file} {begin}))",
+        token = elisp_string(&token),
+        path = elisp_string(&bridge.to_string_lossy()),
+        file = elisp_string(&file),
+        begin = begin,
     );
     // Resolve the absolute socket path once for both the arm-edit eval and
     // the `-t` frame so a TMPDIR mismatch can't make the PTY attach to a
