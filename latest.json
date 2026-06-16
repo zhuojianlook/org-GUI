@@ -1,15 +1,15 @@
 {
-  "version": "0.2.112",
-  "notes": "Update to v0.2.112",
-  "pub_date": "2026-06-06T08:30:08Z",
+  "version": "0.2.120",
+  "notes": "Update to v0.2.120",
+  "pub_date": "2026-06-16T08:36:07Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrS3c2Y1Voak0zd1Z2TmFLeEVldGJqb3BiTEZMRVJpUlpWTFE5OU9tZlJ6Sk1Qd0l4b0w5aWVrT1lGVTZIU0RqdWFEOEV3K2kwdG1RaGI4ZFUwNndFSEEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNzM0NTkyCWZpbGU6b3JnLUdVSV8wLjIuMTEyX3g2NC1zZXR1cC5leGUKS3g3dHFyNnEwdUF0L2VCd1pSTVIrT1BLSndLZEwrQnhXbExFdkJKaERreG4zOEJGVDJ6VkJMOGVvN3pkRURsOW0rcFpwYVgxOFJFaGt6cFRQZWFVQWc9PQo=",
-      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/v0.2.112/org-GUI_0.2.112_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrSzhsTTkxQm9BdTVHUXIvbnZ0QjNTL0RtM2hwQitidE5TS0hsdTNiOHZzejV5TGNzZmJOQXZRYUFZQ001TTVxcGI1WXdqUVo3Sk1KM05zaGdYc3hzbmcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgxNTk4OTU2CWZpbGU6b3JnLUdVSV8wLjIuMTIwX3g2NC1zZXR1cC5leGUKZUtVVkY4NzlHdHhEZmZMdlViMVVob2twMHluc1hKSm82QkxPMFRKd2FJWWZUemlVc29ucXhyQk9qUVhHYVp0RzAxM0J4dDRUWEVJUHlDRDV5Uy9YQXc9PQo=",
+      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/v0.2.120/org-GUI_0.2.120_x64-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrS3hBNkQvNVRxMmNiUHpLNDFOZSswb2hwaVlJNUNBRURpS080dW9PM2pkWURuZng2R0Fubmxnc2JBUFBvamwyOHlQZjFrdS9BSlMyYktBNHFjVDRRL2dRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNzM0NDg3CWZpbGU6b3JnLUdVSS5hcHAudGFyLmd6CnBJYnlBY0xIbWo3N3pnbUJhWDdFSXZjVUppTVI4VVVoQVUyZUxxVy9iWHd4cG43T0dqN1VxRktoaDhSalFwTDdKK1JKSmQ0UjB0L1dzdGlNMzhKbkF3PT0K",
-      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/v0.2.112/org-GUI.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGxqeW53T3MrSzlpcHp5M1Z5dmltYkZNTGN5V0tKQUxDRHZRVWNJZlQrRU5Jc2lxbFMwbTVCc1ozblp2aEVNMVN2V2E2VmpoV1dYMi9lM3FvZi9tZEZIcGl6c0ovcHdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgxNTk4NzM1CWZpbGU6b3JnLUdVSS5hcHAudGFyLmd6Ci9OM3Z0SmIzeFJJRnlaSzRORk5GcGp2YTkyNE5sUTFFZ0YvZHp6K3NQcXVoc2ZJTzN4dGUyNHdpclRDYWNwTkRBM0hFNTd2dHY1ZjZ0V0lOOVZmNkJBPT0K",
+      "url": "https://github.com/zhuojianlook/org-GUI/releases/download/v0.2.120/org-GUI.app.tar.gz"
     }
   }
 }
