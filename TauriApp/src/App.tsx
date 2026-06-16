@@ -14,6 +14,7 @@ import ConfirmModal from "./components/ConfirmModal";
 import ErrorBoundary from "./components/ErrorBoundary";
 import ErrorToast from "./components/ErrorToast";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
+import AboutModal, { shouldAutoOpenAbout } from "./components/AboutModal";
 // Heavy, on-demand panels are code-split so their libraries (xterm, the
 // Google-Calendar OAuth flow) aren't parsed at startup — only when first opened.
 const EmacsTerminal = lazy(() => import("./components/EmacsTerminal"));
@@ -39,6 +40,9 @@ export default function App() {
 
   const [showSetup, setShowSetup] = useState(false);
   const [showGcal, setShowGcal] = useState(false);
+  // The About window auto-opens once per session (= on startup) and can be
+  // reopened from the brand chip / ⚙ menu via the orggui:openAbout event.
+  const [showAbout, setShowAbout] = useState(shouldAutoOpenAbout);
 
   // The timeline band's height is user-resizable: a divider between the band
   // and the canvas can be dragged up/down to give either region more room.
@@ -128,6 +132,14 @@ export default function App() {
       window.clearTimeout(gcalTimer);
     };
   }, [checkEmacs, restoreSession]);
+
+  // The brand chip / ⚙ menu open the About window on demand. Kept separate from
+  // the IN_TAURI-gated session effect so it also works in the browser preview.
+  useEffect(() => {
+    const onAbout = () => setShowAbout(true);
+    window.addEventListener("orggui:openAbout", onAbout);
+    return () => window.removeEventListener("orggui:openAbout", onAbout);
+  }, []);
 
   // Suppress the WebView's built-in right-click menu (Reload / Inspect
   // Element / Back…) — it's jarring in a desktop app and exposes dev tools.
@@ -367,6 +379,7 @@ export default function App() {
           </div>
         )}
       </div>
+      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
       {showSetup && <PrereqsModal onClose={() => setShowSetup(false)} />}
       {showGcal && (
         <ErrorBoundary label="The Google Calendar panel" onReset={() => setShowGcal(false)}>

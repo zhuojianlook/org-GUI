@@ -1,21 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { useOrgStore, type UpdateChannel } from "../store/useOrgStore";
+import { useOrgStore } from "../store/useOrgStore";
 import { IN_TAURI } from "../api/org";
 import TagsPopover from "./TagsPopover";
-
-// Updater manifests, served from the `updater` branch by the release workflow.
-// stable        → v* tags    → latest.json
-// experimental  → exp-* tags → latest-experimental.json
-const MANIFEST_URLS: Record<UpdateChannel, string> = {
-  stable: "https://raw.githubusercontent.com/zhuojianlook/org-GUI/updater/latest.json",
-  experimental:
-    "https://raw.githubusercontent.com/zhuojianlook/org-GUI/updater/latest-experimental.json",
-};
-
-type UpdateState = "idle" | "checking" | "downloading" | "done" | "error";
 
 /**
  * Top-of-window menu. The layout is grouped left → right by purpose:
@@ -25,7 +13,7 @@ type UpdateState = "idle" | "checking" | "downloading" | "done" | "error";
  *   4. View    — ⇢ Deps · 🏷 Tags
  *   5. (flex spacer)
  *   6. Status  — Emacs ●
- *   7. System  — ⚙ ▾  (dropdown: Reload, Setup, ↻ Daemon, Update channel, Check updates)
+ *   7. System  — ⚙ ▾  (dropdown: Reload, Setup, ↻ Daemon, About / updates)
  *
  * Infrequent system-level actions (Setup, daemon restart, updates) used to
  * crowd the bar — they're now collapsed into the ⚙ menu so the everyday
@@ -47,8 +35,6 @@ export default function Toolbar() {
   const expandAll = useOrgStore((s) => s.expandAll);
   const collapseAll = useOrgStore((s) => s.collapseAll);
   const tagFilter = useOrgStore((s) => s.tagFilter);
-  const updateChannel = useOrgStore((s) => s.updateChannel);
-  const setUpdateChannel = useOrgStore((s) => s.setUpdateChannel);
   const showTimeline = useOrgStore((s) => s.showTimeline);
   const setShowTimeline = useOrgStore((s) => s.setShowTimeline);
   const autoScheduleOnStart = useOrgStore((s) => s.autoScheduleOnStart);
@@ -56,9 +42,6 @@ export default function Toolbar() {
   const gcalNewCount = useOrgStore((s) => s.gcalNewCount);
   const gcalNewTitles = useOrgStore((s) => s.gcalNewTitles);
 
-  const [updateState, setUpdateState] = useState<UpdateState>("idle");
-  const [updatePct, setUpdatePct] = useState(0);
-  const [updateMsg, setUpdateMsg] = useState("");
   const [tagsOpen, setTagsOpen] = useState(false);
   const [systemOpen, setSystemOpen] = useState(false);
   const tagsBtnRef = useRef<HTMLButtonElement>(null);
@@ -86,61 +69,8 @@ export default function Toolbar() {
     };
   }, [systemOpen]);
 
-  const checkForUpdates = async () => {
-    if (!IN_TAURI) {
-      setUpdateState("error");
-      setUpdateMsg("In-app updates only work in the desktop app.");
-      return;
-    }
-    setUpdateState("checking");
-    setUpdatePct(0);
-    setUpdateMsg("");
-    let offProgress: UnlistenFn | undefined;
-    let offFinished: UnlistenFn | undefined;
-    try {
-      offProgress = await listen<{ downloaded: number; total: number | null }>(
-        "updater://progress",
-        (e) => {
-          setUpdateState("downloading");
-          if (e.payload.total)
-            setUpdatePct(Math.min(100, Math.round((100 * e.payload.downloaded) / e.payload.total)));
-        },
-      );
-      offFinished = await listen<unknown>("updater://finished", () => setUpdateState("done"));
-      const msg = await invoke<string>("download_and_install_update", {
-        manifestUrl: MANIFEST_URLS[updateChannel],
-      });
-      setUpdateState("done");
-      setUpdateMsg(msg);
-    } catch (e) {
-      const s = String(e);
-      if (/No update available/i.test(s)) {
-        setUpdateState("idle");
-        setUpdateMsg("Already up to date.");
-      } else {
-        setUpdateState("error");
-        setUpdateMsg(s);
-      }
-    } finally {
-      offProgress?.();
-      offFinished?.();
-    }
-  };
-
-  const updateLabel = (() => {
-    switch (updateState) {
-      case "checking":
-        return "Checking…";
-      case "downloading":
-        return `Updating ${updatePct}%`;
-      case "done":
-        return "Restart to apply ↻";
-      case "error":
-        return "Update failed";
-      default:
-        return "Check for updates";
-    }
-  })();
+  // Updates + version + authorship now live in the About window.
+  const openAbout = () => window.dispatchEvent(new CustomEvent("orggui:openAbout"));
 
   const pickFile = async () => {
     if (!IN_TAURI) {
@@ -184,11 +114,24 @@ export default function Toolbar() {
         borderBottom: "1px solid var(--c-border)",
       }}
     >
-      {/* ── Brand ── */}
-      <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginRight: 4 }}>
+      {/* ── Brand (click → About) ── */}
+      <button
+        onClick={openAbout}
+        title="About org-GUI — version, update channel & check for updates"
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          gap: 6,
+          marginRight: 4,
+          background: "transparent",
+          border: "none",
+          padding: 0,
+          cursor: "pointer",
+          fontFamily: "inherit",
+        }}
+      >
         <span style={{ fontWeight: 700, color: "var(--c-accent)", fontSize: 14 }}>org-GUI</span>
         <span
-          title={`Build ${__APP_VERSION__} · ${updateChannel} channel`}
           style={{
             fontSize: 9.5,
             fontWeight: 600,
@@ -202,7 +145,7 @@ export default function Toolbar() {
         >
           v{__APP_VERSION__}
         </span>
-      </div>
+      </button>
 
       <Separator />
 
@@ -445,52 +388,13 @@ export default function Toolbar() {
             onClick={() => setAutoScheduleOnStart(!autoScheduleOnStart)}
           />
           <Divider />
-          <div style={{ padding: "6px 10px 2px 10px", fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--c-text-dim)", fontWeight: 700 }}>
-            Updates
-          </div>
-          <div style={{ padding: "4px 8px", display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ color: "var(--c-text-dim)", fontSize: 11.5 }}>Channel:</span>
-            <select
-              value={updateChannel}
-              onChange={(e) => setUpdateChannel(e.target.value as UpdateChannel)}
-              style={{
-                flex: 1,
-                background: "var(--c-surface2)",
-                color: "var(--c-text)",
-                border: "1px solid var(--c-border)",
-                borderRadius: 4,
-                padding: "2px 6px",
-                fontSize: 12,
-              }}
-            >
-              <option value="stable">Stable</option>
-              <option value="experimental">Experimental</option>
-            </select>
-          </div>
           <MenuItem
-            label={`⇧ ${updateLabel}`}
-            disabled={updateState === "checking" || updateState === "downloading"}
-            highlight={
-              updateState === "done"
-                ? "green"
-                : updateState === "error"
-                  ? "red"
-                  : updateChannel === "experimental"
-                    ? "amber"
-                    : undefined
-            }
+            label="ℹ About org-GUI…"
+            titleAttr="Version, update channel & check for updates"
             onClick={() => {
-              if (updateState === "done") {
-                setSystemOpen(false);
-                invoke("restart_app").catch((e) => {
-                  setUpdateState("error");
-                  setUpdateMsg(String(e));
-                });
-              } else {
-                checkForUpdates();
-              }
+              setSystemOpen(false);
+              openAbout();
             }}
-            titleAttr={updateMsg || `Check for ${updateChannel} updates`}
           />
         </div>
       )}
