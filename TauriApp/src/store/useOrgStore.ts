@@ -843,6 +843,20 @@ interface OrgState {
   setAutoScheduleOnStart: (v: boolean) => void;
   setTimelineSelectedChip: (chip: { nodeId: string; isDeadline: boolean } | null) => void;
   scheduleNode: (node: OrgNode, dateStr: string, kind: "scheduled" | "deadline") => Promise<void>;
+  /** Schedule a node from a timeline drag, with a destination prompt. An
+   *  already-synced calendar event is MOVED on its calendar and pushed to
+   *  Google immediately; an unlinked task prompts "timeline only vs a synced
+   *  calendar" and, if a calendar is chosen, is created on Google right away.
+   *  `gcalOrig` is the event's pre-move position (used only for the move path;
+   *  pass null for unlinked tasks). */
+  scheduleViaDrop: (
+    node: OrgNode,
+    dateStr: string,
+    kind: "scheduled" | "deadline",
+    gcalOrig:
+      | { startMs: number; endMs: number | null; hasStartTime: boolean; hasEndTime: boolean }
+      | null,
+  ) => Promise<void>;
   /** Move a Google-calendar event LOCALLY (rewrite its body timestamp in
    *  place — no SCHEDULED line, so org-gcal can still push it and there's no
    *  duplicate) and record a ghost of where Google still has it. `orig` is the
@@ -1441,6 +1455,75 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       }
     }
     await get().edit(kind === "scheduled" ? apiSetScheduled : apiSetDeadline, node, dateStr);
+  },
+
+  scheduleViaDrop: async (node, dateStr, kind, gcalOrig) => {
+    // Already a Google-calendar event → this drag MOVES it: rewrite its time in
+    // place (records a ghost) and push to Google immediately. Fixes the bug
+    // where schedule-mode drag called scheduleNode, which only added a SCHEDULED
+    // line — never reaching Google and duplicating the body timestamp. (A linked
+    // node never falls through to the create-prompt below, which would error on
+    // an entry that already has an event.)
+    if (node.calendarId) {
+      if (gcalOrig) {
+        await get().moveGcalEvent(node, dateStr, "", gcalOrig);
+        await get().syncGcalNow();
+      } else {
+        // Linked but it has no parseable event time (e.g. a stray :calendar-id:
+        // tag on a date-less node) — there's nothing to move, so just set the
+        // date locally. No body timestamp existed, so this can't duplicate one.
+        await get().scheduleNode(node, dateStr, kind);
+      }
+      return;
+    }
+    // Unlinked task → ask where it goes. With no Google account / no known
+    // calendars there's nothing to choose, so just schedule to the timeline.
+    const cals = gcalCalendarOptions();
+    const { account } = readGcalCreds();
+    if (!account || cals.length === 0) {
+      await get().scheduleNode(node, dateStr, kind);
+      return;
+    }
+    const options: ConfirmOption[] = [
+      { label: "🗓 Timeline only", value: "timeline" },
+      ...cals.map((c) => ({ label: `📅 ${c.summary}`, value: `cal:${c.id}`, kind: "primary" as const })),
+      { label: "Cancel", value: "cancel" },
+    ];
+    const choice = await get().confirm({
+      title: `Schedule “${node.title ?? "this task"}”`,
+      message: `Add to the timeline only, or also create it on a Google calendar?\n→ ${dateStr}`,
+      options,
+    });
+    if (!choice || choice === "cancel") return; // abort — nothing changes
+    if (choice === "timeline") {
+      await get().scheduleNode(node, dateStr, kind);
+      return;
+    }
+    const calendarId = choice.slice("cal:".length);
+    // Set the date FIRST (org-gui-gcal-create reads the entry's
+    // SCHEDULED/TIMESTAMP/DEADLINE), then create on the chosen calendar.
+    // scheduleNode re-parses the doc and shifts buffer positions, so re-find the
+    // node before the create (which addresses the heading by `begin`). A field
+    // edit never reorders headings, so the same document INDEX is the same
+    // heading — use that as the primary anchor (deterministic even when two
+    // id-less tasks share a title, which would make the stable key ambiguous),
+    // validated by the stable key; fall back to a key match only when unique.
+    const key = nodeStableKey(node);
+    const idx = get().doc?.nodes.findIndex((n) => n.id === node.id) ?? -1;
+    set({ error: null });
+    await get().scheduleNode(node, dateStr, kind);
+    if (get().error) return; // dependency-ordering violation / edit failure → don't create
+    const nodes = get().doc?.nodes ?? [];
+    let fresh = idx >= 0 ? nodes[idx] : undefined;
+    if (!fresh || nodeStableKey(fresh) !== key) {
+      const matches = nodes.filter((n) => nodeStableKey(n) === key);
+      fresh = matches.length === 1 ? matches[0] : undefined;
+    }
+    if (!fresh) {
+      set({ error: "Scheduled, but couldn't uniquely locate the task to add it to Google Calendar." });
+      return;
+    }
+    await get().addNodeToGcal(fresh, calendarId);
   },
 
   moveGcalEvent: async (node, start, end, orig) => {

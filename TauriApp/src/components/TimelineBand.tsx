@@ -681,7 +681,12 @@ export default function TimelineBand() {
       if (!node) return;
       const dt = dateAtClientX(x);
       const time = timeAtRailY(contentY(y), timeContentH, workHoursMode);
-      Promise.resolve(scheduleNode(node, `${isoOf(dt)} ${time}`, "scheduled")).catch(() => {});
+      const dateStr = `${isoOf(dt)} ${time}`;
+      // Calendar events pass their pre-move position so the event is MOVED on
+      // Google (the old code called scheduleNode, which never reached Google);
+      // unlinked tasks pass null and get the timeline-vs-calendar prompt.
+      const orig = node.calendarId ? gcalOrigPoint(node, false) : null;
+      void useOrgStore.getState().scheduleViaDrop(node, dateStr, "scheduled", orig).catch(() => {});
       setScheduleMode(false);
     };
     window.addEventListener("orggui:scheduleDragMove", onMove);
