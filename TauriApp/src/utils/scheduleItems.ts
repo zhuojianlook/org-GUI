@@ -115,56 +115,129 @@ export function buildSchedItems(
   return items;
 }
 
-/** One swimlane row = all occurrences of a single task title (so a recurring
- *  event like "Lab Meeting" is ONE row with many occurrence bars). */
-export interface TaskRow {
-  title: string;
-  items: SchedItem[];
-}
-export interface ViewSection {
+/** A node in the hierarchical timeline tree. Mirrors the org outline: a GROUP
+ *  row is an ancestor that contains scheduled descendants (rendered as a faint
+ *  roll-up bar spanning rollupStart..rollupEnd, collapsible); a LEAF row is a
+ *  scheduled task (occurrences = its bars — more than one when same-title
+ *  siblings, e.g. a recurring "Lab Meeting", collapse into a single row). */
+export interface TreeRow {
   key: string;
+  node: OrgNode; // representative heading (the group node, or a leaf's node)
   title: string;
-  /** True when the section is just one same-named task (e.g. a recurring
-   *  top-level event whose section IS itself) — render the row directly with no
-   *  redundant header. */
-  redundantHeader: boolean;
-  rows: TaskRow[];
+  isGroup: boolean;
+  occurrences: SchedItem[]; // solid bars for a leaf row (empty for a group)
+  rollupStart: number; // for groups: min start over scheduled descendants
+  rollupEnd: number; // for groups: max end over scheduled descendants
+  color: string;
+  children: TreeRow[];
 }
 
-/** Group items for the Gantt view: sections (by top-level heading TITLE, which
- *  merges recurring top-level events that each form their own section) → rows
- *  (one per distinct task title, collapsing repeats into a single lane). First-
- *  seen order is preserved; each row's occurrences are sorted by date. */
-export function groupSectionsAndTasks(items: SchedItem[]): ViewSection[] {
-  const secOrder: string[] = [];
-  const secMap = new Map<
-    string,
-    { title: string; rowOrder: string[]; rows: Map<string, TaskRow> }
-  >();
-  for (const it of items) {
-    const sk = it.sectionTitle; // group by TITLE so recurring top-level events merge
-    let sec = secMap.get(sk);
-    if (!sec) {
-      sec = { title: it.sectionTitle, rowOrder: [], rows: new Map() };
-      secMap.set(sk, sec);
-      secOrder.push(sk);
+/** Build the hierarchical timeline tree: every scheduled node plus the ancestor
+ *  chain needed to place it, mirroring the org nesting. Ancestors with no date
+ *  but scheduled descendants become collapsible groups with a roll-up span;
+ *  scheduled leaves become bars; same-title leaf siblings merge into one row. */
+export function buildScheduleTree(doc: OrgDoc | null, tagColors: Record<string, string>): TreeRow[] {
+  if (!doc) return [];
+  const items = buildSchedItems(doc, tagColors);
+  if (items.length === 0) return [];
+  const itemByNode = new Map<string, SchedItem>();
+  for (const it of items) itemByNode.set(it.nodeId, it);
+
+  const childrenOf = new Map<string, OrgNode[]>();
+  const roots: OrgNode[] = [];
+  for (const n of doc.nodes) {
+    if (n.parent) {
+      const arr = childrenOf.get(n.parent);
+      if (arr) arr.push(n);
+      else childrenOf.set(n.parent, [n]);
+    } else {
+      roots.push(n);
     }
-    let row = sec.rows.get(it.title);
-    if (!row) {
-      row = { title: it.title, items: [] };
-      sec.rows.set(it.title, row);
-      sec.rowOrder.push(it.title);
-    }
-    row.items.push(it);
   }
-  return secOrder.map((sk) => {
-    const sec = secMap.get(sk)!;
-    const rows = sec.rowOrder.map((t) => {
-      const r = sec.rows.get(t)!;
-      r.items.sort((a, b) => a.dayMs - b.dayMs);
-      return r;
-    });
-    const redundantHeader = rows.length === 1 && rows[0].title === sec.title;
-    return { key: sk, title: sec.title, redundantHeader, rows };
-  });
+
+  const relMemo = new Map<string, boolean>();
+  const isRelevant = (n: OrgNode): boolean => {
+    const cached = relMemo.get(n.id);
+    if (cached !== undefined) return cached;
+    let rel = itemByNode.has(n.id);
+    if (!rel) {
+      for (const c of childrenOf.get(n.id) ?? []) {
+        if (isRelevant(c)) {
+          rel = true;
+          break;
+        }
+      }
+    }
+    relMemo.set(n.id, rel);
+    return rel;
+  };
+
+  const spanOf = (n: OrgNode): { lo: number; hi: number } | null => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    const own = itemByNode.get(n.id);
+    if (own) {
+      lo = own.dayMs;
+      hi = own.endDayMs;
+    }
+    for (const c of childrenOf.get(n.id) ?? []) {
+      const s = spanOf(c);
+      if (s) {
+        lo = Math.min(lo, s.lo);
+        hi = Math.max(hi, s.hi);
+      }
+    }
+    return lo === Infinity ? null : { lo, hi };
+  };
+
+  const buildRows = (nodes: OrgNode[]): TreeRow[] => {
+    const out: TreeRow[] = [];
+    const recurIndex = new Map<string, number>(); // title → out index, to merge sibling leaves
+    for (const n of nodes) {
+      if (!isRelevant(n)) continue;
+      const relChildren = (childrenOf.get(n.id) ?? []).filter(isRelevant);
+      if (relChildren.length === 0) {
+        // Relevant leaf ⇒ scheduled.
+        const item = itemByNode.get(n.id);
+        if (!item) continue;
+        const t = n.title ?? "";
+        const existing = recurIndex.get(t);
+        if (existing !== undefined) {
+          const r = out[existing];
+          r.occurrences.push(item);
+          r.rollupStart = Math.min(r.rollupStart, item.dayMs);
+          r.rollupEnd = Math.max(r.rollupEnd, item.endDayMs);
+        } else {
+          recurIndex.set(t, out.length);
+          out.push({
+            key: `task:${item.nodeId}`,
+            node: n,
+            title: item.title,
+            isGroup: false,
+            occurrences: [item],
+            rollupStart: item.dayMs,
+            rollupEnd: item.endDayMs,
+            color: item.color,
+            children: [],
+          });
+        }
+      } else {
+        const span = spanOf(n);
+        out.push({
+          key: `grp:${n.id}`,
+          node: n,
+          title: n.title ?? "(untitled)",
+          isGroup: true,
+          occurrences: [],
+          rollupStart: span ? span.lo : 0,
+          rollupEnd: span ? span.hi : 0,
+          color: nodeTagColors(n.tagsAll, tagColors)[0] ?? "#8e8e93",
+          children: buildRows(childrenOf.get(n.id) ?? []),
+        });
+      }
+    }
+    return out;
+  };
+
+  return buildRows(roots);
 }
