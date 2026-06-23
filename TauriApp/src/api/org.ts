@@ -788,6 +788,14 @@ export const gcalStatus = (): Promise<GcalStatus> =>
     ? orgCall<GcalStatus>("org-gui-gcal-status")
     : Promise.resolve({ available: false, configured: false, authorized: false });
 
+/** Forget the stored Google OAuth token (and the daemon's in-memory copy) so
+ *  the next Calendar action re-prompts a fresh browser sign-in. Backs the
+ *  Calendar panel's Reconnect button when a sign-in has expired/been revoked. */
+export const gcalForgetToken = (): Promise<{ ok?: boolean }> =>
+  IN_TAURI
+    ? orgCall<{ ok?: boolean }>("org-gui-gcal-forget-token", [])
+    : Promise.resolve({ ok: true });
+
 /** One of the signed-in account's Google calendars (from calendarList). */
 export interface GcalCalendar {
   id: string;

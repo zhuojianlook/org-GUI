@@ -14,7 +14,7 @@
 ;; Diagnostics only — surfaced in the parse payload so the UI can show which
 ;; bridge the daemon has. NO LONGER the reload gate (see
 ;; `org-gui-bridge--loaded-token'); editing this value does not affect reloads.
-(defconst org-gui-bridge-version "0.2.121")
+(defconst org-gui-bridge-version "0.2.122")
 
 ;; The app (Rust `org_call') writes this to a content-token of the bridge file
 ;; right after `load-file', then gates reloads on it: it reloads only when the
@@ -1796,12 +1796,49 @@ to match. Returns the reparsed doc."
 
 (defun org-gui--gcal-valid-token (account)
   "Return a currently-valid access token for ACCOUNT (the Google email the
-token is stored under), refreshing via curl if expired. No browser popup as
-long as a token already exists; errors if not signed in."
-  (or (and (fboundp 'oauth2-auto-access-token-sync)
-           (ignore-errors (oauth2-auto-access-token-sync account 'org-gcal)))
-      (plist-get (cdar (org-gui--gcal-token-db)) :access-token)
-      (error "Not signed in to Google yet — click Sign in with Google first")))
+token is stored under). oauth2-auto refreshes via the stored refresh token (or
+opens the browser consent flow when there is no token yet) and returns a fresh
+token.
+
+If the refresh THROWS, the stored refresh token is dead/revoked — most often
+because a Google app in \"Testing\" publishing status expires refresh tokens
+after 7 days. We DELIBERATELY do not fall back to the cached access token here
+(the old behaviour): that token is also stale, so every Google call 401s
+SILENTLY and the user just sees \"nothing synced\". Instead we raise an
+actionable error tagged with the GCAL_AUTH_EXPIRED marker, which the app
+detects to flip the Calendar panel into a one-click Reconnect state.
+
+Background callers (org-gui-gcal-peek) already swallow this — the error
+propagates out as a {error:…} JSON the badge check ignores — so surfacing it
+here does not break the silent background path."
+  (unless (fboundp 'oauth2-auto-access-token-sync)
+    (error "Google Calendar support isn't loaded — install it from the Calendar panel."))
+  (or (condition-case _err
+          (oauth2-auto-access-token-sync account 'org-gcal)
+        (error
+         (error "GCAL_AUTH_EXPIRED: Google sign-in expired or was revoked — open the Calendar panel, click Reconnect, then Sign in with Google again.")))
+      (error "Not signed in to Google yet — open the Calendar panel and click Sign in with Google.")))
+
+(defun org-gui-gcal-forget-token (&rest _)
+  "Forget the stored Google OAuth token so the next Calendar action triggers a
+fresh browser sign-in. Deletes the app-private token file(s) AND drops any
+in-memory token oauth2-auto cached this daemon session (otherwise it could hand
+back the just-deleted, possibly-expired token). Idempotent; returns {ok:t}.
+Drives the Calendar panel's Reconnect button."
+  (ignore-errors (delete-file org-gui--gcal-token-file))
+  (ignore-errors (delete-file (expand-file-name "~/.org-gui/oauth2.plist")))
+  ;; Our plstore-read/write override (`org-gui--install-token-store-override')
+  ;; reads the token from the file fresh every call, so deleting the file above
+  ;; already forces re-auth — there is no in-memory copy in this app. Still,
+  ;; defensively clear oauth2-auto's own plstore cache (`oauth2-auto--plstore-cache',
+  ;; the real upstream var) in case the override is ever removed; the other
+  ;; names are version-tolerant fallbacks, only touched when bound.
+  (dolist (sym '(oauth2-auto--plstore-cache
+                 oauth2-auto--tokens oauth2-auto--cache oauth2-auto--token-cache))
+    (when (boundp sym)
+      (let ((v (symbol-value sym)))
+        (if (hash-table-p v) (ignore-errors (clrhash v)) (set sym nil)))))
+  (json-serialize (list (cons 'ok t))))
 
 (defun org-gui-gcal-calendars (client-id client-secret account)
   "Return JSON array of the signed-in ACCOUNT's Google calendars:

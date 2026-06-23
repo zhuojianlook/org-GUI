@@ -32,6 +32,7 @@ import {
   gcalUnsync as apiGcalUnsync,
   gcalDelete as apiGcalDelete,
   gcalSwitch as apiGcalSwitch,
+  gcalForgetToken as apiGcalForgetToken,
   incompleteDeps,
   validateScheduleAgainstDeps,
   wouldCreateCycle,
@@ -440,6 +441,33 @@ export function gcalCalendarOptions(): { id: string; summary: string }[] {
   return Object.entries(cals).map(([id, v]) => ({ id, summary: v?.summary || id }));
 }
 
+/** Marker the bridge tags onto an expired/revoked-sign-in error (see
+ *  `org-gui--gcal-valid-token`). Lets us reliably distinguish "your Google
+ *  sign-in died, reconnect" from any other Google failure. */
+export const GCAL_AUTH_EXPIRED_MARKER = "GCAL_AUTH_EXPIRED";
+/** Friendly, actionable message shown for an expired/revoked Google sign-in. */
+export const GCAL_AUTH_EXPIRED_MSG =
+  "Google sign-in expired or was revoked — open the 🗓 Calendar panel, click Reconnect, then Sign in with Google again.";
+/** Signatures of a dead/rejected Google sign-in. The bridge tags the
+ *  calendar-list/peek path with GCAL_AUTH_EXPIRED, but the WRITE paths (sync,
+ *  create, push, delete, switch) acquire their token inline and surface the raw
+ *  OAuth failure: the curl token-refresh override raises "Google OAuth error:
+ *  <invalid_grant / Token has been expired or revoked>", and oauth2-auto raises
+ *  "Refresh token is nil". Match them all so a dead sign-in flips the Reconnect
+ *  prompt no matter which operation hit it. These strings come only from the
+ *  OAuth token step, so ordinary Google API errors can't false-positive. */
+const GCAL_AUTH_FAIL_SIGNATURES = [
+  GCAL_AUTH_EXPIRED_MARKER,
+  "Google OAuth error",
+  "invalid_grant",
+  "Refresh token is nil",
+];
+/** True when an error came from a dead Google sign-in (vs any other failure). */
+export function isGcalAuthExpired(e: unknown): boolean {
+  const s = String(e);
+  return GCAL_AUTH_FAIL_SIGNATURES.some((sig) => s.includes(sig));
+}
+
 /** Read the saved Google OAuth creds (built-in client unless the user opted
  *  into their own). Shared by sync, push and create. */
 function readGcalCreds(): { clientId: string; clientSecret: string; account: string } {
@@ -744,6 +772,10 @@ interface OrgState {
   gcalGhosts: Record<string, GcalGhost>;
   gcalSyncing: boolean;
   gcalSyncError: string | null;
+  /** True once a Google action has failed because the sign-in expired/was
+   *  revoked — drives the Calendar panel's Reconnect prompt. Cleared on the
+   *  next successful Google call or after reconnecting. */
+  gcalAuthExpired: boolean;
   /** Multi-selection set for bulk operations (e.g. tag-many). Holds node ids.
    *  Separate from selectedId so the Details panel and ordinary single-select
    *  workflow don't interfere with bulk gestures. */
@@ -873,6 +905,12 @@ interface OrgState {
   clearGcalGhosts: () => void;
   /** Push all pending local moves to Google (two-way sync), then clear ghosts. */
   syncGcalNow: () => Promise<void>;
+  /** Set/clear the "Google sign-in expired" flag (used by the Calendar panel
+   *  when it catches an auth error from a direct sync call). */
+  setGcalAuthExpired: (v: boolean) => void;
+  /** Forget the stored Google token so the user can sign in again. Clears the
+   *  expired flag; the panel then shows "Sign in with Google". */
+  gcalReconnect: () => Promise<void>;
   /** Background read-only check: how many Google events in the sync window are
    *  not yet in the current file. Sets gcalNewCount/gcalNewTitles. Silent on
    *  any error (not signed in / offline) so it never nags. */
@@ -942,6 +980,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   gcalGhosts: {},
   gcalSyncing: false,
   gcalSyncError: null,
+  gcalAuthExpired: false,
   gcalNewCount: 0,
   gcalNewTitles: [],
   multiSelected: new Set<string>(),
@@ -1342,7 +1381,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiAddDependency(file, fromNode.begin, toNode.begin);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1354,7 +1397,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiRemoveDependency(file, fromNode.begin, toNode.begin);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1555,7 +1602,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiGcalMove(file, node.begin, start, end);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1589,13 +1640,17 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ saving: true, error: null });
     try {
       await apiGcalCreate(clientId, clientSecret, account, calendarId, file, node.begin);
-      set({ saving: false });
+      set({ saving: false, gcalAuthExpired: false });
       // Reload the file: the create rewrote the entry (new properties + drawer,
       // shifting later begins) and it's now a calendar event — a fresh parse
       // re-applies the calendar tag and per-file state cleanly.
       await get().loadFile(file);
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1615,7 +1670,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       set({ saving: false });
       await get().loadFile(file);
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1634,7 +1693,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       set({ saving: false });
       await get().loadFile(file);
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1688,10 +1751,39 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       // Pushed → ghosts resolved. Clear, then reload so the file reflects the
       // pushed state (fresh ETags etc.).
       saveGcalGhosts(syncFile, {});
-      set({ gcalGhosts: {}, gcalSyncing: false });
+      set({ gcalGhosts: {}, gcalSyncing: false, gcalAuthExpired: false });
       await get().loadFile(syncFile);
     } catch (e) {
-      set({ gcalSyncing: false, gcalSyncError: String(e) });
+      // A dead sign-in surfaces here too; mirror it to `error` so the toast
+      // shows the actionable message (gcalSyncError alone only reaches the
+      // timeline badge) and flip the panel into Reconnect.
+      if (isGcalAuthExpired(e)) {
+        set({
+          gcalSyncing: false,
+          gcalSyncError: GCAL_AUTH_EXPIRED_MSG,
+          error: GCAL_AUTH_EXPIRED_MSG,
+          gcalAuthExpired: true,
+        });
+      } else {
+        set({ gcalSyncing: false, gcalSyncError: String(e) });
+      }
+    }
+  },
+
+  setGcalAuthExpired: (v) => set({ gcalAuthExpired: v }),
+
+  gcalReconnect: async () => {
+    set({ saving: true, error: null });
+    try {
+      // Drop the stored token + the daemon's in-memory copy, so the next
+      // Google action re-prompts a fresh browser sign-in. The panel re-checks
+      // status afterwards (authorized → false → "Sign in with Google").
+      await apiGcalForgetToken();
+      set({ saving: false, gcalAuthExpired: false, gcalSyncError: null });
+    } catch (e) {
+      set({ error: `Couldn't reset the Google sign-in: ${String(e)}`, saving: false });
+      // Rethrow so the panel's onReconnect doesn't report success.
+      throw e;
     }
   },
 
@@ -1777,7 +1869,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiAddTagMany(file, begins, t);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1790,7 +1886,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiAddTagMany(file, [node.begin], t);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1871,7 +1971,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiReorderNode(file, node.begin, delta);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1892,7 +1996,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       );
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1916,7 +2024,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         : await apiSetTodo(file, node.begin, "STRT");
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1965,7 +2077,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiArchiveNode(file, begin);
       set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -1985,7 +2101,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newSel = prevSel === node.id ? tracked : prevSel;
       set({ doc: reapplyGcalTags(newDoc), selectedId: newSel, saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -2000,7 +2120,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newSel = prevSel === node.id ? tracked : prevSel;
       set({ doc: reapplyGcalTags(newDoc), selectedId: newSel, saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -2015,7 +2139,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newSel = prevSel === node.id ? tracked : prevSel;
       set({ doc: reapplyGcalTags(newDoc), selectedId: newSel, saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -2029,7 +2157,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiSetBody(file, node.begin, body);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -2049,7 +2181,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       }
       set({ doc: reapplyGcalTags(newDoc), expanded, saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -2130,7 +2266,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
         });
       }
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -2203,7 +2343,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiDeleteNode(file, node.begin, node.title ?? "");
       set({ doc: reapplyGcalTags(newDoc), selectedId: null, saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -2215,7 +2359,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiSetSubtree(file, begin, text);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 
@@ -2227,7 +2375,11 @@ export const useOrgStore = create<OrgState>((set, get) => ({
       const newDoc = await apiSetFile(file, text);
       set({ doc: reapplyGcalTags(newDoc), saving: false });
     } catch (e) {
-      set({ error: String(e), saving: false });
+      set(
+        isGcalAuthExpired(e)
+          ? { error: GCAL_AUTH_EXPIRED_MSG, gcalAuthExpired: true, saving: false }
+          : { error: String(e), saving: false },
+      );
     }
   },
 }));

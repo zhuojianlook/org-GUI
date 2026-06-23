@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useOrgStore } from "../store/useOrgStore";
+import { useOrgStore, isGcalAuthExpired, GCAL_AUTH_EXPIRED_MSG } from "../store/useOrgStore";
 import {
   gcalInstall,
   gcalStatus,
@@ -99,6 +99,8 @@ function saveCfg(c: GcalConfig) {
 export default function GcalPanel({ onClose }: { onClose: () => void }) {
   const loadFile = useOrgStore((s) => s.loadFile);
   const currentFile = useOrgStore((s) => s.file);
+  const gcalAuthExpired = useOrgStore((s) => s.gcalAuthExpired);
+  const gcalReconnect = useOrgStore((s) => s.gcalReconnect);
 
   const [cfg, setCfg] = useState<GcalConfig>(() => {
     const c = loadCfg();
@@ -106,7 +108,7 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
     return c;
   });
   const [status, setStatus] = useState<GcalStatus | null>(null);
-  const [busy, setBusy] = useState<null | "status" | "install" | "sync" | "cals">(null);
+  const [busy, setBusy] = useState<null | "status" | "install" | "sync" | "cals" | "reconnect">(null);
   const [msg, setMsg] = useState<string>("");
   const [err, setErr] = useState<string>("");
   const [calendars, setCalendars] = useState<GcalCalendar[]>([]);
@@ -223,6 +225,8 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
       }
       setMsg("Syncing…");
       const synced = await gcalSync(effClientId, effClientSecret, account, calsToSync, target, cfg.twoWay);
+      // The sign-in just worked — clear any stale "expired" banner.
+      useOrgStore.getState().setGcalAuthExpired(false);
       // How many calendar events actually landed in the file? Turns a vague
       // "it says it synced but I see nothing" into an actionable signal.
       const eventCount = synced.nodes.filter((n) => n.calendarId).length;
@@ -242,6 +246,31 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
           ? `Synced — ${eventCount} calendar event${eventCount === 1 ? "" : "s"} in this file (on the timeline now).`
           : "Synced, but no calendar events were written. Check the calendars selected below are ticked, and that your events fall within the next year / past 6 months.",
       );
+    } catch (e) {
+      // A dead Google sign-in: show the actionable message and flip the panel
+      // (and the rest of the app) into the Reconnect state.
+      if (isGcalAuthExpired(e)) {
+        useOrgStore.getState().setGcalAuthExpired(true);
+        setErr(GCAL_AUTH_EXPIRED_MSG);
+      } else {
+        setErr(String(e));
+      }
+      setMsg("");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Reconnect: forget the stored token, then re-check status so the button
+  // reverts to "Sign in with Google" for a fresh authorization.
+  const onReconnect = async () => {
+    setBusy("reconnect");
+    setErr("");
+    setMsg("Clearing the stored Google sign-in…");
+    try {
+      await gcalReconnect();
+      await refreshStatus();
+      setMsg('Sign-in cleared. Click "Sign in with Google" to authorize again.');
     } catch (e) {
       setErr(String(e));
       setMsg("");
@@ -294,6 +323,28 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
           <Pill ok={status?.authorized} label={status?.authorized ? "Authorized" : "Not authorized"} />
           {busy === "status" && <span style={{ color: "var(--c-text-dim)" }}>checking…</span>}
         </div>
+
+        {/* Expired sign-in banner — "Authorized" above only means a token FILE
+            exists, not that it still works; this appears the moment a real
+            Google call fails because the sign-in died. */}
+        {gcalAuthExpired && (
+          <div
+            style={{
+              padding: "9px 11px",
+              marginBottom: 14,
+              borderRadius: 6,
+              background: "var(--c-surface2)",
+              border: "1px solid #e0a458",
+              color: "#e0a458",
+              fontSize: 12.5,
+              lineHeight: 1.5,
+            }}
+          >
+            Your Google sign-in has expired or was revoked, so changes aren't reaching Google.
+            Click <b>Reconnect</b>, then <b>Sign in with Google</b>. A Google app in "Testing" mode
+            expires sign-ins after 7 days — publishing the OAuth app to production removes that.
+          </div>
+        )}
 
         {/* Install */}
         {status && !status.available && (
@@ -518,6 +569,23 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
           <button onClick={refreshStatus} disabled={busy != null} style={secondaryBtn}>
             Refresh status
           </button>
+          {/* Reconnect: always available once a token file exists (and made
+              prominent when we KNOW the sign-in is dead) so re-authorizing is
+              one click instead of deleting a file by hand. */}
+          {(status?.authorized || gcalAuthExpired) && (
+            <button
+              onClick={onReconnect}
+              disabled={busy != null}
+              title="Forget the stored Google token so you can sign in again (use this if sync stopped working)."
+              style={
+                gcalAuthExpired
+                  ? { ...primaryBtn, background: "#e0a458", color: "#1c1c1e" }
+                  : { ...secondaryBtn, color: "#e0a458", borderColor: "#e0a458" }
+              }
+            >
+              {busy === "reconnect" ? "Reconnecting…" : "Reconnect"}
+            </button>
+          )}
         </div>
 
         {/* Toggle between the built-in client and your own OAuth credentials.
