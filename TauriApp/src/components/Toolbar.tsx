@@ -37,6 +37,8 @@ export default function Toolbar() {
   const tagFilter = useOrgStore((s) => s.tagFilter);
   const showTimeline = useOrgStore((s) => s.showTimeline);
   const setShowTimeline = useOrgStore((s) => s.setShowTimeline);
+  const mainView = useOrgStore((s) => s.mainView);
+  const setMainView = useOrgStore((s) => s.setMainView);
   const autoScheduleOnStart = useOrgStore((s) => s.autoScheduleOnStart);
   const setAutoScheduleOnStart = useOrgStore((s) => s.setAutoScheduleOnStart);
   const gcalNewCount = useOrgStore((s) => s.gcalNewCount);
@@ -184,6 +186,44 @@ export default function Toolbar() {
       >
         ⊟ Collapse
       </button>
+
+      <Separator />
+
+      {/* ── Main view switcher ── */}
+      <div
+        style={{ display: "inline-flex", border: "1px solid var(--c-border)", borderRadius: 6, overflow: "hidden", flexShrink: 0 }}
+        role="group"
+        aria-label="Main view"
+      >
+        {(
+          [
+            ["graph", "🕸 Graph"],
+            ["calendar", "🗓 Calendar"],
+            ["timeline", "📊 Timeline"],
+          ] as const
+        ).map(([v, label]) => (
+          <button
+            key={v}
+            onClick={() => setMainView(v)}
+            disabled={!doc}
+            title={`Show the ${v} view in the main area`}
+            style={{
+              background: mainView === v ? "var(--c-accent)" : "var(--c-surface2)",
+              color: mainView === v ? "#fff" : "var(--c-text)",
+              border: "none",
+              padding: "3px 9px",
+              fontSize: 12,
+              fontWeight: mainView === v ? 700 : 500,
+              cursor: doc ? "pointer" : "not-allowed",
+              fontFamily: "inherit",
+              whiteSpace: "nowrap",
+              opacity: doc ? 1 : 0.5,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
       <Separator />
 

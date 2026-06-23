@@ -49,6 +49,20 @@ export function todayStr(): string {
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
+/** Extract "HH:MM" from an ISO timestamp ("YYYY-MM-DDTHH:MM…"), or null when the
+ *  value is date-only (all-day). Mirrors the timeline band's own helper. */
+export function timeOfDayFromIso(iso: string | null | undefined): string | null {
+  if (!iso || !iso.includes("T")) return null;
+  return iso.slice(11, 16);
+}
+
+/** "HH:MM" → minutes since midnight (0 when unparseable). */
+export function minutesOfDay(t: string | null | undefined): number {
+  if (!t) return 0;
+  const [h, m] = t.split(":").map((s) => parseInt(s, 10));
+  return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+}
+
 export function fmtDate(s: string | null): string {
   const d = parseOrgDate(s);
   if (!d) return "";

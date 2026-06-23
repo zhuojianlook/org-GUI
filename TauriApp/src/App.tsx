@@ -15,6 +15,8 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import ErrorToast from "./components/ErrorToast";
 import PrereqsModal, { fetchPrereqStatus } from "./components/PrereqsModal";
 import AboutModal, { shouldAutoOpenAbout } from "./components/AboutModal";
+import CalendarView from "./components/CalendarView";
+import TimelineGanttView from "./components/TimelineGanttView";
 // Heavy, on-demand panels are code-split so their libraries (xterm, the
 // Google-Calendar OAuth flow) aren't parsed at startup — only when first opened.
 const EmacsTerminal = lazy(() => import("./components/EmacsTerminal"));
@@ -34,6 +36,7 @@ export default function App() {
   const restoreSession = useOrgStore((s) => s.restoreSession);
   const addHeading = useOrgStore((s) => s.addHeading);
   const showTimeline = useOrgStore((s) => s.showTimeline);
+  const mainView = useOrgStore((s) => s.mainView);
   const openTabs = useOrgStore((s) => s.openTabs);
   const file = useOrgStore((s) => s.file);
   const loading = useOrgStore((s) => s.loading);
@@ -225,6 +228,12 @@ export default function App() {
             draggable divider between them so the user can give either region
             more space. */}
         <div ref={leftColRef} style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+          {doc && mainView === "calendar" ? (
+            <CalendarView />
+          ) : doc && mainView === "timeline" ? (
+            <TimelineGanttView />
+          ) : (
+            <>
           {doc && showTimeline && (
             <>
               <div
@@ -335,6 +344,8 @@ export default function App() {
             <EmptyState onOpen={pickFile} error={error} />
           )}
           </div>
+            </>
+          )}
         </div>
 
         {/* Right region: whichever pull-out drawer the user has open (or

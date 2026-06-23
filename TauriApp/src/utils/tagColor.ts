@@ -46,6 +46,14 @@ export function blendColorsRgba(colors: string[], alpha: number): string | null 
   return `rgba(${Math.round(r / n)}, ${Math.round(g / n)}, ${Math.round(b / n)}, ${alpha})`;
 }
 
+/** "#rrggbb" + alpha → "rgba(r,g,b,a)". Falls back to the input when it isn't a
+ *  plain hex (so an already-rgb/rgba string passes through unchanged). */
+export function hexToRgba(hex: string, alpha: number): string {
+  const p = parseHex(hex);
+  if (!p) return hex;
+  return `rgba(${p[0]}, ${p[1]}, ${p[2]}, ${alpha})`;
+}
+
 /** Resolve the coloured tags assigned to a node, dropping any without a color. */
 export function nodeTagColors(
   tagsAll: string[] | null | undefined,

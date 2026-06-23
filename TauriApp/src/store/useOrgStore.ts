@@ -636,6 +636,27 @@ function saveShowTimeline(v: boolean) {
   }
 }
 
+// Which main view fills the left area: the node "graph" (with its timeline
+// band), the Todoist-style week "calendar", or the Asana-style swimlane
+// "timeline" (Gantt). Persisted globally so the choice sticks across files.
+export type MainView = "graph" | "calendar" | "timeline";
+const MAIN_VIEW_KEY = "org-gui:mainView";
+function loadMainView(): MainView {
+  try {
+    const v = localStorage.getItem(MAIN_VIEW_KEY);
+    return v === "calendar" || v === "timeline" ? v : "graph";
+  } catch {
+    return "graph";
+  }
+}
+function saveMainView(v: MainView) {
+  try {
+    localStorage.setItem(MAIN_VIEW_KEY, v);
+  } catch {
+    /* non-fatal */
+  }
+}
+
 // Whether clicking "▶ Start" on a task also schedules it for today (which pins
 // it onto the timeline). Off by default — not every task you begin needs to
 // appear on the timeline. Persisted globally so the choice sticks.
@@ -778,6 +799,7 @@ interface OrgState {
   tagFilter: string | null; // when set, only nodes carrying this tag stay sharp
   tagAuraEnabled: boolean; // global toggle for the metaball halo overlay
   showTimeline: boolean; // top-of-window calendar timeline visibility
+  mainView: MainView; // which view fills the left area (graph | calendar | timeline)
   autoScheduleOnStart: boolean; // ▶ Start also schedules the task for today
   /** Currently-selected timeline chip (single click on a chip). Arrow keys
    *  nudge this chip's scheduled or deadline date. Esc clears. */
@@ -888,6 +910,7 @@ interface OrgState {
   setTagFilter: (tag: string | null) => void;
   setTagAuraEnabled: (v: boolean) => void;
   setShowTimeline: (v: boolean) => void;
+  setMainView: (v: MainView) => void;
   setAutoScheduleOnStart: (v: boolean) => void;
   setTimelineSelectedChip: (chip: { nodeId: string; isDeadline: boolean } | null) => void;
   scheduleNode: (node: OrgNode, dateStr: string, kind: "scheduled" | "deadline") => Promise<void>;
@@ -991,6 +1014,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   tagFilter: null,
   tagAuraEnabled: loadTagAuraEnabled(),
   showTimeline: loadShowTimeline(),
+  mainView: loadMainView(),
   autoScheduleOnStart: loadAutoScheduleOnStart(),
   timelineSelectedChip: null,
   gcalGhosts: {},
@@ -1485,6 +1509,10 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     set({ tagAuraEnabled: v });
   },
 
+  setMainView: (v) => {
+    saveMainView(v);
+    set({ mainView: v });
+  },
   setShowTimeline: (v) => {
     saveShowTimeline(v);
     set({ showTimeline: v });
