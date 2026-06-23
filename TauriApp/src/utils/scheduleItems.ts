@@ -115,20 +115,56 @@ export function buildSchedItems(
   return items;
 }
 
-/** Group items by section, preserving first-seen section order. */
-export function groupBySection(
-  items: SchedItem[],
-): { id: string; title: string; items: SchedItem[] }[] {
-  const order: string[] = [];
-  const map = new Map<string, { id: string; title: string; items: SchedItem[] }>();
+/** One swimlane row = all occurrences of a single task title (so a recurring
+ *  event like "Lab Meeting" is ONE row with many occurrence bars). */
+export interface TaskRow {
+  title: string;
+  items: SchedItem[];
+}
+export interface ViewSection {
+  key: string;
+  title: string;
+  /** True when the section is just one same-named task (e.g. a recurring
+   *  top-level event whose section IS itself) — render the row directly with no
+   *  redundant header. */
+  redundantHeader: boolean;
+  rows: TaskRow[];
+}
+
+/** Group items for the Gantt view: sections (by top-level heading TITLE, which
+ *  merges recurring top-level events that each form their own section) → rows
+ *  (one per distinct task title, collapsing repeats into a single lane). First-
+ *  seen order is preserved; each row's occurrences are sorted by date. */
+export function groupSectionsAndTasks(items: SchedItem[]): ViewSection[] {
+  const secOrder: string[] = [];
+  const secMap = new Map<
+    string,
+    { title: string; rowOrder: string[]; rows: Map<string, TaskRow> }
+  >();
   for (const it of items) {
-    let g = map.get(it.sectionId);
-    if (!g) {
-      g = { id: it.sectionId, title: it.sectionTitle, items: [] };
-      map.set(it.sectionId, g);
-      order.push(it.sectionId);
+    const sk = it.sectionTitle; // group by TITLE so recurring top-level events merge
+    let sec = secMap.get(sk);
+    if (!sec) {
+      sec = { title: it.sectionTitle, rowOrder: [], rows: new Map() };
+      secMap.set(sk, sec);
+      secOrder.push(sk);
     }
-    g.items.push(it);
+    let row = sec.rows.get(it.title);
+    if (!row) {
+      row = { title: it.title, items: [] };
+      sec.rows.set(it.title, row);
+      sec.rowOrder.push(it.title);
+    }
+    row.items.push(it);
   }
-  return order.map((id) => map.get(id)!);
+  return secOrder.map((sk) => {
+    const sec = secMap.get(sk)!;
+    const rows = sec.rowOrder.map((t) => {
+      const r = sec.rows.get(t)!;
+      r.items.sort((a, b) => a.dayMs - b.dayMs);
+      return r;
+    });
+    const redundantHeader = rows.length === 1 && rows[0].title === sec.title;
+    return { key: sk, title: sec.title, redundantHeader, rows };
+  });
 }
