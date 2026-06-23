@@ -14,7 +14,7 @@
 ;; Diagnostics only — surfaced in the parse payload so the UI can show which
 ;; bridge the daemon has. NO LONGER the reload gate (see
 ;; `org-gui-bridge--loaded-token'); editing this value does not affect reloads.
-(defconst org-gui-bridge-version "0.2.122")
+(defconst org-gui-bridge-version "0.2.123")
 
 ;; The app (Rust `org_call') writes this to a content-token of the bridge file
 ;; right after `load-file', then gates reloads on it: it reloads only when the
@@ -124,7 +124,11 @@ planning lines and property drawers."
          ;; `entry-id' property. Fall back to it so calendar events get a stable
          ;; orgId (the timeline keys move-ghosts on this — without it, moving a
          ;; gcal event records no ghost and shows no Sync button).
-         (org-id (or (org-entry-get nil "ID") (org-entry-get nil "entry-id")))
+         ;; Use org-gcal's configured entry-id property name (defaults to
+         ;; "entry-id") so this matches what push/unsync/switch look up — keeping
+         ;; orgId/entryId correct even for a customised `org-gcal-entry-id-property'.
+         (org-gui--eid-prop (or (bound-and-true-p org-gcal-entry-id-property) "entry-id"))
+         (org-id (or (org-entry-get nil "ID") (org-entry-get nil org-gui--eid-prop)))
          (todo (org-get-todo-state))
          (done (org-gui--b (org-entry-is-done-p)))
          (title (org-get-heading t t t t))
@@ -182,7 +186,7 @@ planning lines and property drawers."
      ;; The org-gcal :entry-id: — a STABLE identity for a calendar event used to
      ;; relocate it for delete/unsync even if the buffer position drifted (the
      ;; file is shared via Dropbox / the user's own org-gcal).
-     (cons 'entryId (org-gui--s (org-entry-get nil "entry-id")))
+     (cons 'entryId (org-gui--s (org-entry-get nil org-gui--eid-prop)))
      (cons 'dependsOn (vconcat (and deps-raw (split-string deps-raw "[ ]+" t))))
      (cons 'deadlineColor (org-gui--s deadline-color))
      (cons 'calendarId (org-gui--s calendar-id))

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useOrgStore, isGcalAuthExpired, GCAL_AUTH_EXPIRED_MSG } from "../store/useOrgStore";
+import { useOrgStore, isGcalAuthExpired, GCAL_AUTH_EXPIRED_MSG, gcalPushIds } from "../store/useOrgStore";
 import {
   gcalInstall,
   gcalStatus,
@@ -217,7 +217,7 @@ export default function GcalPanel({ onClose }: { onClose: () => void }) {
       // event) so the subsequent fetch can't revert them — org-gcal-sync's own
       // export skips gcal-managed events, so this is the only path that uploads
       // a calendar move.
-      const ghostIds = Object.keys(useOrgStore.getState().gcalGhosts);
+      const ghostIds = gcalPushIds(useOrgStore.getState().gcalGhosts, useOrgStore.getState().doc);
       if (cfg.twoWay && ghostIds.length > 0) {
         setMsg(`Pushing ${ghostIds.length} moved event(s) to Google…`);
         await gcalPush(effClientId, effClientSecret, account, ghostIds, target);

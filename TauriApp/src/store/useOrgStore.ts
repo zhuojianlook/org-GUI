@@ -396,12 +396,28 @@ function reapplyGcalTags<T extends OrgDoc | null | undefined>(doc: T): T {
 // org-gcal :ID:, stable across reparses; node `begin` ids are not).
 export interface GcalGhost {
   orgId: string;
+  /** The org-gcal `:entry-id:` ("<eventId>/<calId>") — what a PUSH looks the
+   *  event up by. Distinct from `orgId`, which is the org `:ID:` when the
+   *  heading has one (a GUI-created task later added to a calendar has BOTH, and
+   *  keying the push by `orgId` then fails with "not found in file"). Optional
+   *  for backward-compat with ghosts saved before this field existed. */
+  entryId?: string;
   calendarId: string;
   title: string;
   startMs: number; // ORIGINAL (Google) start instant
   endMs: number | null; // ORIGINAL end instant (null = a point event)
   hasStartTime: boolean;
   hasEndTime: boolean;
+}
+/** The org-gcal entry-ids a PUSH should target for the pending move-ghosts.
+ *  A ghost is keyed by `orgId` (which may be the org `:ID:`), but Google pushes
+ *  are looked up by `:entry-id:` — so prefer the stored `entryId`, else resolve
+ *  it from the live doc by `orgId` (rescues ghosts saved before `entryId` was
+ *  stored), else fall back to the key. */
+export function gcalPushIds(ghosts: Record<string, GcalGhost>, doc: OrgDoc | null): string[] {
+  return Object.entries(ghosts)
+    .map(([orgId, g]) => g.entryId || doc?.nodes.find((n) => n.orgId === orgId)?.entryId || orgId)
+    .filter((id): id is string => !!id);
 }
 const GCAL_GHOST_KEY = (file: string) => `org-gui:gcalghost:${file}`;
 function loadGcalGhosts(file: string | null): Record<string, GcalGhost> {
@@ -1582,6 +1598,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     if (node.orgId && node.calendarId && !gcalGhosts[node.orgId]) {
       const ghost: GcalGhost = {
         orgId: node.orgId,
+        entryId: node.entryId ?? node.orgId,
         calendarId: node.calendarId,
         title: node.title ?? "(untitled)",
         startMs: orig.startMs,
@@ -1730,7 +1747,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     const syncFile = (file ?? cfg.file ?? "").trim();
     // The pending moves to push = the current ghosts, keyed by org-gcal
     // entry-id (== ghost orgId).
-    const entryIds = Object.keys(get().gcalGhosts);
+    const entryIds = gcalPushIds(get().gcalGhosts, get().doc);
     if (!clientId || !clientSecret || !account || !syncFile) {
       set({
         gcalSyncError:
