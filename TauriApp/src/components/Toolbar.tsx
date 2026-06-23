@@ -151,45 +151,7 @@ export default function Toolbar() {
 
       <Separator />
 
-      {/* ── File ── */}
-      <button onClick={newFile} title="Create a new .org file" style={btn}>
-        📄 New
-      </button>
-      <button onClick={pickFile} title="Open an existing .org file in a new tab" style={btn}>
-        📁 Open
-      </button>
-
-      <Separator />
-
-      {/* ── Edit ── */}
-      <button
-        onClick={() => addHeading(0, "New heading")}
-        title="Add a top-level heading to the current file"
-        style={btn}
-        disabled={!doc}
-      >
-        + Heading
-      </button>
-      <button
-        onClick={() => expandAll()}
-        title="Expand every node (show all children)"
-        style={btn}
-        disabled={!doc}
-      >
-        ⊞ Expand
-      </button>
-      <button
-        onClick={() => collapseAll()}
-        title="Collapse to top-level headings only"
-        style={btn}
-        disabled={!doc}
-      >
-        ⊟ Collapse
-      </button>
-
-      <Separator />
-
-      {/* ── Main view switcher ── */}
+      {/* ── View switcher (primary — what fills the main area) ── */}
       <div
         style={{ display: "inline-flex", border: "1px solid var(--c-border)", borderRadius: 6, overflow: "hidden", flexShrink: 0 }}
         role="group"
@@ -227,33 +189,93 @@ export default function Toolbar() {
 
       <Separator />
 
-      {/* ── View / mode toggles ── */}
-      <button
-        onClick={() => setDepMode(!depMode)}
-        style={{
-          ...btn,
-          ...(depMode
-            ? { background: "#e0a458", color: "#000", borderColor: "#e0a458", fontWeight: 700 }
-            : {}),
-        }}
-        disabled={!doc}
-        title="Dependency mode: drag from a prerequisite onto a dependent to link them; click a link to remove it"
-      >
-        ⇢ Deps
+      {/* ── File ── */}
+      <button onClick={newFile} title="Create a new .org file" style={btn}>
+        📄 New
       </button>
-      <button
-        onClick={() => setBoxDrawMode(!boxDrawMode)}
-        style={{
-          ...btn,
-          ...(boxDrawMode
-            ? { background: "#8ab4f8", color: "#000", borderColor: "#8ab4f8", fontWeight: 700 }
-            : {}),
-        }}
-        disabled={!doc}
-        title="Region mode: drag on the canvas to draw a box. Nodes inside a box stay inside it; drag one well past the edge to release it."
-      >
-        ▭ Region
+      <button onClick={pickFile} title="Open an existing .org file in a new tab" style={btn}>
+        📁 Open
       </button>
+
+      <Separator />
+
+      {/* ── Edit (applies in every view) ── */}
+      <button
+        onClick={() => addHeading(0, "New heading")}
+        title="Add a top-level heading to the current file"
+        style={btn}
+        disabled={!doc}
+      >
+        + Heading
+      </button>
+
+      {/* ── Graph-view tools — only relevant to the node graph, so they're
+            hidden in the Calendar / Timeline views to keep the bar uncluttered. ── */}
+      {mainView === "graph" && (
+        <>
+          <Separator />
+          <button
+            onClick={() => expandAll()}
+            title="Expand every node (show all children)"
+            style={btn}
+            disabled={!doc}
+          >
+            ⊞ Expand
+          </button>
+          <button
+            onClick={() => collapseAll()}
+            title="Collapse to top-level headings only"
+            style={btn}
+            disabled={!doc}
+          >
+            ⊟ Collapse
+          </button>
+          <Separator />
+          <button
+            onClick={() => setDepMode(!depMode)}
+            style={{
+              ...btn,
+              ...(depMode
+                ? { background: "#e0a458", color: "#000", borderColor: "#e0a458", fontWeight: 700 }
+                : {}),
+            }}
+            disabled={!doc}
+            title="Dependency mode: drag from a prerequisite onto a dependent to link them; click a link to remove it"
+          >
+            ⇢ Deps
+          </button>
+          <button
+            onClick={() => setBoxDrawMode(!boxDrawMode)}
+            style={{
+              ...btn,
+              ...(boxDrawMode
+                ? { background: "#8ab4f8", color: "#000", borderColor: "#8ab4f8", fontWeight: 700 }
+                : {}),
+            }}
+            disabled={!doc}
+            title="Region mode: drag on the canvas to draw a box. Nodes inside a box stay inside it; drag one well past the edge to release it."
+          >
+            ▭ Region
+          </button>
+          <button
+            onClick={() => setShowTimeline(!showTimeline)}
+            style={{
+              ...btn,
+              ...(showTimeline
+                ? { background: "var(--c-accent)", color: "#fff", borderColor: "var(--c-accent)", fontWeight: 700 }
+                : {}),
+            }}
+            disabled={!doc}
+            title={showTimeline ? "Hide the time-of-day band above the graph" : "Show the time-of-day band above the graph"}
+          >
+            🗓 Band
+          </button>
+        </>
+      )}
+
+      <Separator />
+
+      {/* ── Tags (colours/filters used across all views) ── */}
       <button
         ref={tagsBtnRef}
         onClick={() => setTagsOpen((v) => !v)}
@@ -272,28 +294,6 @@ export default function Toolbar() {
         title={tagFilter ? `Filtering :${tagFilter}: — click to manage tags` : "Manage tag colours and filters"}
       >
         🏷 {tagFilter ? `:${tagFilter}:` : "Tags"}
-      </button>
-      <button
-        onClick={() => setShowTimeline(!showTimeline)}
-        style={{
-          ...btn,
-          ...(showTimeline
-            ? {
-                background: "var(--c-accent)",
-                color: "#fff",
-                borderColor: "var(--c-accent)",
-                fontWeight: 700,
-              }
-            : {}),
-        }}
-        disabled={!doc}
-        title={
-          showTimeline
-            ? "Hide the calendar timeline strip"
-            : "Show the calendar timeline strip"
-        }
-      >
-        🗓 Timeline
       </button>
       {tagsOpen && (
         <TagsPopover
