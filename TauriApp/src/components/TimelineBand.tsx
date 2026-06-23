@@ -2090,10 +2090,11 @@ export default function TimelineBand() {
             const top = Math.min(yStart, yEnd);
             const height = Math.max(24, Math.abs(yEnd - yStart));
             const w = Math.max(40, Math.min(170, pxPerDay - 6));
-            // Bars are often too narrow to hold the title; let it escape to the
-            // right as a pill so it's always legible (and overflow:visible so
-            // the pill isn't clipped). The time range stays inside the bar.
-            const wideEnough = w >= 104;
+            // Keep ALL text INSIDE the bar (ellipsis-clipped) so a title can
+            // never spill into the neighbouring day column — the full title +
+            // range stays available via the hover tooltip. The time range gets
+            // its own line only when the bar is tall enough for two lines.
+            const tallEnough = height >= 30;
             out.push(
               <button
                 key={`dur${i}`}
@@ -2119,57 +2120,42 @@ export default function TimelineBand() {
                   padding: "3px 6px",
                   fontSize: 11,
                   fontWeight: 600,
-                  overflow: "visible",
+                  overflow: "hidden",
                   cursor: "grab",
                   textAlign: "left",
                   boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
                 }}
               >
-                {wideEnough && (
+                {/* Title — always inside the bar, ellipsis-clipped to its width
+                    so it never escapes into the next column. */}
+                <span
+                  style={{
+                    width: "100%",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    textShadow: "0 1px 2px rgba(0,0,0,0.55)",
+                  }}
+                >
+                  {d.title}
+                </span>
+                {/* Time range — second line, only when the bar is tall enough;
+                    otherwise it's in the tooltip. */}
+                {rangeLabel && tallEnough && (
                   <span
                     style={{
                       width: "100%",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
-                      textShadow: "0 1px 2px rgba(0,0,0,0.55)",
-                    }}
-                  >
-                    {truncated}
-                  </span>
-                )}
-                {rangeLabel && (
-                  <span
-                    style={{
-                      opacity: 0.95,
+                      opacity: 0.9,
+                      fontSize: 10,
                       fontVariantNumeric: "tabular-nums",
                       fontWeight: 600,
                       textShadow: "0 1px 2px rgba(0,0,0,0.6)",
                     }}
                   >
                     {rangeLabel}
-                  </span>
-                )}
-                {!wideEnough && (
-                  <span
-                    style={{
-                      position: "absolute",
-                      top: -1,
-                      left: w + 4,
-                      whiteSpace: "nowrap",
-                      maxWidth: 190,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      fontSize: 11,
-                      fontWeight: 600,
-                      background: "var(--c-bg)",
-                      padding: "0 4px",
-                      borderRadius: 3,
-                      pointerEvents: "none",
-                      boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
-                    }}
-                  >
-                    {truncated}
                   </span>
                 )}
                 {resizable && gripEl("startTime", "top")}
@@ -2340,8 +2326,12 @@ export default function TimelineBand() {
         // uniform across the band.
         const chipWidthAvail = Math.max(20, Math.min(220, pxPerDay - 6));
         type Tier = "full" | "compact" | "dot";
+        // Thresholds tuned so a "compact" chip is ALWAYS wide enough for the
+        // full HH:MM time (≈60px incl. icon + padding) — below that we drop to a
+        // clean dot rather than a half-clipped "09:0". "full" adds the title
+        // once there's room for it too.
         const tier: Tier =
-          chipWidthAvail >= 88 ? "full" : chipWidthAvail >= 44 ? "compact" : "dot";
+          chipWidthAvail >= 96 ? "full" : chipWidthAvail >= 64 ? "compact" : "dot";
 
         type Anchor = (typeof nodeDates)[number] & {
           leftPct: number;
@@ -2468,7 +2458,6 @@ export default function TimelineBand() {
             const titleLimit = chipWidthAvail >= 160 ? 32 : chipWidthAvail >= 104 ? 22 : 15;
             const truncated =
               d.title.length > titleLimit ? d.title.slice(0, titleLimit - 1) + "…" : d.title;
-            const externalLabel = tier === "dot" ? (d.title.length > 22 ? d.title.slice(0, 21) + "…" : d.title) : null;
             out.push(
               <button
                 key={`t${key}`}
@@ -2520,7 +2509,10 @@ export default function TimelineBand() {
                     : d.deadline
                       ? `0 1px 6px ${d.color}aa`
                       : "0 1px 3px rgba(0,0,0,0.4)",
-                  maxWidth: chipWidthAvail,
+                  // Only "full" (which shows a clippable title) is width-capped;
+                  // a "compact" chip sizes to its content so the HH:MM time is
+                  // never half-clipped to "09:0".
+                  maxWidth: tier === "full" ? chipWidthAvail : undefined,
                   overflow: "hidden",
                   userSelect: "none",
                   opacity: outOfWorkHours ? 0.6 : 1,
@@ -2565,7 +2557,10 @@ export default function TimelineBand() {
             );
             // Selected chip → show its FULL (untruncated) title as a pill above
             // it, so even a long or clipped title is always readable.
-            if (isSelected && tier !== "dot" && d.title) {
+            // Render the title pill for a selected chip at EVERY tier — including
+            // dot zoom, where it's the only way to read the title on click (the
+            // pill is pointerEvents:none, so it never blocks dragging).
+            if (isSelected && d.title) {
               out.push(
                 <div
                   key={`sellbl${key}`}
@@ -2668,40 +2663,10 @@ export default function TimelineBand() {
                 />,
               );
             }
-            // In dot mode the chip itself carries only an icon — surface the
-            // task title as a small floating label to the right of the dot so
-            // the user can still read what each indicator is for. pointer-
-            // events:none keeps the label from blocking drag on neighbouring
-            // chips.
-            if (externalLabel) {
-              out.push(
-                <div
-                  key={`tlbl${key}`}
-                  aria-hidden
-                  style={{
-                    position: "absolute",
-                    left: `${left}%`,
-                    top,
-                    transform: "translate(12px, -50%)",
-                    fontSize: 9.5,
-                    color: "var(--c-text-dim)",
-                    background: "rgba(0,0,0,0.25)",
-                    padding: "1px 4px",
-                    borderRadius: 3,
-                    whiteSpace: "nowrap",
-                    pointerEvents: "none",
-                    maxWidth: 140,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    opacity: outOfWorkHours ? 0.55 : 0.85,
-                    zIndex: 1,
-                  }}
-                >
-                  {externalLabel}
-                  {effectiveTime ? ` · ${effectiveTime}` : ""}
-                </div>,
-              );
-            }
+            // At dot zoom the chip is a bare indicator; its full title + time
+            // live in the hover tooltip and the click-to-select pill — we no
+            // longer float a label to the right, which spilled across
+            // neighbouring day columns into an unreadable soup when zoomed out.
           } else {
             // ── Stack chip ────────────────────────────────────────────────
             // Click expands a popover listing each task. Position uses the
@@ -2792,44 +2757,10 @@ export default function TimelineBand() {
                 )}
               </button>,
             );
-            // External label for a dot-mode stack: brief preview of the
-            // first 1-2 titles + the count overflow. Keeps the indicator
-            // tiny while making it readable at a glance.
-            if (tier === "dot") {
-              const previewTitles = chips
-                .slice(0, 2)
-                .map((c) => (c.title.length > 16 ? c.title.slice(0, 15) + "…" : c.title))
-                .join(", ");
-              const more = chips.length > 2 ? ` +${chips.length - 2}` : "";
-              out.push(
-                <div
-                  key={`stklbl${key}`}
-                  aria-hidden
-                  style={{
-                    position: "absolute",
-                    left: `${left}%`,
-                    top,
-                    transform: "translate(14px, -50%)",
-                    fontSize: 9.5,
-                    color: "var(--c-text-dim)",
-                    background: "rgba(0,0,0,0.3)",
-                    padding: "1px 4px",
-                    borderRadius: 3,
-                    whiteSpace: "nowrap",
-                    pointerEvents: "none",
-                    maxWidth: 180,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    opacity: stackOutOfWorkHours ? 0.55 : 0.85,
-                    zIndex: 1,
-                    fontWeight: 600,
-                  }}
-                >
-                  {previewTitles}
-                  {more}
-                </div>,
-              );
-            }
+            // A dot-mode stack shows just its count; the member titles are one
+            // click away in the popover (and on hover). We no longer float a
+            // preview label beside it — at zoomed-out widths it overflowed
+            // across neighbouring columns and collided with other labels.
           }
         }
         return out;
