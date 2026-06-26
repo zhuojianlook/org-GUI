@@ -14,7 +14,7 @@
 ;; Diagnostics only — surfaced in the parse payload so the UI can show which
 ;; bridge the daemon has. NO LONGER the reload gate (see
 ;; `org-gui-bridge--loaded-token'); editing this value does not affect reloads.
-(defconst org-gui-bridge-version "0.2.130")
+(defconst org-gui-bridge-version "0.2.131")
 
 ;; The app (Rust `org_call') writes this to a content-token of the bridge file
 ;; right after `load-file', then gates reloads on it: it reloads only when the

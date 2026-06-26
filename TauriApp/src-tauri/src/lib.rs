@@ -157,6 +157,17 @@ fn detect_doom_dir() -> Option<String> {
     None
 }
 
+/// Whether Doom is actually *installed*, not merely cloned. A bare clone has
+/// `bin/doom` but no package store yet; `doom install` populates `.local/straight`.
+/// Gating on that lets a previously-failed install be retried instead of being
+/// reported as "done".
+fn doom_is_installed(doom_dir: &Option<String>) -> bool {
+    match doom_dir {
+        Some(d) => std::path::Path::new(&format!("{d}/.local/straight")).exists(),
+        None => false,
+    }
+}
+
 /// Detection state for the Setup modal: which prerequisites are present on
 /// this machine and whether the in-app installer can handle this platform.
 #[tauri::command]
@@ -187,7 +198,7 @@ fn check_prereqs() -> PrereqStatus {
         || std::path::Path::new("/usr/local/bin/brew").exists();
 
     let doom_dir = detect_doom_dir();
-    let doom_installed = doom_dir.is_some();
+    let doom_installed = doom_is_installed(&doom_dir);
 
     let can_auto_install = matches!(platform.as_str(), "macos" | "linux");
 

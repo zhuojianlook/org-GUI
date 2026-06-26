@@ -112,15 +112,20 @@ else
 fi
 
 # --- 3/3 Doom Emacs ----------------------------------------------------------
+# "Installed" means the package store (.local/straight) exists — a bare clone
+# (bin/doom present) is NOT enough, so a previously-failed install retries here.
+# `doom --force install` suppresses all prompts (no TTY); --force is a GLOBAL
+# flag and must precede the subcommand. (--no-fonts/--yes were removed in
+# current Doom; --no-hooks skips deploying git hooks into the clone.)
 DOOM_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/emacs"
-if [ ! -f "$DOOM_DIR/bin/doom" ]; then
+if [ ! -d "$DOOM_DIR/.local/straight" ]; then
   log "[3/3] Installing Doom Emacs to $DOOM_DIR …"
-  if [ ! -d "$DOOM_DIR/.git" ]; then
+  if [ ! -x "$DOOM_DIR/bin/doom" ]; then
     rm -rf "$DOOM_DIR"
     git clone --depth=1 https://github.com/doomemacs/doomemacs "$DOOM_DIR"
   fi
   log "Running 'doom install' — downloads packages, byte-compiles. ~5–10 min."
-  "$DOOM_DIR/bin/doom" install --no-fonts --no-hooks --yes
+  "$DOOM_DIR/bin/doom" --force install --no-hooks
   log "Doom installed."
 else
   log "[3/3] Doom: OK ($DOOM_DIR)"
