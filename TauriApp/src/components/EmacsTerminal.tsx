@@ -24,7 +24,15 @@ export default function EmacsTerminal() {
   const file = useOrgStore((s) => s.file);
   const begin = useOrgStore((s) => s.editBegin); // subtree to narrow to (0 = whole file)
   const refreshDoc = useOrgStore((s) => s.refreshDoc);
+  // Bumped on every node double-click (even the already-open node) — the
+  // focus-effect below watches this to re-assert keyboard focus.
+  const editNonce = useOrgStore((s) => s.editNonce);
   const containerRef = useRef<HTMLDivElement>(null);
+  // The live terminal, so we can re-focus it imperatively (without tearing the
+  // PTY down) from outside the open-effect.
+  const termRef = useRef<Terminal | null>(null);
+  // Mirrors `closed` so the focus-effect can read it without re-subscribing.
+  const closedRef = useRef(false);
   // Bumping this re-runs the effect: cleanly closes the current emacsclient -t
   // frame and opens a fresh one. Recovers a wedged frame (e.g. stuck at a
   // minibuffer prompt) WITHOUT restarting the whole daemon.
@@ -35,6 +43,7 @@ export default function EmacsTerminal() {
   useEffect(() => {
     if (!IN_TAURI || !containerRef.current || !file) return;
     setClosed(false);
+    closedRef.current = false;
 
     const term = new Terminal({
       fontSize: 13,
@@ -48,6 +57,7 @@ export default function EmacsTerminal() {
     term.loadAddon(fit);
     term.open(containerRef.current);
     fit.fit();
+    termRef.current = term;
 
     let id: number | null = null;
     // Timestamp of the most recent keystroke sent to the PTY. The idle
@@ -162,6 +172,7 @@ export default function EmacsTerminal() {
       unlistenExit = await listen<number>("emacs-term-exit", () => {
         term.writeln("\r\n\x1b[2m[emacs frame closed — click ↻ Reopen]\x1b[0m");
         setClosed(true);
+        closedRef.current = true;
       });
       if (disposed) return;
       let newId: number;
@@ -215,12 +226,38 @@ export default function EmacsTerminal() {
       unlistenData?.();
       unlistenExit?.();
       term.dispose();
+      if (termRef.current === term) termRef.current = null;
       // One final refresh so the graph picks up whatever the user just
       // committed in the terminal, even if we skipped recent idle ticks
       // because they were typing.
       refreshDoc();
     };
   }, [file, begin, refreshDoc, reopenNonce]);
+
+  // Re-assert keyboard focus on every node double-click (editNonce bumps even
+  // when the same, already-open node is re-opened — which leaves file/begin
+  // unchanged, so the open-effect above does NOT re-run). Without this, a
+  // double-click moves DOM focus to the graph node and nothing hands it back to
+  // the terminal: the node renders but keystrokes go nowhere. If the frame has
+  // exited in the meantime, reopen it (which focuses the fresh frame) rather
+  // than focusing a dead terminal. rAF so we win over the click's own focus.
+  useEffect(() => {
+    if (!IN_TAURI) return;
+    if (closedRef.current) {
+      setReopenNonce((n) => n + 1);
+      return;
+    }
+    const t = termRef.current;
+    if (!t) return;
+    const raf = requestAnimationFrame(() => {
+      try {
+        t.focus();
+      } catch {
+        /* terminal disposed mid-frame — the open-effect will focus the new one */
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [editNonce]);
 
   const reopen = () => setReopenNonce((n) => n + 1);
 

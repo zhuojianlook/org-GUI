@@ -824,6 +824,12 @@ interface OrgState {
   contextMenu: ContextMenuState | null;
   dropTargetId: string | null;
   editBegin: number; // subtree the Emacs sidebar narrows to (0 = whole file)
+  // Bumped on every editInEmacs() (i.e. every node double-click), even when the
+  // same node is re-opened. The embedded terminal watches this to re-assert
+  // keyboard focus — a double-click on the already-open node doesn't change
+  // editBegin, so without this the terminal would stay unfocused (the node
+  // shows but you can't type). See EmacsTerminal.
+  editNonce: number;
   panel: PanelTab; // right-side pull-out panel
   // True while a canvas node is being dragged over the Today panel's drop zone,
   // so the zone can highlight itself as a live drop target.
@@ -1029,6 +1035,7 @@ export const useOrgStore = create<OrgState>((set, get) => ({
   contextMenu: null,
   dropTargetId: null,
   editBegin: 0,
+  editNonce: 0,
   panel: null,
   todayDropActive: false,
   depMode: false,
@@ -1445,7 +1452,8 @@ export const useOrgStore = create<OrgState>((set, get) => ({
     }
   },
 
-  editInEmacs: (node) => set({ selectedId: node.id, editBegin: node.begin, panel: "emacs" }),
+  editInEmacs: (node) =>
+    set((s) => ({ selectedId: node.id, editBegin: node.begin, panel: "emacs", editNonce: s.editNonce + 1 })),
 
   toggleExpand: (id) =>
     set((s) => {
