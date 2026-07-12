@@ -203,15 +203,24 @@ function daysForZoom(z: ZoomLevel): number | null {
   return ZOOMS.find((x) => x.id === z)?.days ?? null;
 }
 
-/** Default Fit window — wraps all relevant dates with ~1 month padding. */
+/** Default Fit window — wraps all relevant dates with breathing room. Padding
+ *  is week-aligned (Mondays) so the day gridlines start on clean boundaries.
+ *  Kept TIGHT on purpose: the old version padded a whole month before and two
+ *  after (≥90 days minimum), which halved px-per-day at Fit and squeezed every
+ *  entry into an unreadable smear. */
 function autoFitRange(dates: number[]): [number, number] {
   const today = startOfDay(new Date()).getTime();
   const all = dates.length ? [...dates, today] : [today];
-  const min = new Date(Math.min(...all));
-  const max = new Date(Math.max(...all));
-  const start = new Date(min.getFullYear(), min.getMonth() - 1, 1).getTime();
-  let end = new Date(max.getFullYear(), max.getMonth() + 2, 1).getTime();
-  if (end - start < 60 * MS_DAY) end = start + 90 * MS_DAY;
+  const min = Math.min(...all);
+  const max = Math.max(...all);
+  const mondayOnOrBefore = (ms: number) => {
+    const d = new Date(ms);
+    const dow = (d.getDay() + 6) % 7; // Mon=0 … Sun=6
+    return startOfDay(new Date(ms - dow * MS_DAY)).getTime();
+  };
+  const start = mondayOnOrBefore(min - 3 * MS_DAY);
+  let end = mondayOnOrBefore(max + 10 * MS_DAY) + 7 * MS_DAY;
+  if (end - start < 42 * MS_DAY) end = start + 42 * MS_DAY;
   return [start, end];
 }
 
@@ -305,6 +314,20 @@ export default function TimelineBand() {
     try {
       localStorage.setItem("org-gui:workHours", workHoursMode ? "1" : "0");
     } catch {}
+  }, [workHoursMode]);
+  // Start the band's vertical scroll at the working day (~08:00), not 00:00.
+  // The time content is much taller than the visible band, and with scrollTop
+  // left at 0 the default view showed the 00:00–06:00 dead zone — i.e. an
+  // empty-looking band with every real entry below the fold. (This effect must
+  // sit AFTER the workHoursMode declaration above: its dependency array is
+  // evaluated during render, and reading the const before its declaration is a
+  // TDZ ReferenceError + TS2448.)
+  useEffect(() => {
+    const el = railRef.current;
+    if (!el) return;
+    const h = timeContentHeight(workHoursMode);
+    const y = yForTimeOfDay("08:00", h, workHoursMode);
+    el.scrollTop = Math.max(0, y - 96);
   }, [workHoursMode]);
   // Live wall-clock tick used by the TODAY marker so the vertical line
   // advances through the day (and its label reads HH:MM:SS). One-second
@@ -597,6 +620,73 @@ export default function TimelineBand() {
     return startOfDay(new Date(startMs + p * span));
   };
 
+  // ── ALL-DAY STRIP ─────────────────────────────────────────────────────────
+  // Date-only entries (no time-of-day — most DEADLINEs, plain scheduled dates,
+  // and all-day multi-day events) have no meaningful position on the band's
+  // time-of-day Y axis. They used to be dumped at an arbitrary mid-band Y —
+  // which sits below the visible fold at default scroll, so they were both
+  // invisible by default AND a single-pixel pile-up when scrolled to. Instead
+  // they now live in a compact strip pinned to the top of the band (an overlay,
+  // so it stays put while the time zone scrolls): single dates as small labelled
+  // pills (overlapping pills merge into a ×N badge that opens the stack
+  // popover), multi-day all-day events as thin lane-packed span bars.
+  const stripLayout = useMemo(() => {
+    type ND = (typeof nodeDates)[number];
+    const railW = railWidth || 800;
+    const xOf = (ms: number) => ((ms - startMs) / span) * railW;
+    const singles: { d: ND; xPx: number; wPx: number }[] = [];
+    const spans: { d: ND; xPx: number; wPx: number }[] = [];
+    for (const d of nodeDates) {
+      const isMultiDay = d.msEnd != null && d.msEnd > d.ms;
+      if (isMultiDay) {
+        // Timed multi-day events render as the staircase in the time zone.
+        if (d.timeOfDay && d.timeOfDayEnd) continue;
+        const x = xOf(d.ms);
+        // An all-day end covers the WHOLE last day — extend one day.
+        const end = xOf((d.msEnd as number) + MS_DAY);
+        if (end < -40 || x > railW + 40) continue;
+        spans.push({ d, xPx: x, wPx: Math.max(24, end - x) });
+      } else {
+        if (d.timeOfDay) continue; // timed entries belong to the time zone
+        const x = xOf(d.ms);
+        if (x < -40 || x > railW + 40) continue;
+        const wPx = Math.max(20, Math.min(96, 26 + d.title.length * 5.5));
+        singles.push({ d, xPx: x, wPx });
+      }
+    }
+    singles.sort((a, b) => a.xPx - b.xPx);
+    // 1-D clustering: pills that would overlap merge into one ×N badge, so the
+    // single-date row NEVER overlaps by construction.
+    const BADGE_W = 34;
+    const groups: { items: { d: ND; xPx: number; wPx: number }[]; xPx: number; endPx: number }[] = [];
+    for (const s of singles) {
+      const g = groups[groups.length - 1];
+      if (g && s.xPx <= g.endPx + 4) {
+        g.items.push(s);
+        g.endPx = Math.max(g.endPx, g.xPx + BADGE_W);
+      } else {
+        groups.push({ items: [s], xPx: s.xPx, endPx: s.xPx + s.wPx });
+      }
+    }
+    // Span bars: greedy 2-lane packing; deeper overlap clamps into the last
+    // lane (rare — and the bars are translucent, so a clamp stays readable).
+    spans.sort((a, b) => a.xPx - b.xPx);
+    const laneEnds: number[] = [];
+    const placedSpans = spans.map((sp) => {
+      let lane = 0;
+      while (lane < laneEnds.length && sp.xPx < laneEnds[lane] + 4) lane++;
+      if (lane > 1) lane = 1;
+      laneEnds[lane] = Math.max(laneEnds[lane] ?? 0, sp.xPx + sp.wPx);
+      return { ...sp, lane };
+    });
+    const spanLanes = placedSpans.length ? Math.max(...placedSpans.map((s) => s.lane)) + 1 : 0;
+    const stripH =
+      groups.length || spanLanes
+        ? 6 + (groups.length ? 20 : 0) + spanLanes * 16 + 2
+        : 0;
+    return { groups, spans: placedSpans, stripH, hasSingles: groups.length > 0 };
+  }, [nodeDates, startMs, span, railWidth]);
+
   const beginEdit = (id: string, label: string) => {
     setEditing(id);
     setDraft(label);
@@ -751,8 +841,8 @@ export default function TimelineBand() {
     nodeId: string;
     isDeadline: boolean;
     ms: number; // start-of-day of the preview date
-    timeOfDay: string; // "HH:MM"
-    iso: string; // "YYYY-MM-DD HH:MM" handed to scheduleNode
+    timeOfDay: string | null; // "HH:MM", or null for an all-day (date-only) entry
+    iso: string; // "YYYY-MM-DD HH:MM" — or bare "YYYY-MM-DD" when all-day
   } | null>(null);
   // Mirror of pendingNudge so commit() (fired from keyup/blur/idle) can read
   // the latest value synchronously without going through a state updater.
@@ -839,9 +929,11 @@ export default function TimelineBand() {
       const sel = timelineSelectedChip;
       setPendingNudge((cur) => {
         // Base to shift FROM: the current preview if we already have one for
-        // this chip, else the chip's committed value in the doc.
+        // this chip, else the chip's committed value in the doc. allDay
+        // (date-only) entries carry timeOfDay === null through the preview so
+        // an arrow-nudge never silently stamps a time onto them.
         let baseMs: number;
-        let baseTime: string;
+        let baseTime: string | null;
         if (cur && cur.nodeId === sel.nodeId && cur.isDeadline === sel.isDeadline) {
           baseMs = cur.ms;
           baseTime = cur.timeOfDay;
@@ -858,13 +950,26 @@ export default function TimelineBand() {
           const parsed = parseOrgDate(isoNow);
           if (!parsed) return cur; // nothing to nudge from
           baseMs = startOfDay(parsed).getTime();
-          baseTime = timeOfDayFromIso(isoNow) ?? "12:00";
+          baseTime = timeOfDayFromIso(isoNow);
         }
-        const [hh, mm] = baseTime.split(":").map((s) => parseInt(s, 10));
-        const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
+        const allDay = baseTime === null;
+        // ArrowUp/Down changes the TIME — meaningless for an all-day entry;
+        // ignore it rather than invent a time.
+        if (allDay && dminutes !== 0) return cur;
         const nd = new Date(baseMs);
         nd.setHours(0, 0, 0, 0);
         nd.setDate(nd.getDate() + ddate);
+        if (allDay) {
+          return {
+            nodeId: sel.nodeId,
+            isDeadline: sel.isDeadline,
+            ms: startOfDay(nd).getTime(),
+            timeOfDay: null,
+            iso: isoOf(nd),
+          };
+        }
+        const [hh, mm] = (baseTime as string).split(":").map((s) => parseInt(s, 10));
+        const baseMin = (Number.isFinite(hh) ? hh : 12) * 60 + (Number.isFinite(mm) ? mm : 0);
         const wrapped = ((baseMin + dminutes) % 1440 + 1440) % 1440;
         const nh = Math.floor(wrapped / 60);
         const nm = wrapped % 60;
@@ -1058,7 +1163,9 @@ export default function TimelineBand() {
    *  scheduled/deadline date via the bridge. */
   const onChipDown = (
     e: React.PointerEvent,
-    info: { nodeId: string; deadline: boolean; title: string; color: string },
+    // allDay: the chip has no time-of-day (it lives in the all-day strip) —
+    // dragging it moves the DATE only, without stamping a time onto it.
+    info: { nodeId: string; deadline: boolean; title: string; color: string; allDay?: boolean },
   ) => {
     e.stopPropagation();
     const startX = e.clientX;
@@ -1072,12 +1179,12 @@ export default function TimelineBand() {
       const r = railRef.current?.getBoundingClientRect();
       if (!r) return;
       const dt = dateAtClientX(ev.clientX);
-      const time = timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode);
+      const time = info.allDay ? "" : timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode);
       setChipGhost({
         ...info,
         x: ev.clientX,
         y: ev.clientY,
-        iso: `${isoOf(dt)} ${time}`,
+        iso: info.allDay ? isoOf(dt) : `${isoOf(dt)} ${time}`,
         time,
       });
     };
@@ -1100,8 +1207,9 @@ export default function TimelineBand() {
       const r = railRef.current?.getBoundingClientRect();
       if (!r) return;
       const dt = dateAtClientX(ev.clientX);
-      const time = timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode);
-      const dateStr = `${isoOf(dt)} ${time}`;
+      const dateStr = info.allDay
+        ? isoOf(dt)
+        : `${isoOf(dt)} ${timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode)}`;
       void commitPointMove(node, dateStr, info.deadline ? "deadline" : "scheduled");
     };
     window.addEventListener("pointermove", move);
@@ -1946,7 +2054,12 @@ export default function TimelineBand() {
                     boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
                   }}
                 >
-                  {isFirst && (
+                  {/* Floating start/end labels are nowrap text hanging OUTSIDE
+                      an ~8px column with no collision avoidance — at zoomed-out
+                      widths they smear across neighbouring bars and each other.
+                      Gate them on the same density threshold as the axis day
+                      labels; the full title + range stays in the tooltip. */}
+                  {isFirst && pxPerDay >= 26 && (
                     <span
                       style={{
                         position: "absolute",
@@ -1968,7 +2081,7 @@ export default function TimelineBand() {
                       {effStartTime} {truncated}
                     </span>
                   )}
-                  {isLast && (
+                  {isLast && pxPerDay >= 26 && (
                     <span
                       style={{
                         position: "absolute",
@@ -2059,25 +2172,12 @@ export default function TimelineBand() {
                   boxShadow: isSelected ? "0 0 0 2px rgba(255,209,102,0.5)" : "none",
                 }}
               >
-                <span
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 5,
-                    padding: "2px 8px",
-                    fontSize: 10.5,
-                    fontWeight: 600,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    background: hexToRgba(firstTagColor ?? d.color, 0.5),
-                    borderTopLeftRadius: 5,
-                    borderTopRightRadius: 5,
-                  }}
-                >
-                  <span aria-hidden style={{ flexShrink: 0, opacity: 0.85 }}>▦</span>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{truncated}</span>
-                </span>
+                {/* No in-block title header any more: overlapping all-day
+                    events' headers all sat at the same Y and superimposed
+                    exactly. The title now lives in this event's bar in the
+                    pinned ALL-DAY strip (readable at every zoom) + the hover
+                    tooltip; the block itself is the translucent "these days
+                    are taken" wash plus the drag/resize surface. */}
                 {resizable && gripEl("startDate", "left")}
                 {resizable && gripEl("endDate", "right")}
               </button>,
@@ -2089,7 +2189,14 @@ export default function TimelineBand() {
             const yEnd = yForTimeOfDay(effEndTime, bandH, workHoursMode);
             const top = Math.min(yStart, yEnd);
             const height = Math.max(24, Math.abs(yEnd - yStart));
-            const w = Math.max(40, Math.min(170, pxPerDay - 6));
+            // Bar width tracks the day column. The old hard 40 px floor meant
+            // that at zoomed-out widths (Fit ≈ 10–15 px/day) every bar covered
+            // 3+ day columns and neighbouring bars stacked into a solid wall.
+            const w =
+              pxPerDay >= 46
+                ? Math.min(170, pxPerDay - 6)
+                : Math.max(10, Math.min(40, Math.round(pxPerDay * 0.9)));
+            const showBarText = w >= 34;
             // Keep ALL text INSIDE the bar (ellipsis-clipped) so a title can
             // never spill into the neighbouring day column — the full title +
             // range stays available via the hover tooltip. The time range gets
@@ -2117,7 +2224,7 @@ export default function TimelineBand() {
                   alignItems: "flex-start",
                   justifyContent: "center",
                   gap: 1,
-                  padding: "3px 6px",
+                  padding: showBarText ? "3px 6px" : 0,
                   fontSize: 11,
                   fontWeight: 600,
                   overflow: "hidden",
@@ -2127,21 +2234,24 @@ export default function TimelineBand() {
                 }}
               >
                 {/* Title — always inside the bar, ellipsis-clipped to its width
-                    so it never escapes into the next column. */}
-                <span
-                  style={{
-                    width: "100%",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    textShadow: "0 1px 2px rgba(0,0,0,0.55)",
-                  }}
-                >
-                  {d.title}
-                </span>
+                    so it never escapes into the next column. Hidden entirely on
+                    the slim zoomed-out bars (tooltip carries it). */}
+                {showBarText && (
+                  <span
+                    style={{
+                      width: "100%",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      textShadow: "0 1px 2px rgba(0,0,0,0.55)",
+                    }}
+                  >
+                    {d.title}
+                  </span>
+                )}
                 {/* Time range — second line, only when the bar is tall enough;
                     otherwise it's in the tooltip. */}
-                {rangeLabel && tallEnough && (
+                {rangeLabel && tallEnough && showBarText && (
                   <span
                     style={{
                       width: "100%",
@@ -2197,7 +2307,12 @@ export default function TimelineBand() {
             !!gStartTime &&
             !!gEndTime &&
             startOfDay(new Date(g.startMs)).getTime() === startOfDay(new Date(g.endMs)).getTime();
-          const ghostW = Math.max(36, Math.min(120, pxPerDay - 6));
+          // Track the day column like the bars do — the old 36 px floor made
+          // every ghost span multiple day columns at zoomed-out widths.
+          const ghostW =
+            pxPerDay >= 42
+              ? Math.min(120, pxPerDay - 6)
+              : Math.max(10, Math.min(36, Math.round(pxPerDay * 0.9)));
           let ghostTop: number;
           let ghostH: number;
           if (sameDayTimed) {
@@ -2261,18 +2376,20 @@ export default function TimelineBand() {
                 overflow: "visible",
               }}
             >
-              <span
-                aria-hidden
-                style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: "rgba(255,209,102,0.95)",
-                  textShadow: "0 1px 2px rgba(0,0,0,0.6)",
-                  pointerEvents: "none",
-                }}
-              >
-                ⟳
-              </span>
+              {ghostW >= 20 && (
+                <span
+                  aria-hidden
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: "rgba(255,209,102,0.95)",
+                    textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+                    pointerEvents: "none",
+                  }}
+                >
+                  ⟳
+                </span>
+              )}
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -2319,7 +2436,7 @@ export default function TimelineBand() {
         const railWidthPx = railWidth || railRef.current?.getBoundingClientRect().width || 800;
         const bandH = timeContentH;
         const CLUSTER_X_PX = 22; // ~one chip width on a typical 1Y zoom
-        const CLUSTER_Y_PX = 16; // chip height ≈ 18 px → overlap if within this
+        const CLUSTER_Y_PX = 20; // chip height ≈ 18 px → cluster anything touching
 
         // Per-day-cell rendering tier based on horizontal room. Same value
         // is used by every singleton + stack chip below so the look is
@@ -2344,6 +2461,9 @@ export default function TimelineBand() {
           // Duration items render as bars in their own layer below — skip
           // them here so they don't also appear as point chips.
           if (hasDuration(d)) continue;
+          // Date-only chips live in the pinned ALL-DAY strip overlay — the
+          // time-of-day Y axis has no meaningful position for them.
+          if (!d.timeOfDay) continue;
           const leftPct = pct(d.ms);
           if (leftPct < -5 || leftPct > 105) continue;
           visible.push({
@@ -2356,16 +2476,19 @@ export default function TimelineBand() {
         // Sort by x then y so the greedy clustering below is stable.
         visible.sort((a, b) => a.leftPx - b.leftPx || a.topPx - b.topPx);
 
-        // Greedy pixel-proximity clustering. Same deadline-flag only — we
-        // don't want a deadline pin merging with a scheduled chip even if
-        // they coincidentally land in the same pixel.
+        // Greedy pixel-proximity clustering. At readable zooms we keep
+        // deadlines and scheduled chips in separate clusters (a deadline pin
+        // shouldn't merge with a scheduled chip). At dot zoom that separation
+        // guarantees two fully-coincident 16 px dots whenever a deadline and a
+        // scheduled item share a spot — so there we merge everything and let
+        // the badge's red border carry the "contains a deadline" signal.
         const clusters: Anchor[][] = [];
         const centers: { x: number; y: number; deadline: boolean }[] = [];
         for (const c of visible) {
           let placed = false;
           for (let i = 0; i < clusters.length; i++) {
             const bc = centers[i];
-            if (bc.deadline !== c.deadline) continue;
+            if (tier !== "dot" && bc.deadline !== c.deadline) continue;
             if (
               Math.abs(bc.x - c.leftPx) <= CLUSTER_X_PX &&
               Math.abs(bc.y - c.topPx) <= CLUSTER_Y_PX
@@ -2400,7 +2523,10 @@ export default function TimelineBand() {
         const LANE_H = 19; // px between lanes
         const laneClusters: Anchor[][] = [];
         for (const chips of clusters) {
-          if (chips.length >= 2 && chips.length <= LANE_MAX) {
+          // At dot zoom, spreading a pile into lanes just relocates unlabelled
+          // dots on top of NEIGHBOURING clusters (the spread never re-checks
+          // collisions) — a ×N badge is strictly more readable there.
+          if (tier !== "dot" && chips.length >= 2 && chips.length <= LANE_MAX) {
             const sorted = [...chips].sort(
               (a, b) => a.topPx - b.topPx || (a.title < b.title ? -1 : 1),
             );
@@ -2703,7 +2829,13 @@ export default function TimelineBand() {
                   if (isOpen) setStackPopover(null);
                   else setStackPopover({ key, x: e.clientX, y: e.clientY });
                 }}
-                title={`${chips.length} tasks ${allDeadlines ? "due" : "scheduled"} near this point${
+                title={`${chips.length} tasks ${
+                  allDeadlines
+                    ? "due"
+                    : chips.some((c) => c.deadline)
+                      ? "due / scheduled"
+                      : "scheduled"
+                } near this point${
                   allSameTime ? " @ " + chips[0].timeOfDay : ""
                 } — click to expand`}
                 style={{
@@ -2721,7 +2853,13 @@ export default function TimelineBand() {
                   borderRadius: 999,
                   background: chipBackground(aggTags, tagColors, 0.85),
                   color: "#1c1c1e",
-                  border: isOpen ? "2px solid #ffd166" : "1px solid rgba(0,0,0,0.4)",
+                  // Red ring = the pile contains at least one deadline (matters
+                  // at dot zoom, where mixed clusters merge into one badge).
+                  border: isOpen
+                    ? "2px solid #ffd166"
+                    : chips.some((c) => c.deadline)
+                      ? "1.5px solid rgba(255,108,107,0.9)"
+                      : "1px solid rgba(0,0,0,0.4)",
                   cursor: "pointer",
                   fontSize: tier === "dot" ? 9.5 : 10.5,
                   fontWeight: 800,
@@ -2916,58 +3054,70 @@ export default function TimelineBand() {
 
       {/* TODAY marker — vertical line at the current wall-clock instant.
           The line advances through the day on a 1 s tick (subtle but
-          real: a few px/min at 1W zoom), and the label reads HH:MM:SS so
-          you can see it moving. Z-index 0 keeps it BEHIND task chips and
-          milestone pins so the marker doesn't visually punch through
-          deadline/scheduled indicators. */}
+          real: a few px/min at 1W zoom). Z-index 0 keeps it BEHIND task
+          chips so the marker doesn't visually punch through indicators.
+          (The HH:MM:SS label lives in the pinned overlay below the rail,
+          so it stays visible at any vertical scroll.) */}
+      {nowMs >= startMs && nowMs <= endMs && (
+        <div
+          style={{
+            position: "absolute",
+            left: `${pct(nowMs)}%`,
+            top: 24,
+            bottom: 18,
+            width: 2,
+            marginLeft: -1,
+            background: "#e0a458",
+            zIndex: 0,
+            pointerEvents: "none",
+          }}
+        />
+      )}
+
+        </div>
+      </div>
+
+      {/* ── PINNED OVERLAY: milestone pins + TODAY label ─────────────────────
+          These live OUTSIDE the vertically-scrollable rail so they stay put
+          while the time zone scrolls (the default scroll starts at ~08:00,
+          which would otherwise hide every flag above the fold). Container is
+          pointer-transparent; the flags re-enable pointer events themselves.
+          Pin drags are x-only (dateAtClientX), so leaving the scroll content
+          changes nothing about their interactions. */}
+      <div style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 8 }}>
       {nowMs >= startMs && nowMs <= endMs && (() => {
         const nowDate = new Date(nowMs);
         const hh = String(nowDate.getHours()).padStart(2, "0");
         const mm = String(nowDate.getMinutes()).padStart(2, "0");
         const ss = String(nowDate.getSeconds()).padStart(2, "0");
         return (
-          <>
-            <div
-              style={{
-                position: "absolute",
-                left: `${pct(nowMs)}%`,
-                top: 24,
-                bottom: 18,
-                width: 2,
-                marginLeft: -1,
-                background: "#e0a458",
-                zIndex: 0,
-                pointerEvents: "none",
-              }}
-            />
-            <div
-              style={{
-                position: "absolute",
-                left: `${pct(nowMs)}%`,
-                top: 28,
-                transform: "translateX(4px)",
-                fontSize: 9,
-                color: "#e0a458",
-                fontWeight: 700,
-                fontFamily: "ui-monospace, monospace",
-                fontVariantNumeric: "tabular-nums",
-                zIndex: 0,
-                pointerEvents: "none",
-                whiteSpace: "nowrap",
-              }}
-            >
-              TODAY {hh}:{mm}:{ss}
-            </div>
-          </>
+          <div
+            style={{
+              position: "absolute",
+              left: `${pct(nowMs)}%`,
+              top: 28 + stripLayout.stripH,
+              transform: "translateX(4px)",
+              fontSize: 9,
+              color: "#e0a458",
+              fontWeight: 700,
+              fontFamily: "ui-monospace, monospace",
+              fontVariantNumeric: "tabular-nums",
+              pointerEvents: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            TODAY {hh}:{mm}:{ss}
+          </div>
         );
       })()}
-
       {/* Milestone pins — greedy lane assignment so close-by dates stagger
           vertically instead of overlapping their labels. Click ⚑ to recolour,
           drag the pin to move, double-click to rename, ✕ to remove. */}
       {(() => {
         const railWidth = railRef.current?.getBoundingClientRect().width ?? 800;
-        const PIN_BASE_TOP = 44;
+        // Clear the pinned all-day strip overlay so flags aren't hidden
+        // underneath it when the band is scrolled to the top.
+        const PIN_BASE_TOP = 44 + stripLayout.stripH;
         const PIN_LANE_H = 26;
         const MAX_PIN_LANES = 5;
         // Per-pin flag width estimate: enough room for the flag icon (~16),
@@ -3021,7 +3171,7 @@ export default function TimelineBand() {
           const color = m.color || MILESTONE_COLOR;
           const topPx = PIN_BASE_TOP + lane * PIN_LANE_H;
           return (
-            <div key={m.id} data-pin style={{ position: "absolute", left: `${leftPct}%`, top: topPx, bottom: 18, width: 0 }}>
+            <div key={m.id} data-pin style={{ position: "absolute", left: `${leftPct}%`, top: topPx, bottom: 18, width: 0, pointerEvents: "none" }}>
               {/* stem reaches from below the date label down to the month axis
                   regardless of which lane the flag occupies */}
               <div style={{ position: "absolute", top: 32, bottom: 0, left: 0, width: 2, marginLeft: -1, background: color, opacity: 0.8 }} />
@@ -3036,6 +3186,7 @@ export default function TimelineBand() {
                   position: "absolute",
                   top: 0,
                   left: 0,
+                  pointerEvents: "auto",
                   transform: "translateX(-50%)",
                   display: "flex",
                   alignItems: "center",
@@ -3107,7 +3258,13 @@ export default function TimelineBand() {
                     style={{ width: 90, border: "none", outline: "none", background: "rgba(0,0,0,0.15)", color: "#1c1c1e", borderRadius: 2, font: "inherit", padding: "0 2px" }}
                   />
                 ) : (
-                  <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>{m.label || "(unnamed)"}</span>
+                  // Overflow pins (more pins than lanes) share their lane with
+                  // another flag at the same x — showing the label there means
+                  // two labels printed on top of each other. Collapse to a bare
+                  // ⚑ flag; the label stays in the tooltip.
+                  !overflow && (
+                    <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>{m.label || "(unnamed)"}</span>
+                  )
                 )}
                 <button
                   onClick={(e) => {
@@ -3156,8 +3313,223 @@ export default function TimelineBand() {
           Double-click to drop a milestone · double-click a tick to focus that node
         </div>
       )}
-        </div>
       </div>
+
+      {/* ── ALL-DAY STRIP (overlay) ──────────────────────────────────────────
+          Pinned under the toolbar, OVER the scrollable rail, so date-only
+          entries are always visible no matter where the time zone is scrolled.
+          Empty areas are pointer-transparent — panning / double-click-to-add
+          on the rail still work through the strip. */}
+      {stripLayout.stripH > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            top: 26,
+            left: 0,
+            right: 0,
+            height: stripLayout.stripH,
+            zIndex: 9,
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              inset: 0,
+              background: "var(--c-surface)",
+              opacity: 0.92,
+              borderBottom: "1px solid var(--c-border)",
+              boxShadow: "0 2px 6px rgba(0,0,0,0.25)",
+            }}
+          />
+          <span
+            aria-hidden
+            style={{
+              position: "absolute",
+              left: 4,
+              top: 5,
+              fontSize: 8.5,
+              fontWeight: 700,
+              letterSpacing: 0.4,
+              textTransform: "uppercase",
+              color: "var(--c-text-dim)",
+              opacity: 0.55,
+              pointerEvents: "none",
+            }}
+          >
+            all-day
+          </span>
+          {/* Single-date pills / ×N badges (never overlap — merged upstream) */}
+          {stripLayout.groups.map((g) => {
+            if (g.items.length === 1) {
+              const { d, xPx, wPx } = g.items[0];
+              const isDeadline = d.deadline;
+              const isOverdue = isDeadline && d.ms <= todayMs;
+              const isSelected =
+                timelineSelectedChip != null &&
+                timelineSelectedChip.nodeId === d.nodeId &&
+                timelineSelectedChip.isDeadline === d.deadline;
+              // Optimistic arrow-key nudge preview (date-only: ← → moves the
+              // date; ↑ ↓ is a no-op for all-day entries).
+              const nudge =
+                pendingNudge != null &&
+                pendingNudge.nodeId === d.nodeId &&
+                pendingNudge.isDeadline === d.deadline
+                  ? pendingNudge
+                  : null;
+              const xEff = nudge ? ((nudge.ms - startMs) / span) * (railWidth || 800) : xPx;
+              return (
+                <button
+                  key={`strip-${d.nodeId}-${isDeadline ? "d" : "s"}`}
+                  className={isOverdue ? "deadline-flash" : undefined}
+                  data-pin
+                  onPointerDown={(e) =>
+                    onChipDown(e, {
+                      nodeId: d.nodeId,
+                      deadline: d.deadline,
+                      title: d.title,
+                      color: d.color,
+                      allDay: true,
+                    })
+                  }
+                  title={`${isDeadline ? "⚑ Deadline" : "⏱ Scheduled"} (all-day): ${d.title}\nClick to select (← → nudge the date), drag to reschedule`}
+                  style={{
+                    position: "absolute",
+                    left: xEff,
+                    top: 4,
+                    height: 17,
+                    maxWidth: wPx,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 3,
+                    padding: "0 5px",
+                    borderRadius: 5,
+                    background: chipBackground(d.tagsAll, tagColors, isSelected ? 0.62 : 0.5),
+                    color: "var(--c-text)",
+                    textShadow: "0 1px 2px rgba(0,0,0,0.7)",
+                    border: isSelected
+                      ? "2px solid #ffd166"
+                      : isDeadline
+                        ? "1px solid rgba(255,108,107,0.85)"
+                        : "1px solid rgba(0,0,0,0.3)",
+                    fontSize: 9.5,
+                    fontWeight: 700,
+                    lineHeight: 1,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    cursor: "grab",
+                    userSelect: "none",
+                    pointerEvents: "auto",
+                  }}
+                >
+                  <span aria-hidden style={{ fontSize: 9, flexShrink: 0 }}>
+                    {isDeadline ? "⚑" : "▪"}
+                  </span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{d.title}</span>
+                </button>
+              );
+            }
+            // ×N badge → opens the same stack popover the time zone uses.
+            const key = g.items
+              .map((s) => `${s.d.nodeId}:${s.d.deadline ? "d" : "s"}`)
+              .sort()
+              .join(",");
+            const anyDeadline = g.items.some((s) => s.d.deadline);
+            const anyOverdue = g.items.some((s) => s.d.deadline && s.d.ms <= todayMs);
+            const isOpen = stackPopover?.key === key;
+            return (
+              <button
+                key={`stripstk-${key}`}
+                className={anyOverdue ? "deadline-flash" : undefined}
+                data-pin
+                data-stack-chip
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (isOpen) setStackPopover(null);
+                  else setStackPopover({ key, x: e.clientX, y: e.clientY });
+                }}
+                title={`${g.items.length} all-day ${anyDeadline ? "items (incl. deadlines)" : "items"} — click to expand`}
+                style={{
+                  position: "absolute",
+                  left: g.xPx,
+                  top: 4,
+                  height: 17,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 3,
+                  padding: "0 6px",
+                  borderRadius: 999,
+                  background: "var(--c-surface2, rgba(120,124,136,0.9))",
+                  color: "var(--c-text)",
+                  border: isOpen
+                    ? "2px solid #ffd166"
+                    : anyDeadline
+                      ? "1.5px solid rgba(255,108,107,0.9)"
+                      : "1px solid rgba(0,0,0,0.4)",
+                  fontSize: 9.5,
+                  fontWeight: 800,
+                  lineHeight: 1,
+                  whiteSpace: "nowrap",
+                  cursor: "pointer",
+                  userSelect: "none",
+                  pointerEvents: "auto",
+                }}
+              >
+                <span aria-hidden style={{ fontSize: 9, flexShrink: 0 }}>
+                  {anyDeadline ? "⚑" : "▪"}
+                </span>
+                <span style={{ fontVariantNumeric: "tabular-nums" }}>×{g.items.length}</span>
+              </button>
+            );
+          })}
+          {/* Multi-day all-day span bars, lane-packed */}
+          {stripLayout.spans.map(({ d, xPx, wPx, lane }) => {
+            const isSelected = selectedSpanId === d.nodeId;
+            const firstTagColor = d.tagsAll.map((t) => tagColors[t]).find(Boolean);
+            const top = 4 + (stripLayout.hasSingles ? 20 : 0) + lane * 16;
+            return (
+              <button
+                key={`stripspan-${d.nodeId}`}
+                data-pin
+                onPointerDown={(e) => onBarDown(e, d)}
+                title={`${d.title}\n${d.iso} (all-day span — drag to move; resize on the block below)`}
+                style={{
+                  position: "absolute",
+                  left: xPx,
+                  top,
+                  width: wPx,
+                  height: 13,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 3,
+                  padding: "0 5px",
+                  borderRadius: 4,
+                  background: chipBackground(d.tagsAll, tagColors, isSelected ? 0.6 : 0.45),
+                  color: "var(--c-text)",
+                  textShadow: "0 1px 2px rgba(0,0,0,0.7)",
+                  border: isSelected
+                    ? "2px solid #ffd166"
+                    : `1px solid ${hexToRgba(firstTagColor ?? d.color, 0.85)}`,
+                  fontSize: 9,
+                  fontWeight: 700,
+                  lineHeight: 1,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  cursor: "grab",
+                  userSelect: "none",
+                  pointerEvents: "auto",
+                }}
+              >
+                {wPx >= 56 && (
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{d.title}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
