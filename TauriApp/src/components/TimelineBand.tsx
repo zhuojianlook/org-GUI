@@ -1430,6 +1430,20 @@ export default function TimelineBand() {
     (railRef.current?.getBoundingClientRect().top ?? 0) +
     (railRef.current?.scrollTop ?? 0);
 
+  // ⊙ Today: recentre a fixed-span window on today (Fit already shows the
+  // whole range) and reset the vertical scroll to the working day — one
+  // click back to "now" from wherever the user has panned/scrolled.
+  const goToToday = () => {
+    if (timelineView.zoom !== "fit") {
+      setTimelineView({ zoom: timelineView.zoom, centerMs: todayMs });
+    }
+    const el = railRef.current;
+    if (el) {
+      const y = yForTimeOfDay("08:00", timeContentH, workHoursMode);
+      el.scrollTop = Math.max(0, y - 96);
+    }
+  };
+
   // Adaptive day-tick density: only draw day labels when there's room.
   // Day gridlines visibility — driven by the 📆 toggle in the header, not
   // by zoom-level heuristics. Labels still gate on having enough width to
@@ -1514,36 +1528,74 @@ export default function TimelineBand() {
             ⚠ sync failed
           </span>
         )}
-        <div style={{ display: "flex", gap: 2, pointerEvents: "auto" }}>
-          {ZOOMS.map((z) => (
-            <button
-              key={z.id}
-              onClick={(e) => {
-                e.stopPropagation();
-                onZoomClick(z.id);
-              }}
-              onPointerDown={(e) => e.stopPropagation()}
-              onDoubleClick={(e) => e.stopPropagation()}
-              title={
-                z.id === "fit"
-                  ? "Fit window to all dates in this file"
-                  : `Show a ${z.label} window`
-              }
-              style={{
-                background: timelineView.zoom === z.id ? "var(--c-accent)" : "transparent",
-                color: timelineView.zoom === z.id ? "#fff" : "var(--c-text-dim)",
-                border: "1px solid var(--c-border)",
-                borderRadius: 4,
-                padding: "1px 7px",
-                fontSize: 10.5,
-                fontWeight: 700,
-                cursor: "pointer",
-                fontFamily: "inherit",
-              }}
-            >
-              {z.label}
-            </button>
-          ))}
+        <div style={{ display: "flex", alignItems: "center", gap: 4, pointerEvents: "auto" }}>
+          {/* Zoom presets as ONE segmented control (they're a single choice,
+              not seven independent toggles) — reads calmer than a row of
+              individually-bordered buttons. */}
+          <div
+            style={{
+              display: "inline-flex",
+              border: "1px solid var(--c-border)",
+              borderRadius: 5,
+              overflow: "hidden",
+            }}
+          >
+            {ZOOMS.map((z, i) => (
+              <button
+                key={z.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onZoomClick(z.id);
+                }}
+                onPointerDown={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+                title={
+                  z.id === "fit"
+                    ? "Fit window to all dates in this file"
+                    : `Show a ${z.label} window`
+                }
+                style={{
+                  background: timelineView.zoom === z.id ? "var(--c-accent)" : "transparent",
+                  color: timelineView.zoom === z.id ? "#fff" : "var(--c-text-dim)",
+                  border: "none",
+                  borderLeft: i > 0 ? "1px solid var(--c-border)" : "none",
+                  padding: "2px 7px",
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                {z.label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              goToToday();
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            title="Jump back to today (recentre the window, scroll to the working day)"
+            style={{
+              background: "transparent",
+              color: "#e0a458",
+              border: "1px solid var(--c-border)",
+              borderRadius: 5,
+              padding: "2px 7px",
+              fontSize: 10.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            ⊙ Today
+          </button>
+          <span
+            aria-hidden
+            style={{ width: 1, alignSelf: "stretch", background: "var(--c-border)", margin: "0 3px" }}
+          />
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -1556,13 +1608,12 @@ export default function TimelineBand() {
               background: showDayTicks ? "var(--c-accent)" : "transparent",
               color: showDayTicks ? "#fff" : "var(--c-text-dim)",
               border: "1px solid var(--c-border)",
-              borderRadius: 4,
-              padding: "1px 7px",
+              borderRadius: 5,
+              padding: "2px 7px",
               fontSize: 10.5,
               fontWeight: 700,
               cursor: "pointer",
               fontFamily: "inherit",
-              marginLeft: 4,
             }}
           >
             📆 Days
@@ -1583,17 +1634,20 @@ export default function TimelineBand() {
               background: workHoursMode ? "var(--c-accent)" : "transparent",
               color: workHoursMode ? "#fff" : "var(--c-text-dim)",
               border: "1px solid var(--c-border)",
-              borderRadius: 4,
-              padding: "1px 7px",
+              borderRadius: 5,
+              padding: "2px 7px",
               fontSize: 10.5,
               fontWeight: 700,
               cursor: "pointer",
               fontFamily: "inherit",
-              marginLeft: 4,
             }}
           >
             💼 {workHoursMode ? "8–20" : "24h"}
           </button>
+          <span
+            aria-hidden
+            style={{ width: 1, alignSelf: "stretch", background: "var(--c-border)", margin: "0 3px" }}
+          />
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -1606,13 +1660,12 @@ export default function TimelineBand() {
               background: showLegend ? "var(--c-accent)" : "transparent",
               color: showLegend ? "#fff" : "var(--c-text-dim)",
               border: "1px solid var(--c-border)",
-              borderRadius: 4,
-              padding: "1px 7px",
+              borderRadius: 5,
+              padding: "2px 7px",
               fontSize: 10.5,
               fontWeight: 700,
               cursor: "pointer",
               fontFamily: "inherit",
-              marginLeft: 4,
             }}
           >
             🔑 Key
@@ -1633,13 +1686,12 @@ export default function TimelineBand() {
               background: scheduleMode ? "#a3be8c" : "transparent",
               color: scheduleMode ? "#1c1c1e" : "var(--c-text-dim)",
               border: scheduleMode ? "1px solid #a3be8c" : "1px solid var(--c-border)",
-              borderRadius: 4,
-              padding: "1px 7px",
+              borderRadius: 5,
+              padding: "2px 7px",
               fontSize: 10.5,
               fontWeight: 700,
               cursor: "pointer",
               fontFamily: "inherit",
-              marginLeft: 4,
             }}
           >
             📅 {scheduleMode ? "Drop on date" : "Schedule"}
@@ -1825,24 +1877,51 @@ export default function TimelineBand() {
         );
       })}
 
-      {/* Day gridlines at narrower zoom levels */}
+      {/* Day gridlines at narrower zoom levels, plus a subtle weekend tint so
+          the week rhythm reads at a glance (the same planning texture a paper
+          planner gets by shading weekends). The tint is skipped when a day is
+          only a few px wide — it would band together into noise. */}
       {days.map((d) => {
         const left = pct(d.getTime());
-        if (left < -2 || left > 102) return null;
-        const isMonday = d.getDay() === 1;
+        const dow = d.getDay();
+        const isMonday = dow === 1;
+        const isWeekend = dow === 0 || dow === 6;
+        // True width of THIS day (next local midnight − this one), so the tint
+        // stays aligned with the gridlines across DST transitions (a 23h/25h
+        // Sunday would otherwise over/under-shoot by ~1h of pixels).
+        const nextMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+        const dayW = ((nextMidnight - d.getTime()) / span) * 100;
+        // Cull on the day's RIGHT edge, not its start: a weekend day whose
+        // midnight is just off-screen left still has most of its tint visible.
+        if (left + dayW < -2 || left > 102) return null;
         return (
-          <div
-            key={`d${d.getTime()}`}
-            style={{
-              position: "absolute",
-              left: `${left}%`,
-              top: 24,
-              bottom: 0,
-              width: 1,
-              background: "var(--c-border)",
-              opacity: isMonday ? 0.45 : 0.18,
-            }}
-          />
+          <div key={`d${d.getTime()}`}>
+            {isWeekend && pxPerDay >= 10 && (
+              <div
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  left: `${left}%`,
+                  width: `${dayW}%`,
+                  top: 24,
+                  bottom: 0,
+                  background: "rgba(148,158,178,0.055)",
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+            <div
+              style={{
+                position: "absolute",
+                left: `${left}%`,
+                top: 24,
+                bottom: 0,
+                width: 1,
+                background: "var(--c-border)",
+                opacity: isMonday ? 0.45 : 0.18,
+              }}
+            />
+          </div>
         );
       })}
 
@@ -2837,7 +2916,13 @@ export default function TimelineBand() {
                       : "scheduled"
                 } near this point${
                   allSameTime ? " @ " + chips[0].timeOfDay : ""
-                } — click to expand`}
+                } — click to expand\n${chips
+                  .slice(0, 6)
+                  .map(
+                    (c) =>
+                      `${c.deadline ? "⚑" : "⏱"}${c.timeOfDay ? " " + c.timeOfDay : ""} ${c.title}`,
+                  )
+                  .join("\n")}${chips.length > 6 ? `\n…and ${chips.length - 6} more` : ""}`}
                 style={{
                   position: "absolute",
                   left: `${left}%`,
@@ -3450,7 +3535,12 @@ export default function TimelineBand() {
                   if (isOpen) setStackPopover(null);
                   else setStackPopover({ key, x: e.clientX, y: e.clientY });
                 }}
-                title={`${g.items.length} all-day ${anyDeadline ? "items (incl. deadlines)" : "items"} — click to expand`}
+                title={`${g.items.length} all-day ${
+                  anyDeadline ? "items (incl. deadlines)" : "items"
+                } — click to expand\n${g.items
+                  .slice(0, 6)
+                  .map((s) => `${s.d.deadline ? "⚑" : "▪"} ${s.d.title}`)
+                  .join("\n")}${g.items.length > 6 ? `\n…and ${g.items.length - 6} more` : ""}`}
                 style={{
                   position: "absolute",
                   left: g.xPx,

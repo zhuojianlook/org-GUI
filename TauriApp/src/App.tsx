@@ -206,6 +206,47 @@ export default function App() {
     };
   }, [file]);
 
+  // Ambient doc refresh — keeps the graph/band/views in sync with the Emacs
+  // buffer even when the embedded editor panel is CLOSED (its own idle-refresh
+  // loop only runs while it is mounted). This is what makes edits from an
+  // external Emacs frame — and files changed on disk, e.g. Dropbox sync from
+  // another machine — appear in the app: the bridge's parse auto-reverts an
+  // unmodified stale buffer before parsing (org-gui--visit), it just needs to
+  // be CALLED. Guards mirror the gcal peek above: never while the user is
+  // typing in the editor (a parse locks the single-threaded daemon and would
+  // freeze the terminal mid-keystroke), never while hidden/unfocused, one at
+  // a time. refreshDoc itself no-ops the state swap when nothing changed.
+  useEffect(() => {
+    if (!file) return;
+    let inflight = false;
+    let focusTimer: number | undefined;
+    const tick = () => {
+      const st = useOrgStore.getState();
+      // Panel open → EmacsTerminal's tighter idle loop already refreshes.
+      if (st.panel === "emacs") return;
+      if (document.hidden || !document.hasFocus()) return;
+      if (emacsTypingWithin(EDITOR_TYPING_QUIET_MS)) return;
+      if (inflight) return;
+      inflight = true;
+      Promise.resolve(st.refreshDoc()).finally(() => {
+        inflight = false;
+      });
+    };
+    const interval = window.setInterval(tick, 20_000);
+    // On returning to the app, refresh promptly (short grace so a
+    // return-and-immediately-type doesn't collide with the parse).
+    const onFocus = () => {
+      if (focusTimer != null) window.clearTimeout(focusTimer);
+      focusTimer = window.setTimeout(tick, 1200);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(interval);
+      if (focusTimer != null) window.clearTimeout(focusTimer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [file]);
+
   const pickFile = async () => {
     if (!IN_TAURI) {
       await loadFile("demo.org");
