@@ -2052,6 +2052,56 @@ export default function TimelineBand() {
           return true;
         };
 
+        // ── Side-by-side columns for OVERLAPPING same-day bars ─────────────
+        // Two meetings at 10:00 on the same day used to render superimposed
+        // (one bar painted through the other) — with a real synced calendar
+        // that's constant. Google-Calendar style fix: within each day, bars
+        // whose time ranges overlap form a cluster and split the day column
+        // evenly. Keyed by nodeDates index; committed geometry (a bar being
+        // drag-previewed renders full-width on top, which reads fine).
+        const sdLayout = new Map<number, { col: number; cols: number }>();
+        {
+          type SdBar = { idx: number; top: number; bot: number; col: number };
+          const byDay = new Map<number, SdBar[]>();
+          for (let ci = 0; ci < nodeDates.length; ci++) {
+            const d = nodeDates[ci];
+            if (!hasDuration(d)) continue;
+            if (d.msEnd != null && d.msEnd > d.ms) continue; // multi-day → staircase/block
+            if (!(d.timeOfDay && d.timeOfDayEnd)) continue;
+            const t1 = yForTimeOfDay(d.timeOfDay, bandH, workHoursMode);
+            const t2 = yForTimeOfDay(d.timeOfDayEnd, bandH, workHoursMode);
+            const top = Math.min(t1, t2);
+            const entry: SdBar = { idx: ci, top, bot: top + Math.max(24, Math.abs(t2 - t1)), col: 0 };
+            const arr = byDay.get(d.ms);
+            if (arr) arr.push(entry);
+            else byDay.set(d.ms, [entry]);
+          }
+          for (const arr of byDay.values()) {
+            arr.sort((a, b) => a.top - b.top || a.bot - b.bot);
+            let i0 = 0;
+            while (i0 < arr.length) {
+              // Grow the overlap cluster while the next bar starts before the
+              // cluster's running bottom.
+              let end = arr[i0].bot;
+              let i1 = i0 + 1;
+              while (i1 < arr.length && arr[i1].top < end - 1) {
+                end = Math.max(end, arr[i1].bot);
+                i1++;
+              }
+              const cluster = arr.slice(i0, i1);
+              const colEnds: number[] = [];
+              for (const b of cluster) {
+                let col = 0;
+                while (col < colEnds.length && b.top < colEnds[col] - 1) col++;
+                b.col = col;
+                colEnds[col] = b.bot;
+              }
+              for (const b of cluster) sdLayout.set(b.idx, { col: b.col, cols: colEnds.length });
+              i0 = i1;
+            }
+          }
+        }
+
         for (let i = 0; i < nodeDates.length; i++) {
           const d = nodeDates[i];
           if (!hasDuration(d)) continue;
@@ -2334,11 +2384,28 @@ export default function TimelineBand() {
             // Bar width tracks the day column. The old hard 40 px floor meant
             // that at zoomed-out widths (Fit ≈ 10–15 px/day) every bar covered
             // 3+ day columns and neighbouring bars stacked into a solid wall.
-            const w =
+            const wFull =
               pxPerDay >= 46
                 ? Math.min(170, pxPerDay - 6)
                 : Math.max(10, Math.min(40, Math.round(pxPerDay * 0.9)));
-            const showBarText = w >= 34;
+            // Overlap cluster → split the day column side-by-side. The bar
+            // being drag-previewed opts out (full width, on top, follows the
+            // cursor). The cluster must NEVER escape its day column: a floor
+            // that widens past wFull would spill split bars over the next
+            // day — recreating the 0.2.133 "wall" AND making a drag on the
+            // spilled pixels reschedule to the wrong day (onBarDown derives
+            // the date from the raw cursor X). So: proportional 3px floor,
+            // and xShift hard-clamped so col*(w+1)+w stays inside wFull even
+            // for 4+ column clusters (trailing columns then overlap their
+            // left sibling instead of invading the neighbouring day).
+            const lay = prev ? { col: 0, cols: 1 } : (sdLayout.get(i) ?? { col: 0, cols: 1 });
+            const w = lay.cols > 1 ? Math.max(3, Math.floor(wFull / lay.cols) - 1) : wFull;
+            const xShift = lay.cols > 1 ? Math.min(lay.col * (w + 1), Math.max(0, wFull - w)) : 0;
+            // In-bar text only when it can say something useful ("10:00 Meet…"
+            // needs ~64px). Below that the collision-aware flowing label (or
+            // the tooltip) carries the words — a 34-60px bar showing "La…" was
+            // just noise.
+            const showBarText = w >= 64;
             // Keep ALL text INSIDE the bar (ellipsis-clipped) so a title can
             // never spill into the neighbouring day column — the full title +
             // range stays available via the hover tooltip. The time range gets
@@ -2352,7 +2419,7 @@ export default function TimelineBand() {
                 title={`${d.title}\n${rangeLabel} (duration — drag to move, edges to resize)`}
                 style={{
                   position: "absolute",
-                  left: `${left}%`,
+                  left: xShift ? `calc(${left}% + ${xShift}px)` : `${left}%`,
                   top,
                   height,
                   width: w,
@@ -2388,6 +2455,10 @@ export default function TimelineBand() {
                       textShadow: "0 1px 2px rgba(0,0,0,0.55)",
                     }}
                   >
+                    {/* Short bar = one line only → lead with the time so the
+                        line reads "10:00 Meeting…". Tall bars keep the time on
+                        its own second line below. */}
+                    {!tallEnough && effStartTime ? `${effStartTime} ` : ""}
                     {d.title}
                   </span>
                 )}
@@ -2420,7 +2491,11 @@ export default function TimelineBand() {
             // right is actually free (labelFits checks other bars, timed
             // chips and staircase columns) so labels never pile onto
             // neighbouring events. Tooltip still carries the full details.
-            if (!showBarText && pxPerDay >= 14 && !prev) {
+            // No label for a split (overlapping) bar — its sibling occupies
+            // the very zone the label would use; the cluster stays hover-
+            // discoverable. Also skip bars scrolled off the left edge: their
+            // labels would poke in from the rail edge as orphaned fragments.
+            if (!showBarText && pxPerDay >= 14 && !prev && lay.cols === 1 && left >= 0) {
               const labelText = `${effStartTime ?? ""} ${d.title}`.trim();
               const labelPx = Math.min(150, 10 + labelText.length * 5.8);
               if (labelFits(i, effStartDay, top, w + labelPx)) {
