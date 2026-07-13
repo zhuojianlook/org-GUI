@@ -294,6 +294,9 @@ export default function TimelineBand() {
   }, []);
   const dragId = useRef<string | null>(null);
   const panRef = useRef<{ startX: number; startCenterMs: number } | null>(null);
+  // Live mirror of laneMode (declared much further down, next to pxPerDay) for
+  // effect-registered handlers whose closures would otherwise go stale.
+  const laneModeRef = useRef(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   // User-controllable visibility of the day-cell gridlines. ON by default so
@@ -315,20 +318,8 @@ export default function TimelineBand() {
       localStorage.setItem("org-gui:workHours", workHoursMode ? "1" : "0");
     } catch {}
   }, [workHoursMode]);
-  // Start the band's vertical scroll at the working day (~08:00), not 00:00.
-  // The time content is much taller than the visible band, and with scrollTop
-  // left at 0 the default view showed the 00:00–06:00 dead zone — i.e. an
-  // empty-looking band with every real entry below the fold. (This effect must
-  // sit AFTER the workHoursMode declaration above: its dependency array is
-  // evaluated during render, and reading the const before its declaration is a
-  // TDZ ReferenceError + TS2448.)
-  useEffect(() => {
-    const el = railRef.current;
-    if (!el) return;
-    const h = timeContentHeight(workHoursMode);
-    const y = yForTimeOfDay("08:00", h, workHoursMode);
-    el.scrollTop = Math.max(0, y - 96);
-  }, [workHoursMode]);
+  // (The scroll-to-working-day effect lives further down, after laneMode is
+  // declared — its dependency array must not read consts before declaration.)
   // Live wall-clock tick used by the TODAY marker so the vertical line
   // advances through the day (and its label reads HH:MM:SS). One-second
   // cadence is fine — the marker only moves a fraction of a pixel per
@@ -750,7 +741,9 @@ export default function TimelineBand() {
       }
       const node = doc?.nodes.find((n) => n.id === nodeId);
       const dt = dateAtClientX(x);
-      const time = timeAtRailY(contentY(y), timeContentH, workHoursMode);
+      // Lane mode's y-axis is a packing artifact, not a time — schedule
+      // date-only there (refine the time at 1W/2W or in the Calendar view).
+      const time = laneModeRef.current ? "" : timeAtRailY(contentY(y), timeContentH, workHoursMode);
       setChipGhost({
         nodeId,
         deadline: false,
@@ -758,7 +751,7 @@ export default function TimelineBand() {
         color: "#a3be8c",
         x,
         y,
-        iso: `${isoOf(dt)} ${time}`,
+        iso: time ? `${isoOf(dt)} ${time}` : isoOf(dt),
         time,
       });
     };
@@ -770,8 +763,8 @@ export default function TimelineBand() {
       const node = doc?.nodes.find((n) => n.id === nodeId);
       if (!node) return;
       const dt = dateAtClientX(x);
-      const time = timeAtRailY(contentY(y), timeContentH, workHoursMode);
-      const dateStr = `${isoOf(dt)} ${time}`;
+      const time = laneModeRef.current ? "" : timeAtRailY(contentY(y), timeContentH, workHoursMode);
+      const dateStr = time ? `${isoOf(dt)} ${time}` : isoOf(dt);
       // Calendar events pass their pre-move position so the event is MOVED on
       // Google (the old code called scheduleNode, which never reached Google);
       // unlinked tasks pass null and get the timeline-vs-calendar prompt.
@@ -953,9 +946,10 @@ export default function TimelineBand() {
           baseTime = timeOfDayFromIso(isoNow);
         }
         const allDay = baseTime === null;
-        // ArrowUp/Down changes the TIME — meaningless for an all-day entry;
-        // ignore it rather than invent a time.
-        if (allDay && dminutes !== 0) return cur;
+        // ArrowUp/Down changes the TIME — meaningless for an all-day entry,
+        // and invisible (silently committed!) in lane mode where y doesn't
+        // encode time. Ignore it in both cases.
+        if ((allDay || laneModeRef.current) && dminutes !== 0) return cur;
         const nd = new Date(baseMs);
         nd.setHours(0, 0, 0, 0);
         nd.setDate(nd.getDate() + ddate);
@@ -1103,6 +1097,11 @@ export default function TimelineBand() {
       else return;
       e.preventDefault();
       heldSpanKeys.current.add(e.key);
+      // Lane mode has no time axis — a ±15 min shift would render NO visible
+      // preview (lane chips don't consume spanPreview) and then silently
+      // commit an org rewrite / Google Calendar move 800 ms later. Same guard
+      // as the point-chip nudge; ← → date shifts stay (the chip visibly moves).
+      if (laneModeRef.current && dminutes !== 0) return;
       // Shift BOTH endpoints by the same calendar delta (date math handles DST
       // cleanly vs raw ms). Base from the live preview if present, else the
       // committed span.
@@ -1165,7 +1164,16 @@ export default function TimelineBand() {
     e: React.PointerEvent,
     // allDay: the chip has no time-of-day (it lives in the all-day strip) —
     // dragging it moves the DATE only, without stamping a time onto it.
-    info: { nodeId: string; deadline: boolean; title: string; color: string; allDay?: boolean },
+    // fixedTime: the chip HAS a time but the current layout's y-axis doesn't
+    // encode time (lane mode) — dragging moves the DATE and keeps this time.
+    info: {
+      nodeId: string;
+      deadline: boolean;
+      title: string;
+      color: string;
+      allDay?: boolean;
+      fixedTime?: string;
+    },
   ) => {
     e.stopPropagation();
     const startX = e.clientX;
@@ -1179,7 +1187,9 @@ export default function TimelineBand() {
       const r = railRef.current?.getBoundingClientRect();
       if (!r) return;
       const dt = dateAtClientX(ev.clientX);
-      const time = info.allDay ? "" : timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode);
+      const time = info.allDay
+        ? ""
+        : (info.fixedTime ?? timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode));
       setChipGhost({
         ...info,
         x: ev.clientX,
@@ -1209,7 +1219,7 @@ export default function TimelineBand() {
       const dt = dateAtClientX(ev.clientX);
       const dateStr = info.allDay
         ? isoOf(dt)
-        : `${isoOf(dt)} ${timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode)}`;
+        : `${isoOf(dt)} ${info.fixedTime ?? timeAtRailY(contentY(ev.clientY), timeContentH, workHoursMode)}`;
       void commitPointMove(node, dateStr, info.deadline ? "deadline" : "scheduled");
     };
     window.addEventListener("pointermove", move);
@@ -1419,10 +1429,95 @@ export default function TimelineBand() {
     return (railWidth / span) * MS_DAY;
   }, [span, railWidth]);
 
-  // Height of the (vertically-scrollable) TIME content. Taller than the visible
-  // band so each event gets real vertical room; the rail scrolls to reach the
-  // rest. All time-positioned elements use this as their "band height".
-  const timeContentH = timeContentHeight(workHoursMode);
+  // ── LANE MODE (zoomed out) ─────────────────────────────────────────────
+  // Below ~46px/day a day column is narrower than any readable word, so NO
+  // labelling scheme can work inside time-of-day geometry — the industry
+  // answer (Google/Outlook month views, vis-timeline) is to stop drawing
+  // time-proportional blocks and switch to TEXT-FIRST chips whose rectangle
+  // includes the label, stacked into non-overlapping lanes (y becomes a
+  // packing artifact, x stays the date). Every event is identifiable at
+  // every zoom, by construction. 1W/2W (>=46px/day) keep the classic
+  // y = time-of-day layout, where text fits the geometry.
+  const laneMode = pxPerDay > 0 && pxPerDay < 46;
+  // Handlers registered inside effects (graph-node drop, arrow-key nudge)
+  // outlive the render that created them — they read the CURRENT mode
+  // through this ref instead of a possibly-stale closure value.
+  laneModeRef.current = laneMode;
+  const LANE_CHIP_H = 17;
+  const LANE_GAP = 3;
+  const laneLayout = useMemo(() => {
+    type ND = (typeof nodeDates)[number];
+    const out: {
+      d: ND;
+      idx: number;
+      xPx: number;
+      chipW: number;
+      lane: number;
+      text: string;
+      spanDays: number;
+      // ANY duration — a same-day 10:00–11:30 range OR a multi-day span. Such
+      // items must never drag through commitPointMove: it rewrites the range
+      // to a single point and silently destroys the end time.
+      isSpan: boolean;
+    }[] = [];
+    if (!laneMode || !railWidth) return { items: out, laneCount: 0 };
+    const xOf = (ms: number) => ((ms - startMs) / span) * railWidth;
+    for (let i = 0; i < nodeDates.length; i++) {
+      const d = nodeDates[i];
+      const isMultiDay = d.msEnd != null && d.msEnd > d.ms;
+      // All-day items (single dates, date-only deadlines, all-day spans) stay
+      // in the pinned strip; the lanes carry everything TIMED.
+      if (!d.timeOfDay) continue;
+      const xPx = xOf(d.ms);
+      const spanDays = isMultiDay ? Math.round(((d.msEnd as number) - d.ms) / MS_DAY) + 1 : 1;
+      const geomW = spanDays * pxPerDay;
+      const text = `${d.timeOfDay} ${d.title}`;
+      const chipW = Math.max(geomW, Math.min(160, 22 + text.length * 5.8));
+      // NO viewport cull here: the packing input must be the FULL timed set,
+      // or panning (which slides chips through the cull edges) reshuffles the
+      // greedy lane assignment every frame and rows visibly hop. The full-set
+      // assignment is pan-invariant; off-screen chips are culled at render.
+      const isSpan =
+        isMultiDay || !!(d.timeOfDay && d.timeOfDayEnd && d.timeOfDayEnd > d.timeOfDay);
+      out.push({ d, idx: i, xPx, chipW, lane: 0, text, spanDays, isSpan });
+    }
+    // Greedy first-fit lane packing on the full chip rectangle (label
+    // included) — the vis-timeline guarantee: no chip ever overlaps another.
+    out.sort((a, b) => a.xPx - b.xPx || a.d.ms - b.d.ms);
+    const laneEnds: number[] = [];
+    for (const it of out) {
+      let lane = 0;
+      while (lane < laneEnds.length && it.xPx < laneEnds[lane] + 4) lane++;
+      it.lane = lane;
+      laneEnds[lane] = Math.max(laneEnds[lane] ?? -Infinity, it.xPx + it.chipW);
+    }
+    return { items: out, laneCount: laneEnds.length };
+  }, [laneMode, nodeDates, startMs, span, railWidth, pxPerDay]);
+
+  // Lane origin: clear the pinned ALL-DAY strip overlay (root y 26..26+stripH)
+  // so the first lanes aren't hidden underneath it at the default scroll.
+  const laneTop = Math.max(TIME_TOP_PX, 32 + stripLayout.stripH);
+  // Height of the (vertically-scrollable) content. In time mode it's the tall
+  // time-of-day canvas; in lane mode it grows with the lane count (the rail
+  // scrolls when lanes exceed the visible band).
+  const timeContentH = laneMode
+    ? Math.max(220, laneTop + laneLayout.laneCount * (LANE_CHIP_H + LANE_GAP) + TIME_BOTTOM_OFFSET)
+    : timeContentHeight(workHoursMode);
+
+  // Start the vertical scroll at the working day (~08:00) in TIME mode — with
+  // scrollTop left at 0 the default view showed the 00:00–06:00 dead zone. In
+  // lane mode the lanes start at the top, so scroll home instead.
+  useEffect(() => {
+    const el = railRef.current;
+    if (!el) return;
+    if (laneMode) {
+      el.scrollTop = 0;
+      return;
+    }
+    const h = timeContentHeight(workHoursMode);
+    const y = yForTimeOfDay("08:00", h, workHoursMode);
+    el.scrollTop = Math.max(0, y - 96);
+  }, [workHoursMode, laneMode]);
   // Convert a viewport clientY into a Y inside the scrollable time content
   // (accounts for the current vertical scroll offset).
   const contentY = (clientY: number): number =>
@@ -1841,8 +1936,10 @@ export default function TimelineBand() {
           const node = doc?.nodes.find((n) => n.id === nodeId);
           if (!node) return;
           const dt = dateAtClientX(e.clientX);
-          const time = timeAtRailY(contentY(e.clientY), timeContentH, workHoursMode);
-          const dateStr = `${isoOf(dt)} ${time}`;
+          // Lane mode has no time axis — schedule date-only there.
+          const dateStr = laneMode
+            ? isoOf(dt)
+            : `${isoOf(dt)} ${timeAtRailY(contentY(e.clientY), timeContentH, workHoursMode)}`;
           Promise.resolve(scheduleNode(node, dateStr, "scheduled")).catch(() => {});
           setScheduleDragNode(null);
           setScheduleMode(false);
@@ -1932,8 +2029,9 @@ export default function TimelineBand() {
 
       {/* Horizontal time gridlines spanning the chip-zone. In 24h mode we
           mark every 3 hours; in working-hours mode we mark every hour from
-          08:00 to 20:00 so the denser visible window stays readable. */}
-      {(() => {
+          08:00 to 20:00 so the denser visible window stays readable.
+          Hidden in lane mode — y is a packing artifact there, not a time. */}
+      {!laneMode && (() => {
         const bandH = timeContentH;
         const usable = Math.max(40, bandH - TIME_TOP_PX - TIME_BOTTOM_OFFSET);
         const hours = workHoursMode
@@ -2105,6 +2203,10 @@ export default function TimelineBand() {
         for (let i = 0; i < nodeDates.length; i++) {
           const d = nodeDates[i];
           if (!hasDuration(d)) continue;
+          // Lane mode replaces every TIMED geometry (same-day bars, timed
+          // staircases) with labelled lane chips; only the all-day multi-day
+          // block wash keeps rendering here (its title lives in the strip).
+          if (laneMode && !(d.msEnd != null && d.msEnd > d.ms && !(d.timeOfDay && d.timeOfDayEnd))) continue;
 
           // Effective span geometry: follow the optimistic preview while a
           // shift/resize gesture is live, else the committed doc values.
@@ -2535,6 +2637,140 @@ export default function TimelineBand() {
         return out;
       })()}
 
+      {/* ── LANE CHIPS (zoomed-out, text-first) ─────────────────────────────
+          The research-backed answer to "many events are just blocks with no
+          text": below ~46px/day, every TIMED event renders as a labelled chip
+          ("HH:MM Title") whose rectangle INCLUDES the label, greedily packed
+          into non-overlapping lanes — vis-timeline's guarantee. x = start
+          date; y = packing artifact; a thin underline shows a multi-day
+          event's true span when the label is wider than its duration. */}
+      {laneMode &&
+        laneLayout.items.map((it) => {
+          // Render-time viewport cull (packing above is full-set on purpose).
+          if (it.xPx + it.chipW < -40 || it.xPx > (railWidth || 0) + 40) return null;
+          const d = it.d;
+          // isSpan covers BOTH multi-day spans and same-day timed ranges — any
+          // item whose end would be destroyed by a point-move.
+          const isMulti = it.isSpan;
+          const isSelChip =
+            !isMulti &&
+            timelineSelectedChip != null &&
+            timelineSelectedChip.nodeId === d.nodeId &&
+            timelineSelectedChip.isDeadline === d.deadline;
+          const isSelSpan = isMulti && selectedSpanId === d.nodeId;
+          const isSelected = isSelChip || isSelSpan;
+          const nudge =
+            !isMulti &&
+            pendingNudge != null &&
+            pendingNudge.nodeId === d.nodeId &&
+            pendingNudge.isDeadline === d.deadline
+              ? pendingNudge
+              : null;
+          const xEff = nudge ? it.xPx + ((nudge.ms - d.ms) / MS_DAY) * pxPerDay : it.xPx;
+          const y = laneTop + it.lane * (LANE_CHIP_H + LANE_GAP);
+          const isOverdue = d.deadline && d.ms <= todayMs;
+          const geomW = it.spanDays * pxPerDay;
+          const firstTagColor = d.tagsAll.map((t) => tagColors[t]).find(Boolean);
+          return (
+            <button
+              key={`lane-${it.idx}`}
+              className={isOverdue ? "deadline-flash" : undefined}
+              data-pin
+              onPointerDown={(e) => {
+                if (isMulti) {
+                  // A drag through onChipDown would rewrite the SPAN into a
+                  // single point — spans are click-to-select here; move them
+                  // at 1W/2W or in the Calendar/Timeline views.
+                  e.stopPropagation();
+                  return;
+                }
+                onChipDown(e, {
+                  nodeId: d.nodeId,
+                  deadline: d.deadline,
+                  title: d.title,
+                  color: d.color,
+                  fixedTime: d.timeOfDay ?? undefined,
+                });
+              }}
+              onClick={
+                isMulti
+                  ? (e) => {
+                      e.stopPropagation();
+                      setSelectedSpanId(d.nodeId);
+                      setTimelineSelectedChip(null);
+                      window.dispatchEvent(
+                        new CustomEvent("orggui:focusNode", { detail: { id: d.nodeId } }),
+                      );
+                    }
+                  : undefined
+              }
+              title={`${d.deadline ? "⚑ Deadline" : "⏱ Scheduled"}: ${d.title}\n${d.iso}${
+                d.timeOfDayEnd ? " → " + d.timeOfDayEnd : ""
+              }${
+                isMulti
+                  ? `\n(${it.spanDays > 1 ? `${it.spanDays}-day event` : "timed range"} — click to select; drag at 1W/2W)`
+                  : "\nClick to select (← → nudge the date), drag to move it to another day"
+              }`}
+              style={{
+                position: "absolute",
+                left: xEff,
+                top: y,
+                width: it.chipW,
+                height: LANE_CHIP_H,
+                display: "flex",
+                alignItems: "center",
+                gap: 3,
+                padding: "0 5px",
+                borderRadius: 4,
+                background: chipBackground(d.tagsAll, tagColors, isSelected ? 0.62 : 0.5),
+                color: "var(--c-text)",
+                textShadow: "0 1px 2px rgba(0,0,0,0.7)",
+                border: isSelected
+                  ? "2px solid #ffd166"
+                  : d.deadline
+                    ? "1px solid rgba(255,108,107,0.85)"
+                    : "1px solid rgba(0,0,0,0.3)",
+                fontSize: 9.5,
+                fontWeight: 700,
+                lineHeight: 1,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                cursor: isMulti ? "pointer" : "grab",
+                userSelect: "none",
+                zIndex: 3,
+              }}
+            >
+              <span aria-hidden style={{ fontSize: 9, flexShrink: 0 }}>
+                {d.deadline ? "⚑" : "⏱"}
+              </span>
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {it.text}
+              </span>
+              {/* True duration underline when the label out-spans the days */}
+              {isMulti && it.chipW > geomW + 2 && (
+                <span
+                  aria-hidden
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    bottom: 0,
+                    width: geomW,
+                    height: 2,
+                    background: hexToRgba(firstTagColor ?? d.color, 0.95),
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
+            </button>
+          );
+        })}
+
       {/* Google-calendar "ghosts": where Google still has an event the user
           moved locally. A faded marker sits at the original spot with a dashed
           line to the new position; the floating "Sync calendar" button (top
@@ -2557,7 +2793,11 @@ export default function TimelineBand() {
           const gEndTime = g.hasEndTime && g.endMs != null ? hhmmOf(g.endMs) : null;
           const gx = xPx(g.startMs);
           const cx = xPx(curStart.getTime());
-          const cy = yForTimeOfDay(curTime ?? "12:00", bandH, workHoursMode);
+          // Lane mode has no time axis — pin ghosts to a fixed row under the
+          // toolbar instead of a (meaningless) time-derived y.
+          const cy = laneMode
+            ? laneTop + 8
+            : yForTimeOfDay(curTime ?? "12:00", bandH, workHoursMode);
           // Faded "ghost" geometry mirrors the original event: a vertical bar
           // for a same-day timed event, a small chip otherwise.
           const sameDayTimed =
@@ -2573,7 +2813,10 @@ export default function TimelineBand() {
               : Math.max(10, Math.min(36, Math.round(pxPerDay * 0.9)));
           let ghostTop: number;
           let ghostH: number;
-          if (sameDayTimed) {
+          if (laneMode) {
+            ghostTop = laneTop;
+            ghostH = 16;
+          } else if (sameDayTimed) {
             const t1 = yForTimeOfDay(gStartTime as string, bandH, workHoursMode);
             const t2 = yForTimeOfDay(gEndTime as string, bandH, workHoursMode);
             ghostTop = Math.min(t1, t2);
@@ -2691,6 +2934,10 @@ export default function TimelineBand() {
           title + time) when the day cell is wide, compact (icon + time)
           mid-range, dot (icon only) when narrow. */}
       {(() => {
+        // Lane mode renders every timed event as a labelled lane chip in its
+        // own layer — the y-positioned point chips (and their dot/cluster
+        // machinery) only apply to the time-of-day layout.
+        if (laneMode) return null;
         const railWidthPx = railWidth || railRef.current?.getBoundingClientRect().width || 800;
         const bandH = timeContentH;
         const CLUSTER_X_PX = 22; // ~one chip width on a typical 1Y zoom
