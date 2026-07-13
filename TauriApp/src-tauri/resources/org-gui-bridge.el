@@ -14,7 +14,7 @@
 ;; Diagnostics only — surfaced in the parse payload so the UI can show which
 ;; bridge the daemon has. NO LONGER the reload gate (see
 ;; `org-gui-bridge--loaded-token'); editing this value does not affect reloads.
-(defconst org-gui-bridge-version "0.2.135")
+(defconst org-gui-bridge-version "0.2.136")
 
 ;; The app (Rust `org_call') writes this to a content-token of the bridge file
 ;; right after `load-file', then gates reloads on it: it reloads only when the
@@ -1284,8 +1284,16 @@ is available (installed + required), nil otherwise. Points org-gcal's
 OAuth token store at an app-scoped plstore so authorisation persists and
 never collides with the user's own org-gcal setup."
   (ignore-errors
+    ;; Load package.el BEFORE let-binding package-user-dir. This file is
+    ;; lexical-binding, so on a fresh daemon (package.el not yet loaded)
+    ;; binding the not-yet-declared defcustom would create a LEXICAL var and
+    ;; the require would die with "Defining as dynamic an already lexical
+    ;; var" (Emacs 30) — swallowed by the ignore-errors above, making
+    ;; org-gcal look permanently uninstalled. With package.el loaded first,
+    ;; the let is a proper dynamic binding and still keeps the daemon's
+    ;; global package-user-dir untouched.
+    (require 'package)
     (let ((package-user-dir org-gui--gcal-dir))
-      (require 'package)
       (package-initialize)
       (when (require 'org-gcal nil t)
         (require 'oauth2-auto nil t)

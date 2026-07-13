@@ -948,11 +948,19 @@ fn path_exists(path: String) -> bool {
 #[tauri::command]
 async fn gcal_install() -> Result<String, String> {
     let emacs = emacs_bin();
-    let elisp = r#"(let ((package-user-dir (expand-file-name "~/.org-gui/elpa"))
-        (package-archives '(("gnu" . "https://elpa.gnu.org/packages/")
-                            ("nongnu" . "https://elpa.nongnu.org/nongnu/")
-                            ("melpa" . "https://melpa.org/packages/"))))
+    // `require' MUST come before touching package-user-dir/package-archives:
+    // under Emacs 30 the --eval form is read with lexical binding, so
+    // let-binding those not-yet-declared defcustoms creates LEXICAL vars and
+    // loading package.el then dies with "Defining as dynamic an already
+    // lexical var" before any network I/O — the install button silently
+    // failed on Emacs 30 (cask emacs-app 30.2). setq is safe here: this is a
+    // throwaway --batch process, nothing to restore.
+    let elisp = r#"(progn
     (require 'package)
+    (setq package-user-dir (expand-file-name "~/.org-gui/elpa")
+          package-archives '(("gnu" . "https://elpa.gnu.org/packages/")
+                             ("nongnu" . "https://elpa.nongnu.org/nongnu/")
+                             ("melpa" . "https://melpa.org/packages/")))
     (package-initialize)
     (unless (package-installed-p 'org-gcal)
       (package-refresh-contents)
