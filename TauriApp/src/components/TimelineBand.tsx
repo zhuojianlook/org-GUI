@@ -1449,6 +1449,9 @@ export default function TimelineBand() {
   // by zoom-level heuristics. Labels still gate on having enough width to
   // avoid overlapping each other.
   const showDayLabels = showDayTicks && pxPerDay >= 26;
+  // Narrow-band header: drop button text down to icons (tooltips keep the
+  // words) so the control row never overflows off the right edge.
+  const compactHeader = railWidth > 0 && railWidth < 660;
   const months = monthStarts(startMs, endMs);
   const days = showDayTicks ? dayStarts(startMs, endMs) : [];
 
@@ -1480,9 +1483,11 @@ export default function TimelineBand() {
           zIndex: 5,
         }}
       >
-        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--c-text-dim)" }}>
-          Deadlines &amp; Milestones
-        </span>
+        {!compactHeader && (
+          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--c-text-dim)", whiteSpace: "nowrap" }}>
+            Deadlines &amp; Milestones
+          </span>
+        )}
         {/* Pending Google-calendar moves → one-click push. Appears only while
             there are unsynced local moves (ghosts on the band). */}
         {Object.keys(gcalGhosts).length > 0 && (
@@ -1616,7 +1621,7 @@ export default function TimelineBand() {
               fontFamily: "inherit",
             }}
           >
-            📆 Days
+            📆{compactHeader ? "" : " Days"}
           </button>
           <button
             onClick={(e) => {
@@ -1668,7 +1673,7 @@ export default function TimelineBand() {
               fontFamily: "inherit",
             }}
           >
-            🔑 Key
+            🔑{compactHeader ? "" : " Key"}
           </button>
           <button
             onClick={(e) => {
@@ -1694,7 +1699,7 @@ export default function TimelineBand() {
               fontFamily: "inherit",
             }}
           >
-            📅 {scheduleMode ? "Drop on date" : "Schedule"}
+            📅{scheduleMode ? " Drop on date" : compactHeader ? "" : " Schedule"}
           </button>
         </div>
       </div>
@@ -1989,6 +1994,64 @@ export default function TimelineBand() {
       {(() => {
         const bandH = timeContentH;
         const out: React.ReactNode[] = [];
+
+        // ── Collision map for the flowing labels below ────────────────────
+        // A narrow same-day bar (typical Google-Calendar import at ≤1M zoom)
+        // can't carry its own text; the readable fix is a label floated to
+        // its RIGHT — but only when that space is actually empty, or we'd
+        // recreate the old "labels smeared across neighbouring events" soup.
+        // Collect every occupant's (day, y-range): other same-day bars, timed
+        // point chips, and each day column of a multi-day timed staircase.
+        // idx = position in nodeDates (identity, so a bar can skip ITSELF
+        // without also exempting same-day siblings); idx -1 = an already
+        // PLACED label, pushed after rendering — the only occupant that can
+        // collide with a label in its own day column. Net behaviour for
+        // back-to-back same-day meetings: first label wins, the second falls
+        // back to its tooltip instead of painting on top of the first.
+        const colliders: { idx: number; dayMs: number; top: number; bot: number }[] = [];
+        const staircaseDays = new Set<number>();
+        for (let ci = 0; ci < nodeDates.length; ci++) {
+          const d = nodeDates[ci];
+          const isSpan = d.msEnd != null && d.msEnd > d.ms;
+          if (isSpan) {
+            if (d.timeOfDay && d.timeOfDayEnd) {
+              const nDays = Math.round(((d.msEnd as number) - d.ms) / MS_DAY) + 1;
+              for (let k = 0; k < Math.min(nDays, 90); k++) staircaseDays.add(d.ms + k * MS_DAY);
+            }
+            continue; // all-day spans live in the strip; their wash is fine under labels
+          }
+          if (!d.timeOfDay) continue; // date-only → all-day strip
+          if (d.timeOfDayEnd && d.timeOfDayEnd > d.timeOfDay) {
+            const t1 = yForTimeOfDay(d.timeOfDay, bandH, workHoursMode);
+            const t2 = yForTimeOfDay(d.timeOfDayEnd, bandH, workHoursMode);
+            const top = Math.min(t1, t2);
+            colliders.push({ idx: ci, dayMs: d.ms, top, bot: top + Math.max(24, Math.abs(t2 - t1)) });
+          } else {
+            const y = yForTimeOfDay(d.timeOfDay, bandH, workHoursMode);
+            colliders.push({ idx: ci, dayMs: d.ms, top: y - 9, bot: y + 9 });
+          }
+        }
+        // True when the horizontal strip [top..top+14] to the right of DAY is
+        // free for a labelPx-wide label. Bars/chips in the bar's OWN column
+        // (idx >= 0, same day) sit LEFT of the label zone and are ignored;
+        // a same-day PLACED label (idx -1) occupies exactly that zone and
+        // blocks. Strictly-earlier days can never reach a right-flowing label.
+        const labelFits = (selfIdx: number, dayMs: number, top: number, labelPx: number): boolean => {
+          if (pxPerDay <= 0) return false;
+          const reachDays = Math.ceil((labelPx + 8) / pxPerDay);
+          for (let k = 1; k <= reachDays; k++) {
+            if (staircaseDays.has(dayMs + k * MS_DAY)) return false;
+          }
+          for (const c of colliders) {
+            if (c.idx === selfIdx) continue;
+            if (c.idx >= 0 && c.dayMs === dayMs) continue;
+            if (c.dayMs < dayMs) continue;
+            if (c.dayMs - dayMs > reachDays * MS_DAY) continue;
+            if (c.bot >= top - 2 && c.top <= top + 16) return false;
+          }
+          return true;
+        };
+
         for (let i = 0; i < nodeDates.length; i++) {
           const d = nodeDates[i];
           if (!hasDuration(d)) continue;
@@ -2351,6 +2414,47 @@ export default function TimelineBand() {
                 {resizable && gripEl("endTime", "bottom")}
               </button>,
             );
+            // Narrow bar (typical calendar import at ≤1M zoom) → the bar
+            // itself is an anonymous sliver. Float "HH:MM Title" beside it,
+            // Google-Calendar-month style, but ONLY when the space to the
+            // right is actually free (labelFits checks other bars, timed
+            // chips and staircase columns) so labels never pile onto
+            // neighbouring events. Tooltip still carries the full details.
+            if (!showBarText && pxPerDay >= 14 && !prev) {
+              const labelText = `${effStartTime ?? ""} ${d.title}`.trim();
+              const labelPx = Math.min(150, 10 + labelText.length * 5.8);
+              if (labelFits(i, effStartDay, top, w + labelPx)) {
+                // Claim the zone so a same-day sibling's label falls back to
+                // its tooltip instead of painting over this one.
+                colliders.push({ idx: -1, dayMs: effStartDay, top: top - 1, bot: top + 15 });
+                out.push(
+                  <span
+                    key={`durlbl${i}`}
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      left: `calc(${left}% + ${w + 3}px)`,
+                      top: top - 1,
+                      maxWidth: labelPx,
+                      fontSize: 9.5,
+                      fontWeight: 600,
+                      color: "var(--c-text)",
+                      background: "var(--c-bg)",
+                      border: `1px solid ${hexToRgba(firstTagColor ?? d.color, 0.5)}`,
+                      borderRadius: 3,
+                      padding: "0 3px",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      pointerEvents: "none",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {labelText}
+                  </span>,
+                );
+              }
+            }
           }
         }
         return out;

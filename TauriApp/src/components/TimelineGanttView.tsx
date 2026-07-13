@@ -38,7 +38,18 @@ export default function TimelineGanttView() {
   const select = useOrgStore((s) => s.select);
   const selectedId = useOrgStore((s) => s.selectedId);
   const archive = useOrgStore((s) => s.archive);
-  const [zoom, setZoom] = useState<Zoom>("1m");
+  const [zoom, setZoom] = useState<Zoom>(() => {
+    try {
+      const saved = localStorage.getItem("org-gui:ganttZoom");
+      if (saved && ZOOMS.some((z) => z.id === saved)) return saved as Zoom;
+    } catch {}
+    return "1m";
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("org-gui:ganttZoom", zoom);
+    } catch {}
+  }, [zoom]);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -81,6 +92,22 @@ export default function TimelineGanttView() {
   const todayMs = startOfDay(new Date()).getTime();
   const todayX = pxOf(todayMs);
   const showToday = todayX >= 0 && todayX <= trackW;
+
+  // Subtle weekend columns (same planning texture as the band). One repeating
+  // gradient per row track — aligned to the first Saturday — instead of
+  // hundreds of per-day divs.
+  const satOffsetDays = (6 - new Date(rangeStart).getDay() + 7) % 7;
+  const weekendBg: React.CSSProperties =
+    pxPerDay >= 6
+      ? {
+          backgroundImage: `repeating-linear-gradient(90deg, rgba(148,158,178,0.05) 0px, rgba(148,158,178,0.05) ${2 * pxPerDay}px, transparent ${2 * pxPerDay}px, transparent ${7 * pxPerDay}px)`,
+          backgroundPosition: `${satOffsetDays * pxPerDay}px 0`,
+        }
+      : {};
+  const shortDate = (ms: number) => {
+    const d = new Date(ms);
+    return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  };
 
   const goToToday = () => {
     const el = scrollRef.current;
@@ -129,8 +156,15 @@ export default function TimelineGanttView() {
           )}
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title}</span>
           {row.occurrences.length > 1 && <span style={{ color: "var(--c-text-dim)", flexShrink: 0 }}>×{row.occurrences.length}</span>}
+          {/* Right-aligned start date on leaf rows — lets the outline rail be
+              scanned as a dated task list without chasing each bar. */}
+          {!row.isGroup && (
+            <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 9.5, color: "var(--c-text-dim)", fontVariantNumeric: "tabular-nums" }}>
+              {shortDate(row.rollupStart)}
+            </span>
+          )}
         </button>
-        <div style={{ width: trackW, flexShrink: 0, position: "relative" }}>
+        <div style={{ width: trackW, flexShrink: 0, position: "relative", ...weekendBg }}>
           {showToday && <div style={{ position: "absolute", left: todayX, top: 0, bottom: 0, width: 1, background: "rgba(224,164,88,0.4)" }} />}
           {row.isGroup ? (
             // Roll-up: faint dashed span over the group's scheduled descendants.
@@ -155,6 +189,13 @@ export default function TimelineGanttView() {
                 const left = pxOf(it.dayMs);
                 const width = Math.max(MIN_BAR, pxOf(it.endDayMs + DAY_MS) - left);
                 const isSel = it.nodeId === selectedId;
+                // Put the information ON the bar whenever it fits: time-of-day
+                // + ⚑ for deadlines + the title (single rows) or the date
+                // (recurring pills, so each occurrence is identifiable). Bars
+                // too narrow for text fall back to the flowing label below /
+                // the tooltip.
+                const inBarText = width >= 56;
+                const prefix = `${it.kind === "deadline" ? "⚑ " : ""}${it.timeOfDay ? it.timeOfDay + " " : ""}${it.done ? "✓ " : ""}`;
                 return (
                   <button
                     key={it.nodeId}
@@ -163,16 +204,27 @@ export default function TimelineGanttView() {
                       e.preventDefault();
                       void archive(it.node);
                     }}
-                    title={`${it.title} — ${it.kind}${it.timeOfDay ? " @ " + it.timeOfDay : ""}\nClick to select · right-click to archive`}
-                    style={{ position: "absolute", left, width, top: 4, height: ROW_H - 9, background: hexToRgba(it.color, isSel ? 0.9 : 0.62), border: isSel ? "1px solid #ffd166" : `1px solid ${it.color}`, borderRadius: 9, cursor: "pointer", overflow: "hidden", padding: 0, opacity: it.done ? 0.55 : 1 }}
-                  />
+                    title={`${it.kind === "deadline" ? "⚑ Deadline" : it.kind === "scheduled" ? "⏱ Scheduled" : "🗓 Event"}: ${it.title}\n${shortDate(it.dayMs)}${it.endDayMs > it.dayMs ? " → " + shortDate(it.endDayMs) : ""}${it.timeOfDay ? " @ " + it.timeOfDay + (it.timeOfDayEnd ? "–" + it.timeOfDayEnd : "") : ""}${it.done ? " (done)" : ""}\nClick to select · right-click to archive`}
+                    style={{ position: "absolute", left, width, top: 4, height: ROW_H - 9, background: hexToRgba(it.color, isSel ? 0.9 : 0.62), border: isSel ? "1px solid #ffd166" : `1px solid ${it.color}`, borderRadius: 9, cursor: "pointer", overflow: "hidden", padding: inBarText ? "0 7px" : 0, opacity: it.done ? 0.55 : 1, display: "flex", alignItems: "center", justifyContent: "flex-start" }}
+                  >
+                    {inBarText && (
+                      <span style={{ fontSize: 10, fontWeight: 700, color: "var(--c-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textShadow: "0 1px 2px rgba(0,0,0,0.7)", textDecoration: it.done ? "line-through" : "none" }}>
+                        {prefix}
+                        {single ? row.title : shortDate(it.dayMs)}
+                      </span>
+                    )}
+                  </button>
                 );
               })}
-              {single && (
+              {/* Flowing label beside the bar — only when the bar itself was
+                  too narrow to carry the text (kept out of the bar's hit area). */}
+              {single && Math.max(MIN_BAR, pxOf(row.occurrences[0].endDayMs + DAY_MS) - pxOf(row.occurrences[0].dayMs)) < 56 && (
                 <span
-                  style={{ position: "absolute", left: pxOf(row.occurrences[0].dayMs) + 6, top: 6, maxWidth: trackW, fontSize: 10.5, fontWeight: 600, color: "var(--c-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", pointerEvents: "none", textShadow: "0 1px 2px rgba(0,0,0,0.7)", textDecoration: row.occurrences[0].done ? "line-through" : "none" }}
+                  style={{ position: "absolute", left: pxOf(row.occurrences[0].endDayMs + DAY_MS) + 5, top: 6, maxWidth: trackW, fontSize: 10.5, fontWeight: 600, color: "var(--c-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", pointerEvents: "none", textShadow: "0 1px 2px rgba(0,0,0,0.7)", textDecoration: row.occurrences[0].done ? "line-through" : "none" }}
                 >
                   {row.occurrences[0].priority && <span style={{ color: "#ffd166", fontWeight: 800, marginRight: 3 }}>[{row.occurrences[0].priority}]</span>}
+                  {row.occurrences[0].kind === "deadline" ? "⚑ " : ""}
+                  {row.occurrences[0].timeOfDay ? row.occurrences[0].timeOfDay + " " : ""}
                   {row.title}
                 </span>
               )}

@@ -106,12 +106,18 @@ export default function Toolbar() {
   return (
     <div
       style={{
-        height: 40,
+        minHeight: 40,
         flexShrink: 0,
         display: "flex",
         alignItems: "center",
+        // Wrap instead of clip: at narrow window widths the row used to
+        // overflow off-screen, silently amputating every control past the
+        // right edge (Deps/Region/Band/Tags/⚙ became unreachable). Wrapping
+        // grows the bar to a second row and keeps everything clickable.
+        flexWrap: "wrap",
+        rowGap: 2,
         gap: 6,
-        padding: "0 10px",
+        padding: "2px 10px",
         background: "var(--c-surface)",
         borderBottom: "1px solid var(--c-border)",
       }}
@@ -130,6 +136,8 @@ export default function Toolbar() {
           padding: 0,
           cursor: "pointer",
           fontFamily: "inherit",
+          flexShrink: 0,
+          whiteSpace: "nowrap",
         }}
       >
         <span style={{ fontWeight: 700, color: "var(--c-accent)", fontSize: 14 }}>org-GUI</span>
@@ -367,7 +375,9 @@ export default function Toolbar() {
           onPointerDown={(e) => e.stopPropagation()}
           style={{
             position: "fixed",
-            top: 42,
+            // Anchor under the ⚙ button, not a hard-coded 42px — the toolbar
+            // can wrap to two rows at narrow window widths.
+            top: (systemBtnRef.current?.getBoundingClientRect().bottom ?? 40) + 4,
             right: 10,
             minWidth: 260,
             background: "var(--c-surface)",
